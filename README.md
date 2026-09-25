@@ -559,7 +559,7 @@ python3 -m switchyard run path/to/flow.yaml --task "Fix the failing implementati
 python3 -m switchyard run path/to/flow.yaml --task "Fix the failing implementation" --require-terminal accepted --require-terminal skipped
 ```
 
-No installed console script, package publishing or CLI recorder option. From another
+No installed console script or package publishing. OBS-001 below adds opt-in CLI recording. From another
 directory the source package must be importable (for example explicit PYTHONPATH).
 No chdir or executor PATH resolution occurs. FLOW-001 schema is unchanged.
 
@@ -628,3 +628,41 @@ b61f5c6ab6e1cc07822eed6fb2710bbefe5ae4302773503fb973b46b96475cb9  flow_config.py
 Changed only switchyard/__init__.py, switchyard/__main__.py, switchyard/cli.py,
 new tests/test_cli.py and tests/test_cli_process.py, README and FLOW-002 MicroSpec.
 FLOW-003 has not started.
+
+
+## OBS-001 CLI event recording
+
+Record canonical runtime events by explicitly selecting a JSONL file:
+
+```sh
+python3 -m switchyard run path/to/flow.yaml --task "Check the implementation" --events-file events.jsonl
+```
+
+`--events-file PATH` is run-only. Relative paths are relative to the caller's
+working directory, not the flow file or executor workspace. Parent directories
+must already exist; the CLI creates no automatic `.switchyard` directory.
+Without the option, execution and output are unchanged and no recorder is used.
+
+The CLI delegates to the existing `JsonlRecorder`: events append in runtime order,
+including when the file already contains previous runs. Each event is flushed and
+closed; there is no fsync, crash-durability guarantee, retry or partial-log repair.
+A failed write can leave a partial final line. Each run retains its runtime run ID.
+
+`validate` and help never record; `validate --events-file ...` is a usage error
+(exit 2). Invalid flow configuration or required-terminal names are rejected before
+recorder construction. A missing parent or unusable destination fails when the
+runtime first records, before executor invocation. Recording failures use the
+existing `ExecutionError` boundary: exit 3, empty stdout, and only
+`switchyard: runtime execution failed` on stderr. Available history remains on
+disk when a later runtime or recorder failure interrupts a run.
+
+Normal output remains the run ID and terminal, plus required terminals on mismatch.
+A normal terminal mismatch still records the full run and exits 1. Task text,
+diagnostics and event payloads are not printed by the recording option. Canonical
+Event fields, runtime transitions and executor contracts are unchanged. Readers,
+statistics, timing and correlation are outside this slice.
+
+Verification (2026-09-25, macOS arm64, Python 3.14.7, PyYAML 6.0.3):
+16 focused CLI tests passed; full offline suite ran 130 tests, with 129 passing
+and one existing Windows-only skip. No model calls. Runtime, recorder and flow
+configuration code are unchanged.

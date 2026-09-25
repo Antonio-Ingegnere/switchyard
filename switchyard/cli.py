@@ -7,6 +7,7 @@ import sys
 
 from flow_config import FlowConfigError, load_flow
 from runtime import ExecutionError, WorkUnit, run
+from runtime.recording import JsonlRecorder
 
 
 def _safe_display(value: str, limit: int | None = None) -> str:
@@ -29,6 +30,8 @@ def _parser():
     execute.add_argument('flow_file')
     execute.add_argument('--task', required=True)
     execute.add_argument('--require-terminal', action='append', default=[], metavar='NAME')
+    execute.add_argument('--events-file', metavar='PATH',
+                         help='append runtime events as JSONL (parent directory must exist)')
     return parser
 
 
@@ -58,8 +61,9 @@ def main(argv=None) -> int:
         print(prefix + _safe_display(name, 512-len(prefix)), file=sys.stderr, flush=True)
         return 2
     work = WorkUnit(args.task)
+    recording = {} if args.events_file is None else {'recorder': JsonlRecorder(args.events_file)}
     try:
-        result = run(work, loaded.flow, loaded.executors)
+        result = run(work, loaded.flow, loaded.executors, **recording)
     except ExecutionError:
         failed = True
     else:

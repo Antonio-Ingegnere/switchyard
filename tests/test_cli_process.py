@@ -73,3 +73,73 @@ class CliProcessTests(unittest.TestCase):
         self.assertTrue((b/'marker').exists()); self.assertFalse((a/'marker').exists()); self.assertFalse((c/'marker').exists())
         result=self.cli('validate','../B/flow.yaml',cwd=c)
         self.assertEqual(result.stdout,f'Valid: {link}\n')
+
+    def test_events_append_order_and_relative_caller_path(self):
+        directory = self.root / 'flows'
+        directory.mkdir()
+        file = directory / 'flow.yaml'
+        data = self.document("print('PRIVATE DIAGNOSTIC')")
+        data['executors']['cmd']['diagnostic_capture_max_bytes'] = 4096
+        file.write_text(yaml.safe_dump(data))
+        result = self.cli('run', str(file), '--task', 'PRIVATE TASK')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(set(self.root.iterdir()), {directory})
+        path = self.root / 'events.jsonl'
+        kinds = ['run_started', 'state_entered', 'invocation_started',
+                 'invocation_finished', 'transition_selected', 'state_exited',
+                 'state_entered', 'state_exited', 'run_finished']
+        prefix = b''
+        ids = []
+        for extras, status in (([], 0), (['--require-terminal', 'accepted'], 1)):
+            result = self.cli('run', str(file), '--task', 'PRIVATE TASK',
+                              '--events-file', 'events.jsonl', *extras)
+            self.assertEqual((result.returncode, result.stderr), (status, ''))
+            self.assertNotIn('PRIVATE', result.stdout)
+            self.assertTrue(path.read_bytes().startswith(prefix))
+            records = [json.loads(line) for line in path.read_bytes()[len(prefix):].splitlines()]
+            self.assertEqual([event['kind'] for event in records], kinds)
+            run_id = result.stdout.splitlines()[0].removeprefix('Run: ')
+            self.assertEqual({event['run_id'] for event in records}, {run_id})
+            ids.append(run_id)
+            prefix = path.read_bytes()
+        self.assertEqual(len(set(ids)), 2)
+        self.assertFalse((directory / 'events.jsonl').exists())
+        self.assertNotIn('PRIVATE', path.read_text())
+
+    def test_validation_never_touches_event_file(self):
+        file = self.root / 'flow.yaml'
+        file.write_text(yaml.safe_dump(self.document("from pathlib import Path; Path('marker').touch()")))
+        path = self.root / 'events.jsonl'
+        for existing in (False, True):
+            if existing:
+                path.write_bytes(b'existing history\n')
+            for args, status in ((['validate', 'flow.yaml'], 0),
+                                 (['validate', 'flow.yaml', '--events-file', str(path)], 2),
+                                 (['run', 'flow.yaml', '--task', 't', '--events-file', str(path), '--require-terminal', 'typo'], 2),
+                                 (['run', 'missing.yaml', '--task', 't', '--events-file', str(path)], 2),
+                                 (['run', '--help', '--events-file', str(path)], 0)):
+                result = self.cli(*args)
+                self.assertEqual(result.returncode, status, result.stderr)
+                self.assertFalse((self.root / 'marker').exists())
+                self.assertEqual(path.read_bytes() if path.exists() else None,
+                                 b'existing history\n' if existing else None)
+
+    def test_recording_failure_and_runtime_failure_output(self):
+        file = self.root / 'flow.yaml'
+        file.write_text(yaml.safe_dump(self.document("from pathlib import Path; Path('marker').touch()")))
+        for destination in (self.root, self.root / 'missing' / 'events.jsonl'):
+            result = self.cli('run', 'flow.yaml', '--task', 'PRIVATE TASK', '--events-file', str(destination))
+            self.assertEqual((result.returncode, result.stdout, result.stderr),
+                             (3, '', 'switchyard: runtime execution failed\n'))
+            self.assertFalse((self.root / 'marker').exists())
+        self.assertFalse((self.root / 'missing').exists())
+        data = self.document("print('PRIVATE DIAGNOSTIC')", transitions={})
+        data['executors']['cmd']['diagnostic_capture_max_bytes'] = 4096
+        file.write_text(yaml.safe_dump(data))
+        path = self.root / 'events.jsonl'
+        result = self.cli('run', 'flow.yaml', '--task', 'PRIVATE TASK', '--events-file', str(path))
+        self.assertEqual((result.returncode, result.stdout, result.stderr),
+                         (3, '', 'switchyard: runtime execution failed\n'))
+        self.assertEqual([json.loads(line)['kind'] for line in path.read_text().splitlines()],
+                         ['run_started', 'state_entered', 'invocation_started', 'invocation_finished', 'run_error'])
+        self.assertNotIn('PRIVATE', path.read_text())

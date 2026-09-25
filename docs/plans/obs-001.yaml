@@ -1,0 +1,44 @@
+id: OBS-001
+goal: |
+  Expose explicit append-only JSONL event recording through the run CLI using
+  the existing JsonlRecorder and runtime failure boundary.
+scope:
+  - switchyard/cli.py
+  - tests/test_cli.py
+  - tests/test_cli_process.py
+  - README.md
+  - docs/plans/obs-001.yaml
+constraints:
+  - No runtime, Event, recorder, executor, or flow configuration changes.
+  - Recording is opt-in through run --events-file PATH only.
+  - Preserve the existing no-option runtime call and public output.
+  - Construct the recorder only after flow and required-terminal validation.
+  - Pass paths unchanged; relative paths use caller cwd, not flow workspace.
+  - Do not create parent directories or preflight/open the file in CLI.
+  - Recording failures retain ExecutionError exit 3 and the fixed safe message.
+  - Existing append, flush, partial-write and no-recovery semantics apply.
+acceptance:
+  - Without the option no recorder is constructed or passed and no log is created.
+  - Explicit recording writes canonical events in runtime order and appends on reuse.
+  - Normal terminal mismatch still records the complete run and exits 1.
+  - Validate remains read-only and rejects the run-only option with usage exit 2.
+  - Help, invalid configuration and invalid required terminals do not touch logs.
+  - Missing parent or directory destination fails with exit 3 before execution.
+  - Later recording failures stop execution through the existing runtime boundary.
+  - Runtime failure records the available event prefix without exposing payloads.
+  - Task, diagnostics, exception details and event payloads are absent from normal and known runtime-error CLI output.
+verification:
+  - main(argv) tests compare recorded JSON to actual RunResult events and inject recording failures.
+  - Process tests verify append, order, paths, exit statuses and no-write validation.
+  - Run focused CLI tests then the complete offline unittest regression suite.
+  - Confirm runtime and flow_config.py have no diff against HEAD.
+non_goals:
+  - OBS-002 and later slices, readers, projections, timing or correlation.
+  - Metrics, SQLite, automatic directories, schema changes or new dependencies.
+verification_result: |
+  2026-09-25: macOS 26.6.2 arm64, Python 3.14.7, PyYAML 6.0.3.
+  Focused CLI suite: 16 tests passed (2.313s).
+  Full offline regression: 130 tests, 129 passed, one existing Windows-only
+  batch-path skip (8.660s). No model calls. git diff --check passed.
+  runtime/ and flow_config.py have no changes against HEAD.
+  OBS-002 and later slices were not started.

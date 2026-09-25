@@ -127,3 +127,80 @@ class CliTests(unittest.TestCase):
                 with patch('runtime.command.subprocess.Popen',side_effect=launch): actual,out,err=self.invoke(args)
                 self.assertEqual((actual,err),(status,'')); self.assertEqual(len(calls),1)
                 self.assertIn('Terminal: '+('accepted' if repaired else 'escalated'),out)
+
+    def test_events_match_runtime_order_and_append_without_payload_output(self):
+        from dataclasses import asdict
+        from runtime import DiagnosticPayload, ExecutorResult, InvocationResponse, run
+
+        executor = Mock()
+        executor.run.return_value = InvocationResponse(
+            ExecutorResult('success'), DiagnosticPayload(b'PRIVATE DIAGNOSTIC'))
+        loaded = LoadedFlow(Flow('check', {
+            'check': State('x', {'success': 'done'}),
+            'done': State(terminal=True), 'other': State(terminal=True)}), {'x': executor})
+        results = []
+
+        def execute(*args, **kwargs):
+            result = run(*args, **kwargs)
+            results.append(result)
+            return result
+
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'events.jsonl'
+            expected = []
+            prefix = b''
+            with patch('switchyard.cli.load_flow', return_value=loaded), patch('switchyard.cli.run', side_effect=execute):
+                for required, status in (('done', 0), ('other', 1)):
+                    actual, out, err = self.invoke(['run', 'f', '--task', 'PRIVATE TASK',
+                        '--events-file', str(path), '--require-terminal', required])
+                    self.assertEqual((actual, err), (status, ''))
+                    self.assertNotIn('PRIVATE', out)
+                    self.assertEqual(out.splitlines()[:2], [
+                        'Run: ' + results[-1].events[0].run_id, 'Terminal: done'])
+                    expected.extend(asdict(event) for event in results[-1].events)
+                    self.assertTrue(path.read_bytes().startswith(prefix))
+                    prefix = path.read_bytes()
+                    self.assertEqual([json.loads(line) for line in path.read_text().splitlines()], expected)
+                    self.assertNotIn('PRIVATE', path.read_text())
+
+    def test_recording_only_after_validation_and_only_when_requested(self):
+        with patch('switchyard.cli.JsonlRecorder') as recorder, patch('switchyard.cli.run', return_value=self.result()) as execute:
+            with patch('switchyard.cli.load_flow', return_value=self.loaded):
+                for args in (['validate', 'f'], ['run', 'f', '--task', 't'],
+                             ['run', 'f', '--task', 't', '--events-file', 'events', '--require-terminal', 'typo']):
+                    self.invoke(args)
+                for args, status in ((['run', '--help'], 0),
+                                     (['validate', 'f', '--events-file', 'events'], 2)):
+                    with self.assertRaises(SystemExit) as caught:
+                        self.invoke(args)
+                    self.assertEqual(caught.exception.code, status)
+            with patch('switchyard.cli.load_flow', side_effect=FlowConfigError('invalid')):
+                self.assertEqual(self.invoke(['run', 'f', '--task', 't', '--events-file', 'events'])[0], 2)
+            recorder.assert_not_called()
+            self.assertEqual(execute.call_count, 1)
+            self.assertEqual(execute.call_args.kwargs, {})
+
+    def test_later_recording_failure_uses_runtime_error_boundary(self):
+        from runtime import ExecutorResult, InvocationResponse
+        from runtime.recording import JsonlRecorder
+
+        executor = Mock()
+        executor.run.return_value = InvocationResponse(ExecutorResult('success'))
+        loaded = LoadedFlow(Flow('check', {
+            'check': State('x', {'success': 'done'}),
+            'done': State(terminal=True)}), {'x': executor})
+        original = JsonlRecorder.record
+
+        def record(recorder, event):
+            if event.kind == 'invocation_finished':
+                raise OSError('PRIVATE DIAGNOSTIC disk error')
+            original(recorder, event)
+
+        with TemporaryDirectory() as tmp:
+            path = Path(tmp) / 'events.jsonl'
+            with patch('switchyard.cli.load_flow', return_value=loaded), patch.object(JsonlRecorder, 'record', record):
+                self.assertEqual(self.invoke(['run', 'f', '--task', 'PRIVATE TASK', '--events-file', str(path)]),
+                                 (3, '', 'switchyard: runtime execution failed\n'))
+            executor.run.assert_called_once()
+            self.assertEqual([json.loads(line)['kind'] for line in path.read_text().splitlines()],
+                             ['run_started', 'state_entered', 'invocation_started'])
