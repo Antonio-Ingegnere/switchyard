@@ -1,0 +1,181 @@
+id: RUNTIME-005
+
+goal: |
+  Prove WorkUnit -> real Codex CLI invocation -> workspace side effects ->
+  normalized ExecutorResult, with a separate deterministic verifier deciding
+  correctness. Codex success means only technical invocation completion.
+
+scope:
+  - Immutable Codex-specific configuration and concrete CodexExecutor
+  - Composition with existing CommandExecutor for subprocess execution
+  - Offline tests using a controllable fake executable/process boundary
+  - Separate manually invoked real Codex smoke script
+  - Documentation of technical success versus verified acceptance
+
+constraints:
+  - Accepted MicroSpec; implementation authorized.
+  - Python standard library only.
+  - Core runner, Event, ExecutorResult, WorkUnit, and Executor contracts unchanged.
+  - No Agent Gateway, hierarchy, factory, registry, or capability abstraction.
+  - Codex-specific config belongs to CodexExecutor, never WorkUnit.
+  - CodexExecutor receives no flow or transition table and cannot select next_state.
+  - No output-text interpretation or agent self-reported acceptance.
+
+configuration:
+  codex_executable: Absolute executable path; prefer the native Codex binary over a launcher.
+  workspace: Absolute path to an existing directory; executor does not create it.
+  invocation_timeout_seconds: Positive finite number excluding bool, as in Command.
+  ownership: |
+    CodexExecutor(config).run(work_unit). Each call constructs one Command for
+    this invocation. Authentication remains in the local CLI; user configuration is ignored;
+    no generic config map, extra_args escape hatch, or model-selection strategy.
+    Structural invalid config raises TypeError/ValueError before invocation.
+    Workspace absence at invocation is an operational error; no directory creation.
+
+transport:
+  argv: |
+    [codex_executable, "--ask-for-approval", "never", "exec",
+     "--ephemeral", "--ignore-user-config", "--ignore-rules",
+     "--sandbox", "workspace-write", "--skip-git-repo-check",
+     "--", "WorkUnit task:\n" + work_unit.task]
+  prompt: |
+    A single literal argv element contains a fixed label followed by the unchanged
+    WorkUnit.task. The label avoids treating a task consisting of '-' as stdin mode.
+    No shell parsing, task interpolation into flags, or automatic context gathering.
+    Argument-size/encoding failures are not retried or silently truncated: launch
+    OSError maps to error; malformed text/config errors follow ADR-007 if in run.
+    Prompt-in-argv is intentionally minimal and may be visible to local process
+    inspection; no prompt, argv, or output is added to runtime events or results.
+  launch: |
+    shell=False; cwd=workspace; stdin/stdout/stderr=DEVNULL, inherited environment.
+    Explicit workspace-write is a provider-native execution policy, not a runtime
+    isolation system. Never use bypass-approvals/sandbox flags. Unsupported CLI
+    flags or rejected configuration follow the nonzero exit -> error rule.
+  independence: |
+    A fresh exec process per invocation; no resume, fork, thread ID, or persisted
+    session dependency. CLI-internal model/tool turns may occur inside this single
+    invocation; no runtime-managed multi-turn conversation is introduced.
+    Native reading of AGENTS.md/files is CLI behavior, not a Context Engine.
+
+process_reuse:
+  implementation: |
+    Reuse CommandExecutor by composition, not process-code duplication:
+    construct Command(executable, argv, workspace, timeout), call its run(work_unit),
+    then map CommandExecutor failed to CodexExecutor error. Preserve success,
+    error, and timeout. Escaped exceptions continue to the existing runtime.
+    No internal helper is needed for this slice because prompt-in-argv and DEVNULL
+    already fit Command. CommandExecutor behavior and core runner remain unchanged.
+  timeout: |
+    Reuse the RUNTIME-003 monotonic deadline starting before Popen, remaining-time
+    wait, and kill/wait cleanup. Timeout returns only after the direct subprocess
+    has stopped and wait completed, even if creation consumed the deadline.
+    If a launcher spawns the actual CLI, only the launched process is covered;
+    prefer a native executable. Descendants may survive and continue workspace mutations after timeout returns.
+    RUNTIME-005 timeout is not a complete cancellation boundary for agent side
+    effects; this is important for future production usage.
+
+outcomes:
+  success: CLI exit 0 means technical completion only, not correct task completion.
+  error: |
+    Launch OSError, missing workspace, and every nonzero CLI exit (including
+    auth/provider/config failures) map to error. No text parsing to classify them.
+    If CLI exits 0 despite refusal or incomplete work, it still maps to success;
+    the deterministic verifier decides whether the requested artifact is correct.
+  timeout: Invocation deadline exhausted, with direct-process cleanup confirmed.
+  internal_error: Unexpected executor bugs escape to ADR-007 / ExecutionError, without retry.
+  unused: No Codex-specific failed or cancelled classification in this slice.
+
+workspace_and_auth:
+  mutations: |
+    Agent works directly in configured workspace. No runtime branch/worktree,
+    rollback, or transactional workspace handling. Side effects before error or
+    timeout may remain. CLI instructions/config may affect execution naturally.
+  authentication: |
+    Use existing local CLI authentication via CODEX_HOME. Pass --ignore-user-config
+    and --ignore-rules: authentication is an external prerequisite, while user
+    config.toml and user/project exec-policy rules are ignored. AGENTS.md remains
+    native workspace instruction behavior. No claim of hermetic execution.
+    Do not inspect, copy, store, or log credentials or manipulate auth state.
+    No login subprocess or auth model. Errors surface through technical outcomes.
+
+output:
+  behavior: |
+    Discard stdout/stderr via DEVNULL. Exit code is the only completion signal
+    used here; JSON event capture is unnecessary. No output enters WorkUnit,
+    Event, ExecutorResult, or context. Separate bounded verifier feedback remains
+    deferred. CLI-owned local files are not runtime logs; ephemeral does not
+    claim to suppress every possible CLI diagnostic/config side effect.
+
+acceptance:
+  - WorkUnit.task reaches the invocation as a literal prompt without provider fields in WorkUnit.
+  - CodexExecutor uses the existing Executor.run(WorkUnit) contract.
+  - CLI exit 0 returns success independently of text output or artifact correctness.
+  - Launch, missing-workspace, auth/provider/CLI failures have the specified error outcome.
+  - Deadline returns timeout only after direct-process termination and wait.
+  - Only runtime selects transitions, including verifier acceptance transitions.
+  - CodexExecutor has no next_state authority.
+  - Workspace mutations are retained and visible to a following verifier state.
+  - Codex -> Command verifier -> terminal works without changing the core runner.
+  - Changing only verifier transitions changes terminal result without CodexExecutor changes.
+  - Agent text cannot determine acceptance; incorrect artifacts fail deterministic verification.
+  - RUNTIME-001..004 behavior and all 52 existing tests retain their meaning.
+  - Default test discovery performs no real model calls and needs no network/credentials.
+  - Separate opt-in smoke proves a real Codex invocation and checks its filesystem result.
+  - Each call starts a fresh exec without session history or automatic retry.
+
+verification:
+  - Run the complete unittest suite with applicable platform skips and no real AI calls.
+  - |
+    Assert exact CLI argv/cwd/DEVNULL and unchanged task (Unicode, newlines, '-'
+    and flag-like text). Confirm fixed CLI policy does not consume task as options.
+  - |
+    Use a local fake Codex executable on applicable platforms and controlled
+    process mocks elsewhere; no installed real Codex is invoked by unit tests.
+    Fake writes correct/incorrect files, emits misleading success/failure text,
+    returns 0/nonzero, sleeps past deadline, and writes a marker before timeout.
+    Check retained side effects, outcome-only mapping, kill/wait, and no retries.
+  - |
+    Run fake-Codex -> real CommandExecutor verifier flows on temporary workspaces.
+    Verify exact file bytes; test both correct and incorrect output with CLI exit 0.
+    Change verifier transition only and assert changed terminal state.
+  - |
+    Keep existing deadline, event recording, double-failure, and budget regressions.
+    New tests must not require rewriting their semantics or runtime transitions.
+
+real_smoke:
+  entrypoint: |
+    A script outside unittest discovery, e.g. manual_smoke/codex_smoke.py, with
+    a main guard and required --run-real plus --codex-executable absolute path.
+    No real invocation on import or normal unittest discover. Manual execution
+    explicitly opts into network access and real model-token consumption.
+  scenario: |
+    Create TemporaryDirectory and minimal AGENTS.md instructing creation of only
+    result.txt. WorkUnit asks for exact bytes 'runtime-005-ok\n'. One Codex invocation
+    with a small finite deadline (proposed 120 seconds), no retry. A following
+    CommandExecutor running sys.executable checks exact file bytes, returning
+    success/failed into accepted/failed terminals. Non-success Codex goes to failed.
+    Report technical outcome separately from deterministic verification result;
+    require accepted to report smoke PASS. No model response is evidence.
+  prerequisites: |
+    Installed supported Codex CLI, existing local authentication and a usable model
+    defaults with user config ignored. Missing prerequisites are NOT RUN or smoke failure, never PASS.
+    Record CLI version and actual platform; do not expose credentials/output.
+
+non_goals:
+  - Claude support
+  - Agent Gateway, provider registry/factory/hierarchy, capability negotiation
+  - Codex sessions/resume, App Server, or SDK integration
+  - Runtime-managed multi-turn conversation or automatic planning
+  - Context Engine
+  - Token budgets, cost accounting, or model selection strategy
+  - Fallback agent or agent-to-agent communication
+  - Process-tree supervision
+  - Automatic git branch/worktree management or sandbox isolation infrastructure
+  - Rollback
+  - Verifier diagnostic feedback into agent or retry/fix loop
+  - Generic process framework or generic bounded-output mechanism
+
+references:
+  - https://learn.chatgpt.com/docs/non-interactive-mode
+  - https://learn.chatgpt.com/docs/developer-commands?surface=cli
+  - Local read-only help checked against codex-cli 0.153.4; no model invocation performed.

@@ -1,0 +1,130 @@
+id: RUNTIME-002
+
+goal: |
+  Prove bounded cycle + runtime-owned state-visit budget -> budget_exceeded
+  -> declared transition using deterministic fake executors and in-memory events.
+
+scope:
+  - Optional max_state_visits_per_run on executable state definitions
+  - Per-state admitted-visit counters local to each run
+  - Pre-entry budget check and runtime budget_exceeded event
+  - Runtime selection of the declared budget_exceeded transition
+  - Validation of bounded cycles
+  - Minimal deterministic test flows and regression tests for RUNTIME-001
+
+constraints:
+  - Accepted MicroSpec; implementation is authorized.
+  - Standard library Python only; no generic Budget Engine or budget interfaces.
+  - Executor and ExecutorResult contracts remain unchanged and budget-unaware.
+  - budget_exceeded is a runtime event, never an ExecutorResult outcome.
+  - Escaped executor exceptions abort the run without retry, per ADR-007.
+  - All graph components are validated before the first executor call.
+  - examples/flow.yaml remains documentation and is not a test fixture.
+
+semantics:
+  limit: |
+    max_state_visits_per_run is optional on each executable state. When present,
+    it is a nonnegative integer, excluding bool; zero denies the first entry.
+    Absence means no local visit limit. Terminal states cannot declare this limit.
+  accounting: |
+    Each run starts with a zero counter for every state. On initial entry or a
+    transition targeting a state, check its counter before admitting entry,
+    allocating a state_visit_id, emitting state_entered, or calling an executor.
+    If counter < limit (or the limit is absent), admit entry and increment the
+    counter exactly once as part of entry, before state_entered and invocation.
+    Counters count admitted entries, including the first, not successful results.
+    Counter values persist across revisits within the run and reset for a new run.
+  execution_order: |
+    Selecting a transition target and entering that state are distinct operations.
+    After transition_selected(test -> fix), the runtime exits the source test
+    visit and checks admission for fix. Only successful admission creates a new
+    state_visit_id, emits state_entered(fix), and permits invocation.
+    Rejection instead emits budget_exceeded(state=fix, limit=2, observed=2), then
+    transition_selected(fix.budget_exceeded -> human), then enters human.
+    Selected target is not proof of an admitted visit. Rejected entry creates
+    no visit/invocation ID or state_entered/state_exited and does not increment
+    the counter. Initial entry uses the same admission check without a preceding
+    transition_selected event.
+  refusal: |
+    If counter >= limit, do not increment the counter, create a state_visit_id
+    or invocation_id, emit state_entered/state_exited for the refused state, or
+    call its executor. Emit budget_exceeded for that state, then select its
+    declared budget_exceeded transition. No synthetic executor result is created.
+  event: |
+    budget_exceeded carries run_id, the refused state name,
+    metric=max_state_visits_per_run, limit=the configured maximum admitted visits,
+    observed=the number of already admitted visits. For limit 2, refusal reports
+    limit=2 and observed=2, never 3. state_visit_id and invocation_id are absent.
+    The following transition_selected records the runtime event as its trigger,
+    the refused source state, and the declared target, without fabricated IDs.
+  exhaustion_transition: |
+    Restriction for this slice: any declared budget_exceeded transition
+    must belong to a limited executable state and target a terminal state.
+    The handler need not exist at validation time; if exhaustion occurs without
+    it, emit budget_exceeded and abort with ExecutionError, without fallback.
+  cycle_validation: |
+    First validate all state references, limits, executors, and transitions.
+    Consider the graph of executor-outcome transitions. Remove every state with
+    a valid max_state_visits_per_run and all its incident edges. If any cycle
+    remains, reject the entire flow before execution. Thus every original cycle
+    must intersect a bounded state; one bounded state somewhere in a strongly
+    connected component is insufficient. Budget-event edges terminate by the
+    restriction above and cannot form a separate infinite refusal loop.
+
+acceptance:
+  - |
+    A test -> fix -> test flow with fix.max_state_visits_per_run=2 and
+    fix.budget_exceeded -> human performs exactly three test invocations and
+    two fix invocations, then reaches human without a third fix invocation.
+  - |
+    The first two fix entries count as 1 and 2. The third attempted entry emits
+    budget_exceeded with limit=2 and observed=2 and no new visit/invocation ID.
+  - |
+    A zero limit on initial prevents any executor call and redirects through
+    its declared budget_exceeded transition with observed=0.
+  - |
+    Only the runtime selects the exhaustion transition. Changing only its
+    terminal target changes the final state without changing the fake executor.
+  - |
+    Missing budget_exceeded handling produces an explicit ExecutionError after
+    the budget event, without retry, fallback, or a refused-state executor call.
+  - |
+    Negative, non-integer, boolean, and terminal-state limits are rejected before
+    execution, as are budget handlers on unlimited states or to nonterminal targets.
+  - |
+    Unbounded self-loops, multi-state cycles, unreachable unbounded cycles, and
+    unbounded subcycles in components containing another bounded state are rejected.
+    A self-loop or multi-state cycle intersecting a bounded state is accepted.
+  - |
+    Counters are independent for different states and reset between runs; accepted
+    visits and invocations retain distinct correlated IDs across cycle iterations.
+  - |
+    ExecutorResult('budget_exceeded') remains malformed. Returned error outcomes
+    follow transitions; escaped exceptions still abort without automatic retry.
+  - |
+    Acyclic flows without limits retain RUNTIME-001 behavior, including immutable
+    payload delivery, terminal behavior, explicit transition errors, and event IDs.
+
+verification:
+  - Run all existing unittest checks; change only blanket cycle-rejection expectations.
+  - |
+    Use minimal fake-executor flows to assert exact call sequences, admitted visit
+    counts, exhaustion event fields, transition triggers, and terminal targets.
+  - Assert the exact full event sequence, including target selection before admission.
+  - Check zero limits, missing exhaustion handlers, independent counters, and run reset.
+  - |
+    Validate bounded/unbounded self-loops, multi-state cycles, unreachable cycles,
+    a bounded component with an unbounded subcycle, and malformed limit/handler
+    definitions; assert zero executor calls for every rejected flow.
+  - Verify malformed executor outcomes and escaped-exception behavior remain unchanged.
+
+non_goals:
+  - Generic Budget Engine, budget registry, or pluggable budget policies
+  - Other budget scopes, including invocation budgets
+  - Token, cost, time budgets, or deadline enforcement
+  - Subprocess executor or subprocess timeout
+  - Persistent storage, JSONL, resume, or replay
+  - AI providers, Agent Gateway, or Context Engine
+  - Automatic retries or fallback outside declared transitions
+  - Nonterminal budget_exceeded targets or refusal chains
+  - MicroSpec parsing or presets

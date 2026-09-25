@@ -1,0 +1,205 @@
+id: RUNTIME-007
+
+goal: |
+  Prove verifier outcome + bounded diagnostic data -> explicit runtime handoff
+  -> next independent executor. Outcome alone selects transitions. WorkUnit is
+  the original immutable task, and no provider session history is required.
+
+scope:
+  - Explicit immutable InvocationRequest and InvocationResponse envelopes
+  - One bounded UTF-8 diagnostic payload per invocation, with runtime-owned provenance
+  - One immediate-predecessor handoff slot and opt-in target-state policy
+  - Mechanical migration of executors/tests to the invocation envelopes
+  - Offline fake verifier/consumer tests, including bounded cycles
+
+constraints:
+  - Accepted MicroSpec; implementation authorized.
+  - WorkUnit remains WorkUnit(task); ExecutorResult remains ExecutorResult(outcome).
+  - Change Executor.run explicitly to run(InvocationRequest) -> InvocationResponse.
+  - No legacy/new argument union, duck-typed fallback, or automatic compatibility shim.
+  - Python standard library only; no real model calls or subprocess output capture.
+  - No ContextEngine, ArtifactStore, arbitrary context dictionary, or message bus.
+  - Event, JsonlRecorder, and event ordering for existing diagnostic-free flows remain unchanged.
+
+invocation_contract:
+  DiagnosticPayload: |
+    Immutable exact bytes field utf8, at most 4096 bytes, valid UTF-8.
+    The producer may supply content only, never authoritative origin IDs.
+    None means no output; an empty valid payload is distinct from None.
+  DiagnosticOrigin: |
+    Immutable run_id, state, state_visit_id, invocation_id assigned by runtime
+    from the invocation that produced the payload. No full Event or new ID scheme.
+  DiagnosticInput: |
+    Immutable payload: DiagnosticPayload and origin: DiagnosticOrigin.
+    Runtime constructs this envelope; executor output cannot set origin fields.
+  InvocationRequest: |
+    Immutable work_unit: WorkUnit and diagnostics: DiagnosticInput | None = None.
+    Every invocation receives the same original WorkUnit object. No mutation,
+    replacement task, session ID, provider config, or arbitrary context fields.
+  InvocationResponse: |
+    Immutable result: ExecutorResult and diagnostics: DiagnosticPayload | None = None.
+    Exactly one output payload at most. No transition field or output provenance.
+  Executor: |
+    run(request: InvocationRequest) -> InvocationResponse.
+    This is an intentional contract revision for new data-plane capability.
+    Runtime's public run(work_unit, flow, executors, recorder=...) remains unchanged.
+
+handoff_policy:
+  state_field: |
+    diagnostics_from_previous_max_bytes: int | None = None on executable states.
+    None opts out; integer 0..4096 opts in with an explicit input byte limit.
+    bool and values outside that range are invalid. Terminal states must use None.
+    No source selector, arbitrary key, retained history, fan-out, or DAG policy.
+  production: |
+    Before invocation_finished or transition selection, independently validate exact
+    InvocationResponse, exact ExecutorResult/outcome, and optional exact payload
+    type/bytes/size/UTF-8 without executor provenance, even if constructors validated.
+    Malformed output aborts with the existing malformed-response error semantics,
+    without invocation_finished, transition, handoff, retry, or budget_exceeded.
+    After validation attach runtime-owned
+    provenance to its optional payload. A response with no output replaces any
+    pending output with None; diagnostics are never implicitly forwarded by a consumer.
+  transfer: |
+    Select the outcome transition normally. Its directly selected executable target
+    may receive that one output only if opted in and admitted by existing visit budget.
+    No outcome/text predicates for data selection; outcome picks the edge, target
+    opt-in picks whether to transfer. An opted-in target with no output gets None.
+  order: |
+    Source transition selection and source exit precede transactional pre-entry
+    admission. Check budget without committing. On exhausted budget, discard
+    diagnostics and follow RUNTIME-002; input limit is not checked. Otherwise
+    validate diagnostic handoff before committing admission. Input error raises
+    ExecutionError and emits run_error with target state but no new IDs, no target
+    state_entered/state_exited, no invocation, and no counter increment. Only after
+    both checks succeed increment visit counter, allocate visit ID, emit
+    state_entered, allocate invocation ID, emit invocation_started, and call executor.
+    Existing recorder-failure semantics still stop execution at any event boundary.
+  expiry: |
+    Pending output is discarded on opt-out, terminal transition, target admission
+    refusal, or run failure. A budget refusal never forwards output along its
+    budget_exceeded transition. Initial invocation gets None. Input is consumed
+    once when handed off; it does not remain a fallback for later states.
+    Runtime retains no diagnostic history and resets the slot for each run.
+  cycles: |
+    Every revisit uses only the immediately preceding invocation's new output.
+    verify(v1) -> fix(f1) -> verify(v2) -> fix(f2) gives f2 the v2 payload/origin,
+    even if the text matches v1. If v2 emits None, f2 gets None, never v1 data.
+    Existing bounded-cycle validation and admission counters are unchanged.
+
+bounds:
+  producer_output: |
+    Hard slice-wide cap MAX_DIAGNOSTIC_BYTES=4096 UTF-8 bytes per invocation.
+    Construct DiagnosticPayload from bytes, check exact type and len before any
+    decoding/copying/serialization, then validate UTF-8 within the bounded buffer.
+    Runtime also validates the response/payload boundary without copying oversized
+    objects. No conversion of arbitrary strings, iterators, streams, or custom objects.
+  consumer_input: |
+    Target's declared diagnostics_from_previous_max_bytes is the input cap and
+    cannot exceed 4096. Measure only content bytes; provenance is fixed-field
+    runtime metadata using existing IDs/state names, not producer-controlled text.
+  overflow: |
+    Reject, never truncate or summarize. Oversized/invalid UTF-8 producer output
+    is a contract violation: abort with ExecutionError/ADR-007, not failed,
+    timeout, budget_exceeded, or a diagnostic-directed fallback.
+    A valid output exceeding target's input limit aborts at handoff with an explicit
+    runtime error; no target invocation. Exact-limit payload is allowed.
+  live_memory: |
+    No cumulative diagnostic archive in runtime, RunResult, ExecutionError, or Event.
+    At most the current bounded input and one bounded output are logically live:
+    at most 8192 content bytes plus bounded decoding temporaries and metadata.
+    Release request/response/pending references when no longer needed. This bounds
+    the added runtime handoff buffer, not arbitrary executor memory, traceback-local
+    retention, original task/state definitions, or total existing event history.
+  cumulative: |
+    No separate cumulative diagnostic budget in this slice: repeated payloads are
+    not accumulated, while existing finite flow/bounded visits limit invocation
+    count. Total bytes processed may exceed 4096; per-invocation caps are not a
+    run-level token/cost/throughput budget.
+  production_limit: |
+    Fake producer uses already bounded literal/generated chunks and does not build
+    an unbounded string before wrapping it. Runtime cannot sandbox allocations by
+    arbitrary in-process Python executors. Rejecting a returned oversized object
+    is defense at the contract boundary, not bounded stream capture. Real bounded
+    stdout/stderr production remains a separate later slice.
+
+trust_and_control:
+  - Only InvocationResponse.result.outcome participates in transition selection.
+  - Diagnostic content is untrusted executor output, never runtime configuration.
+  - Text such as next_state=accepted, retry, or budget instructions is opaque data.
+  - Diagnostic output cannot assign authoritative origin IDs.
+  - Future agent prompting must label diagnostics as untrusted; not implemented here.
+
+persistence:
+  - In-memory only; no diagnostic payload or origin fields added to Event/JSONL.
+  - No new handoff event; fake consumer assertions prove the transfer for this slice.
+  - Existing invocation IDs in events can be compared with received provenance in tests.
+  - No diagnostics added to exception messages or recorder_error; errors describe limits/types only.
+  - Existing recorder failure aborts execution and prevents any following consumer invocation.
+  - Event history cannot reconstruct diagnostic input; no persistence/replay claim is made.
+
+existing_executors:
+  migration: |
+    CommandExecutor, CodexExecutor, ClaudeExecutor and test fakes accept the new
+    request and return InvocationResponse(result, diagnostics=None). Provider
+    adapters read request.work_unit.task; CLI argv/auth/permissions stay unchanged.
+    Command composition unwraps/wraps result mechanically; process/deadline/kill/wait
+    and result normalization behavior remain unchanged. No new capture or prompting.
+  unsupported_input: |
+    Existing Command/Codex/Claude executors support diagnostics=None only in this
+    slice. If explicitly given DiagnosticInput (including empty content), raise
+    a contract error before subprocess launch, rather than silently ignoring it.
+    Runtime follows ADR-007. Only fake consumer implements diagnostic consumption.
+    No capability registry or validation introspection is introduced.
+  regression: |
+    Mechanically update direct executor calls/assertions and mock responses to
+    envelopes. Keep every existing behavioral assertion equivalent: outcomes,
+    transitions, CLI arguments, termination, events, budgets, recorder failures,
+    offline guarantees and manual smoke opt-in. Do not rerun real model smoke here.
+
+acceptance:
+  - WorkUnit stays task-only, immutable, and the same object in verify/fix requests.
+  - ExecutorResult stays outcome-only; envelopes separate control result and data.
+  - verify failed selects fix regardless of diagnostic content.
+  - Only the opted-in directly selected next invocation receives diagnostic data.
+  - Consumer gets the output of the current verifier visit.
+  - New output or None replaces older data; opt-out/refusal/terminal/run end cannot leak it.
+  - Received origin matches the producing run/state/visit/invocation in runtime events.
+  - next_state=accepted and other embedded instructions cannot select transitions.
+  - Oversized/invalid payload is rejected deterministically without truncation or copying.
+  - No consumer invocation receives more than its declared byte cap.
+  - Independent fake consumer has no provider session/history dependency.
+  - Existing executors preserve diagnostic-free behavior and reject unsupported input before launch.
+  - Existing cycles/budgets/events/recording semantics remain unchanged for existing flows.
+  - Entire default suite is offline; no real models or new subprocess capture.
+
+verification:
+  - |
+    Minimal verify(fake) -> fix(fake) -> accepted test asserts same WorkUnit identity,
+    failed outcome transition, exact payload bytes and runtime-owned origin.
+  - |
+    Test opt-in/opt-out, initial input None, absent/empty output, zero input cap,
+    intervening opt-out state, terminal target, budget-refused target and run reset.
+  - |
+    Bounded verify/fix cycle emits distinct diagnostics over two verifier visits;
+    assert latest origin/content and no fallback to v1 when v2 produces None.
+  - |
+    Test 4096-byte output boundary and 4097-byte rejection, valid multibyte UTF-8,
+    malformed UTF-8, invalid state limits, lower input caps, and exact-cap handoff.
+    Test malicious instruction text, malformed response and attempted origin injection.
+  - |
+    Assert no consumer call on input overflow or recorder failure; record ordinary
+    runtime errors without embedding payload, retaining primary/secondary failure rules.
+  - |
+    Assert JSONL contains unchanged Event fields and no diagnostic content.
+    Ensure runtime does not retain a diagnostic list or append payloads to histories.
+  - Run the full prior 74-test suite with mechanical envelope migration and equivalent assertions.
+  - Test current provider executors reject DiagnosticInput before any subprocess call.
+
+non_goals:
+  - stdout/stderr capture, pipes or reader threads
+  - Codex/Claude diagnostic prompting or real model calls
+  - ContextEngine, ArtifactStore or generic dataflow/message bus
+  - Diagnostic persistence or replay
+  - Token counting, semantic summarization or LLM compression
+  - Agent retry/fix implementation or provider sessions
+  - General cumulative budget engine or additional workflow budget events

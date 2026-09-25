@@ -1,0 +1,162 @@
+id: RUNTIME-003
+
+goal: |
+  Prove command definition -> real subprocess invocation -> normalized
+  ExecutorResult, and invocation deadline -> timeout ExecutorResult -> ordinary
+  declared transition, without changing runtime transition ownership.
+
+scope:
+  - Immutable Command definition and CommandExecutor implementing Executor.run
+  - Direct subprocess launch, wait, deadline termination, and reap
+  - Real-process integration tests and focused failure-boundary tests
+  - Documentation of supported process and standard-stream semantics
+
+constraints:
+  - Accepted MicroSpec; implementation authorized.
+  - Python standard library only.
+  - No changes to Executor or ExecutorResult contracts or transition ownership.
+  - CommandExecutor receives no state definitions, transitions, or budget counters.
+  - timeout is an executor outcome; budget_exceeded remains a runtime event.
+  - Preserve ADR-007 and all RUNTIME-001/002 semantics.
+  - No generic budget or process-supervision abstraction.
+  - Do not load examples/flow.yaml as an executable fixture.
+
+command_contract:
+  executable: Absolute nonempty executable path, without embedded NUL.
+  argv: Immutable tuple of argument strings, excluding argv[0], without embedded NUL.
+  cwd: Explicit absolute working-directory path, without embedded NUL.
+  invocation_timeout_seconds: Required positive finite int or float, excluding bool.
+  validation: |
+    Validate structural fields when constructing the command, before launching
+    any process. Invalid shapes/types/values raise TypeError or ValueError;
+    filesystem existence/permissions are determined by the launch attempt.
+    Windows .bat/.cmd executables are excluded and rejected in this slice.
+  invocation: |
+    CommandExecutor is configured with one Command and registered in the existing
+    executor dictionary. Each run(work_unit) launches [executable, *argv] with
+    shell=False and the configured cwd. Environment is inherited; no env API.
+    Immutable Command belongs to CommandExecutor(command), not WorkUnit.
+    WorkUnit contains no command-specific configuration and is not interpolated
+    into argv, stdin, or environment.
+    No shell parsing, expansion, pipelines, PATH lookup, or command-string API.
+
+outcome_semantics:
+  success: Direct subprocess exits with code 0 before timeout is detected.
+  failed: Direct subprocess exits with a nonzero return code, including signal exit on POSIX.
+  error: |
+    OSError from the narrowly scoped subprocess launch operation is an expected
+    operational failure and returns ExecutorResult('error'); examples include
+    missing executable, missing cwd, denied permission, and OS resource refusal.
+    Do not catch OSError broadly across the entire executor implementation.
+  timeout: |
+    The deadline is already exhausted after successful Popen, or the timed wait
+    reports TimeoutExpired. Terminate and reap the direct process
+    before returning ExecutorResult('timeout'). Once timeout is detected, retain
+    timeout even if the process exits by itself during cleanup.
+  internal_error: |
+    Unexpected implementation exceptions are not converted into 'error'. If a
+    process was already launched, attempt direct-process cleanup before letting
+    the exception escape. Runtime wraps the escaped exception in ExecutionError
+    per ADR-007 and neither selects a normal transition nor retries.
+
+timeout_semantics:
+  start: |
+    Immediately before attempting Popen, set deadline = monotonic() + timeout.
+    After successful Popen, compute remaining = deadline - monotonic(). Wait only
+    remaining seconds if positive; otherwise perform timeout cleanup immediately.
+    Process creation counts toward the invocation deadline even on OSes where
+    creation cannot be interrupted. Late return is an enforcement limitation,
+    not an accounting exclusion. If creation consumed the deadline, return timeout
+    after cleanup even if the subprocess has already exited. Validation precedes
+    this deadline; there is no timer for the whole run.
+  expiry: |
+    On exhausted remaining time or TimeoutExpired call Popen.kill() if still running on the directly launched process, with
+    no graceful-termination period or escalation policy. Then call wait() to
+    confirm actual termination and reap/release the direct process.
+  return_guarantee: |
+    Never return timeout while the direct subprocess still runs or its exit
+    remains unconfirmed. Cleanup may exceed the configured timeout. If cleanup
+    fails, propagate the exception through ADR-007 rather than returning a false
+    timeout or normalizing it into an operational launch error. A concurrent
+    process exit is successful cleanup once wait confirms termination.
+  children: |
+    Descendants are not enumerated, signalled, or waited for and may survive.
+    Do not create process groups, Windows jobs, or a supervision subsystem.
+  portability: |
+    Target desktop POSIX and Windows using subprocess primitives. kill requests
+    SIGKILL on POSIX and TerminateProcess on Windows. The direct-process exit
+    guarantee is shared; signal exit-code details are not. No guarantees for
+    descendant termination, graceful cleanup, uninterrupted process creation,
+    exact deadline scheduling, or a maximum duration of OS kill/wait cleanup.
+
+standard_streams:
+  scope: |
+    DEVNULL is deliberately minimal and temporary for this slice. Before repair/AI
+    flows, a separate bounded-output mechanism is needed to pass verifier failure
+    diagnostics to subsequent executors. That mechanism is not implemented here.
+  stdin: DEVNULL; commands are noninteractive and receive EOF.
+  stdout: DEVNULL; discard output without capture, decoding, or runtime events.
+  stderr: DEVNULL; discard output without capture, decoding, or runtime events.
+  result: |
+    Keep ExecutorResult outcome-only. No output, exit-code, PID, or diagnostic
+    metadata is added. Output cannot accumulate in runtime memory or context.
+    Command-created filesystem effects are outside logging and isolation scope.
+
+acceptance:
+  - A real command exiting with 0 returns success.
+  - A real command exiting with a nonzero code returns failed.
+  - A nonexistent executable returns normalized error.
+  - A real long-running command exceeding its invocation deadline returns timeout.
+  - The direct subprocess has exited and been waited for before timeout is returned.
+  - Runtime selects timeout transitions only from ExecutorResult('timeout'), without budget events.
+  - Changing only the timeout transition target changes the terminal state with the same executor.
+  - CommandExecutor has no next_state authority and uses the unchanged outcome-only result.
+  - Bounded cycles and state-visit budget admission retain RUNTIME-002 behavior.
+  - All 24 existing tests pass without changing their meaning.
+  - Literal argv and cwd are honored without shell interpretation or WorkUnit substitution.
+  - Invalid command definitions fail before process launch; missing cwd normalizes to error.
+  - stdin is EOF and large stdout/stderr output is discarded without capture or metadata.
+  - Unexpected executor exceptions preserve ADR-007; failed cleanup never returns timeout.
+
+verification:
+  - Run python3 -m unittest discover -s tests -v, including all 24 regression tests.
+  - |
+    Use sys.executable with short Python programs and TemporaryDirectory, not
+    system shell utilities, for real exit-0/nonzero, missing executable/cwd,
+    literal argv, cwd, stdin EOF, and finite large-output scenarios.
+  - |
+    Run a real long-lived Python child with a short nonzero timeout and ample
+    timing margin. Use a test-only wrapper around the real Popen to retain its
+    handle and observe kill/wait. Assert timeout and confirmed exit before return;
+    always clean up the retained handle in a test finally block. Do not infer
+    termination merely from elapsed time or use a reused PID as sole evidence.
+  - |
+    Integrate the same CommandExecutor with two minimal flows differing only in
+    timeout target; assert terminal states, outcome-driven transition events,
+    and absence of budget_exceeded. Add a real-command bounded-loop smoke test.
+  - |
+    Use narrowly scoped mocks for command validation, launch OSError, unexpected
+    launch/wait exceptions, kill/wait failure, and exit-during-timeout cleanup.
+    Check no implicit retries or normal transitions after escaped exceptions.
+  - |
+    Check monotonic deadline starts before launch, creation consumes the allowance,
+    and expired creation returns timeout even for an already exited process. Check
+    that cleanup precedes timeout
+    result. Inspect launch arguments for shell=False and DEVNULL streams.
+    Real-process termination remains covered separately from mocks.
+  - Report platforms actually tested; do not claim unexecuted Windows/POSIX validation.
+
+non_goals:
+  - Process-tree supervision
+  - Docker or sandbox isolation
+  - Persistent logs or event store
+  - Shell scripting abstraction or pipelines
+  - Retries
+  - Generic Budget Engine or additional budget scopes
+  - Token/cost budgets or run-level wall-time budget
+  - AI agents, providers, or Agent Gateway
+  - Remote execution
+  - Streaming UI or stdout/stderr event infrastructure
+  - Resume/replay
+  - Output capture or rich command-result metadata
+  - Graceful termination policy or external cancellation API

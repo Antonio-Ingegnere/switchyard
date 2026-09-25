@@ -1,0 +1,161 @@
+id: RUNTIME-004
+
+goal: |
+  Prove runtime event -> synchronous append-only persistent JSONL record,
+  preserving in-memory execution events and existing execution semantics.
+  This slice provides persistent logging, not crash-durable storage.
+
+scope:
+  - Optional recorder argument to the runtime with record(event) -> None only
+  - One runtime emission path preserving the in-memory event collection
+  - Local JSONL recorder configured with a file path
+  - Focused append/order/serialization/failure tests and existing regressions
+
+constraints:
+  - Accepted MicroSpec; implementation authorized.
+  - Standard library Python only; synchronous execution and recording.
+  - State machine alone selects transitions; record has no transition authority.
+  - Executor contracts, CommandExecutor, and state-visit budget semantics are unchanged.
+  - Event fields remain unchanged; serialization reflects the existing Event contract.
+  - No plugin bus, composite sinks, background queue, or event-sourcing framework.
+
+semantics:
+  boundary: |
+    Add an optional keyword-only recorder to run; absence preserves current behavior.
+    The only recorder operation is record(event) -> None, returning normally on
+    acceptance or raising on failure. The runtime owns the memory collection;
+    it does not require a separate in-memory recorder or fan-out abstraction.
+  event_order: |
+    At each existing event emission point, construct the immutable Event, append
+    it to the in-memory collection, then synchronously call recorder.record(event).
+    No later runtime step occurs until record returns successfully. Event formation
+    is an in-memory observation, not proof of successful persistence. Existing
+    semantics remain: invocation_started precedes the call, invocation_finished
+    follows its return, and transition_selected does not prove target admission.
+    Effects that occurred before recording failure are not rolled back.
+  failure: |
+    Serialization, encoding, open, short write, write, flush, and close failures
+    abort the run immediately via ExecutionError with the recorder exception as
+    cause. ExecutionError.events contains the full in-memory prefix including
+    the event whose recording failed; that final event is not confirmed persisted.
+    No subsequent executor, transition, retry, or fallback is executed.
+    Do not append or attempt to persist a synthetic run_error after recorder failure.
+    Existing runtime/executor errors still emit their ordinary run_error once.
+    If its recording fails, preserve the original ExecutionError message and
+    original __cause__ (the escaped executor exception, if any). Attach only the
+    secondary recorder exception as ExecutionError.recorder_error; otherwise this
+    attribute is None. Runtime-origin errors remain represented by ExecutionError
+    itself, without inventing an executor exception. Ordinary recorder failures
+    instead have the recorder exception as __cause__. Never recursively record.
+  terminology: |
+    ExecutionError.events is in-memory observed event history. JSONL has the
+    successfully recorded persistent prefix, potentially followed by an uncertain
+    failed append. Observed event != confirmed persisted event. The failed event
+    can exist in memory without confirmed persistence; this is expected.
+  final_event: |
+    Failure recording run_finished still raises ExecutionError; no successful
+    RunResult is returned even though the terminal state has already been reached.
+    Validation errors preceding run_started do not invoke the recorder.
+  partial_run: |
+    A partial run is allowed in the log. On recording failure the last attempted
+    record may be absent, partially present, or fully present despite the error.
+    No automatic retry is safe and none is attempted. Successfully recorded prior
+    records are not rewritten, truncated, or rolled back.
+
+jsonl:
+  mapping: |
+    One flat object with exactly the existing Event field names: kind, run_id,
+    state, state_visit_id, invocation_id, outcome, target, trigger_event, metric,
+    limit, observed. Include all fields; None becomes JSON null. Preserve values
+    and IDs exactly. Outcome transitions use outcome; budget transitions use
+    trigger_event, with outcome null. No envelope, timestamp, sequence, or version.
+  encoding: |
+    Serialize the complete primitive field mapping before opening the file:
+    standard json, stable sorted keys, compact separators, ensure_ascii=False,
+    allow_nan=False, strict UTF-8 encoding, followed by one LF byte.
+    Embedded newlines are JSON-escaped. No default=str or custom object encoder.
+    Serialization/encoding failure does not modify the file.
+  file_lifecycle: |
+    Configure a path; open in binary append mode for each record. Parent directory
+    must already exist; create the file if absent. Write the complete encoded
+    line, check the returned byte count, explicitly flush, then close before
+    record returns. Treat short writes as failure; do not retry the record.
+    No retained handle or public flush/close API. Attempt close on exceptional paths.
+  usage: |
+    One synchronous writer; sequential runs may share a healthy recorder/file.
+    The existing file must be empty or a complete JSONL log; no reader/validation
+    or repair of preexisting contents is implemented. After any record failure,
+    that recorder instance refuses further record calls before I/O. No reset API.
+    A potentially damaged file must not be reused automatically; selecting a new
+    file or handling the old one is the caller's responsibility, outside this slice.
+
+durability:
+  guarantee: |
+    Successful record means the complete line passed write, flush, and close and
+    can be read after normal execution without depending on a retained Python
+    buffer. This is persistent append-only logging, not crash-safe durability.
+  fsync: |
+    No fsync or directory sync in this slice. flush alone is sufficient only for
+    the stated normal-operation persistence contract, not power-loss durability.
+  crash: |
+    A crash during record may leave no line or a partial final line. OS crash or
+    power loss can lose even previously acknowledged writes or file creation;
+    do not promise that only the last event is affected. No crash recovery exists.
+  atomicity: |
+    A single application-level write is not a transactional record append.
+    Short writes, write/flush/close failure, or crash may leave a partial final
+    UTF-8/JSON line. No absence-of-partial-line guarantee is made. Normal successful
+    writes produce one valid object per line; failure paths have the stated limits.
+
+acceptance:
+  - Successful-run JSONL records equal the RunResult.events field mappings in order.
+  - Every successfully recorded line is an independent valid UTF-8 JSON object.
+  - Run, state-visit, and invocation IDs are unchanged, including null absent IDs.
+  - Outcome and budget_exceeded transitions serialize distinctly without new Event fields.
+  - Sequential successful runs append to one file and remain distinct by run_id.
+  - Real CommandExecutor flow records events without changing command behavior.
+  - Recorder failure immediately aborts the run with ExecutionError and its cause.
+  - No following executor runs after recorder failure, including at invocation_started.
+  - Recorder failure is not an outcome and causes no normal transition or retry.
+  - Execution without a recorder preserves existing in-memory behavior.
+  - All 40 existing tests retain their meaning and pass on applicable platforms.
+  - Serialization failure leaves the file unchanged; short/write/flush/close failures abort.
+  - Failed event remains in ExecutionError.events and is not followed by synthetic run_error.
+  - run_error recording failure preserves the primary execution error and exposes recorder_error separately.
+  - run_error recording failure is attempted once; run_finished failure prevents success return.
+  - Partial-write tests document the possible invalid final line without rollback or repair.
+
+verification:
+  - Run the complete unittest suite, retaining platform-specific skips.
+  - |
+    Use TemporaryDirectory and minimal flows to compare parsed records field-for-
+    field with in-memory events for success, budget exhaustion, and real command
+    execution. Include Unicode/newlines and sequential runs with identical prefixes.
+  - |
+    Use a recorder that fails on the Nth event, across every event position in a
+    two-executor flow and budget flow; assert exact recorder calls, in-memory prefix,
+    cause, no later invocations, and no persistence attempts after failure.
+  - Check run_started, invocation_finished, transition_selected, run_error, and run_finished failures explicitly.
+  - |
+    Inject serialization/encoding, open, short-write, write, flush, and close failures.
+    Assert serialization completes before file access, failure poisons the recorder,
+    subsequent calls perform no I/O, and handles are closed on ordinary paths.
+  - |
+    Simulate a partial append then raise; assert existing prefix is preserved and
+    no repair, truncation, extra run_error, or record retry is attempted.
+  - Verify append mode, stable keys/nulls, explicit flush/close, and absence of fsync.
+  - Do not use unit tests to claim power-loss or crash-atomicity guarantees.
+
+non_goals:
+  - Resume, replay, or crash recovery
+  - Event sourcing or database
+  - Log rotation or indexing/search
+  - Concurrent writers, threads, or multiple processes
+  - Remote storage or distributed runs
+  - Schema migration system
+  - Async/background logging
+  - Metrics/telemetry backend
+  - AI providers
+  - Bounded stdout/stderr capture
+  - Reader or partial-line repair
+  - WAL, transactions, fsync, or crash-durable storage

@@ -1,0 +1,46 @@
+# Local executable paths are examples; adjust before loading. No task is stored here.
+version: 1
+initial: verify
+executors:
+  verifier:
+    type: command
+    executable: /usr/bin/python3
+    workspace: .
+    argv:
+      - -c
+      - |
+        import os
+        from pathlib import Path
+        p = Path('result.txt')
+        ok = p.is_file() and p.read_bytes() == b'runtime-009-ok\n'
+        if not ok:
+            os.write(2, b'result.txt must contain exactly runtime-009-ok followed by one newline; current bytes are incorrect')
+        raise SystemExit(0 if ok else 1)
+    timeout_seconds: 5
+    diagnostic_capture_max_bytes: 4096
+  fixer:
+    type: codex
+    executable: /opt/homebrew/bin/codex
+    workspace: .
+    timeout_seconds: 120
+states:
+  verify:
+    executor: verifier
+    on:
+      success: accepted
+      failed: fix
+      error: escalated
+      timeout: escalated
+  fix:
+    executor: fixer
+    diagnostics_from_previous_max_bytes: 4096
+    max_state_visits_per_run: 1
+    on:
+      success: verify
+      error: escalated
+      timeout: escalated
+      budget_exceeded: escalated
+  accepted:
+    terminal: true
+  escalated:
+    terminal: true

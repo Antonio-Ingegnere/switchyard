@@ -1,0 +1,78 @@
+"""Thin CLI: configuration and execution semantics belong to existing libraries."""
+
+import argparse
+import json
+import os
+import sys
+
+from flow_config import FlowConfigError, load_flow
+from runtime import ExecutionError, WorkUnit, run
+
+
+def _safe_display(value: str, limit: int | None = None) -> str:
+    if limit is not None:
+        value = value[:limit]
+    ambiguous = (not value or any(not char.isprintable() or char.isspace()
+                                 or char in ',"\\' for char in value))
+    rendered = json.dumps(value, ensure_ascii=True) if ambiguous else value
+    if limit is not None and len(rendered) > limit:
+        rendered = rendered[:limit-3] + '...'
+    return rendered
+
+
+def _parser():
+    parser = argparse.ArgumentParser(prog='switchyard', allow_abbrev=False)
+    commands = parser.add_subparsers(dest='command', required=True)
+    validate = commands.add_parser('validate', allow_abbrev=False)
+    validate.add_argument('flow_file')
+    execute = commands.add_parser('run', allow_abbrev=False)
+    execute.add_argument('flow_file')
+    execute.add_argument('--task', required=True)
+    execute.add_argument('--require-terminal', action='append', default=[], metavar='NAME')
+    return parser
+
+
+def main(argv=None) -> int:
+    args = _parser().parse_args(argv)
+    try:
+        loaded = load_flow(args.flow_file)
+    except FlowConfigError as exc:
+        message = _safe_display(str(exc), 500)
+    else:
+        message = None
+    # Output errors must not be mistaken for errors raised by load_flow/run.
+    if message is not None:
+        print('switchyard: ' + message, file=sys.stderr, flush=True)
+        return 2
+    if args.command == 'validate':
+        print('Valid: ' + _safe_display(os.path.abspath(args.flow_file)), flush=True)
+        return 0
+    required = list(dict.fromkeys(args.require_terminal))
+    for name in required:
+        if name not in loaded.flow.states:
+            prefix = 'switchyard: required terminal does not exist: '
+        elif not loaded.flow.states[name].terminal:
+            prefix = 'switchyard: required state is not terminal: '
+        else:
+            continue
+        print(prefix + _safe_display(name, 512-len(prefix)), file=sys.stderr, flush=True)
+        return 2
+    work = WorkUnit(args.task)
+    try:
+        result = run(work, loaded.flow, loaded.executors)
+    except ExecutionError:
+        failed = True
+    else:
+        failed = False
+    if failed:
+        print('switchyard: runtime execution failed', file=sys.stderr, flush=True)
+        return 3
+    starts = [event for event in result.events if event.kind == 'run_started']
+    if len(starts) != 1:
+        raise RuntimeError('expected exactly one run_started event')
+    matches = not required or result.terminal_state in required
+    lines = ['Run: ' + starts[0].run_id, 'Terminal: ' + _safe_display(result.terminal_state)]
+    if not matches:
+        lines.append('Required terminal: ' + ', '.join(_safe_display(name) for name in required))
+    print('\n'.join(lines), flush=True)
+    return 0 if matches else 1

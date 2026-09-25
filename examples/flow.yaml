@@ -1,0 +1,45 @@
+name: bounded-delivery-example
+# Later budget-engine slice; RUNTIME-001 rejects cycles.
+initial: implement
+
+states:
+  implement:
+    executor:
+      type: agent
+      agent: codex
+    limits:
+      max_invocations_per_state_visit: 1
+      invocation_timeout: 15m
+    on:
+      success: test
+      failed: human
+      timeout: human
+      budget_exceeded: human
+
+  test:
+    executor:
+      type: command
+      command: pytest -q
+    on:
+      success: accept
+      failed: fix
+
+  fix:
+    executor:
+      type: agent
+      agent: claude
+    limits:
+      max_state_visits_per_run: 2
+      max_invocations_per_state_visit: 1
+      invocation_timeout: 10m
+    on:
+      success: test
+      failed: human
+      timeout: human
+      budget_exceeded: human
+
+  accept:
+    terminal: true
+
+  human:
+    terminal: true

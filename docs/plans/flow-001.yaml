@@ -1,0 +1,347 @@
+id: FLOW-001
+name: Declarative Flow Definition
+
+goal: |
+  YAML file -> safe parse -> strict configuration validation -> existing Flow,
+  State and concrete Executor objects -> existing runtime.run(). YAML is an
+  additional frontend; runtime remains completely unaware of configuration syntax.
+
+scope:
+  - Separate flow_config library module, immutable LoadedFlow and FlowConfigError
+  - Version 1 schema for command, codex and claude definitions
+  - First intentional external dependency for YAML parsing
+  - Offline loader and bounded repair integration tests, documentation and example
+
+constraints:
+  - Accepted MicroSpec; implementation authorized.
+  - RUNTIME-001..009 foundation is accepted; no RUNTIME-010 work.
+  - Do not modify runtime or any existing executor, envelope, recorder or domain validator.
+  - If a core contract change proves necessary, stop for architecture discussion.
+  - No CLI, plugin system, provider registry, AgentGateway or parallel YAML domain model.
+  - WorkUnit/task is supplied separately by caller, never stored in this schema.
+
+api: |
+  Module flow_config (outside runtime).
+  load_flow(path: str | os.PathLike[str]) -> LoadedFlow
+  LoadedFlow is a frozen dataclass with flow: Flow and executors: Mapping[str, Executor].
+  Copy the executor mapping into MappingProxyType. No run method, session, task,
+  serialized YAML tree, mutable configuration history or runtime lifecycle attached.
+  FlowConfigError(ValueError) is the single boundary for configuration failures.
+  Example: loaded = load_flow(path)
+           run(WorkUnit(task), loaded.flow, loaded.executors)
+  Loading creates no subprocess, provider session, workspace, branch or side effect
+  beyond reading the local file and checking paths. It does not check authentication.
+
+dependency:
+  choice: |
+    Use PyYAML>=6.0.3,<7, a deliberate first external runtime dependency for the
+    configuration frontend. Runtime alone continues to depend only on stdlib.
+    PyYAML supplies a maintained parser and safe scalar/container construction;
+    implementing YAML syntax, quoting and indentation locally is unjustified.
+  alternatives: |
+    A handwritten YAML subset is rejected: ambiguous syntax and compatibility would
+    become our maintenance/security burden. JSON needs no dependency but loses the
+    requested multiline-friendly YAML UX. TOML is a different UX and stdlib tomllib
+    requires Python 3.11, while this project supports Python 3.10. Neither is a
+    fallback format for FLOW-001. Do not auto-detect or implement fallback parsing.
+  installation: |
+    Add repo/requirements.txt with PyYAML>=6.0.3,<7 and document
+    python3 -m pip install -r requirements.txt before full-suite execution.
+    No package publishing/build backend needed for this source-tree library slice;
+    no existing package metadata exists to update. Future package metadata must
+    declare this dependency if it distributes the loader. No CLI entry points.
+    Lazy import PyYAML at load_flow: missing dependency raises FlowConfigError
+    at $dependency with installation guidance, chained from ModuleNotFoundError.
+    Importing/using runtime without PyYAML remains possible. Loader tests must
+    fail clearly when missing, not silently skip the new capability or install it.
+  safe_api: |
+    Use a private subclass of yaml.SafeLoader, passed explicitly to yaml.load.
+    This remains safe loading: no Loader/FullLoader/UnsafeLoader or Python-object
+    constructors. Never modify yaml.SafeLoader resolver/constructor tables globally.
+    Use the pure-Python SafeLoader consistently, not an optional CSafeLoader branch.
+
+schema_v1:
+  top_level: |
+    Mapping; exactly required fields version, initial, executors, states.
+    version: exact int 1, never bool. Missing is an error, not a default.
+    Other integers fail with unsupported flow configuration version: N.
+    initial: nonempty string. executors: mapping of nonempty string names to definitions,
+    possibly empty for terminal-only flows. states: nonempty mapping of nonempty
+    string names to state definitions. All mapping keys must be strings.
+    No task, defaults, environment, credentials, includes or extension fields.
+  executors: |
+    All types require: type, executable, timeout_seconds.
+    type is exactly one of command, codex, claude (case-sensitive).
+    executable is a nonempty absolute path string without NUL.
+    timeout_seconds is exact int or float, excluding bool, positive and finite.
+    Optional workspace is a nonempty path string without NUL; omitted means '.'.
+    command additionally REQUIRES argv: list of strings without NUL (empty allowed).
+    command optionally accepts diagnostic_capture_max_bytes: null or exact int 0..4096;
+    omitted/null means None; bool invalid; 0 preserves enabled-empty semantics.
+    codex/claude accept no argv or diagnostic_capture_max_bytes fields.
+    No env override, model, custom prompt, permission flags, hooks or provider options.
+    Unknown fields are rejected per concrete type, including unused definitions.
+  states: |
+    Terminal form requires terminal: true as its only field. Any other terminal value
+    is rejected; executable states must omit terminal entirely.
+    For terminal=true only the terminal key is allowed: executor/on/budget/input-limit
+    keys are rejected even if empty or null. Terminal has no invocation.
+    For executable states, executor and on are required and terminal is forbidden.
+    executor: nonempty string reference. on: mapping of allowed outcome/event name
+    to nonempty string state target. Empty mapping is structurally valid; runtime
+    retains explicit missing-transition error semantics during execution.
+    Optional max_state_visits_per_run: null or exact int >=0; omission means None.
+    Optional diagnostics_from_previous_max_bytes: null or exact int 0..4096;
+    omission means None. bool is invalid for both. 0 is distinct from None.
+    Allowed on keys are success, failed, error, timeout, cancelled, budget_exceeded.
+    budget_exceeded stays a runtime event, never an executor outcome.
+    Unknown keys, including max_state_visit_per_run, are rejected.
+  parsed_types: |
+    No conversion of strings to numbers/booleans, scalar argv to list, numeric names
+    to strings or null to empty collections. Lists become tuples only when building
+    existing Command.argv, after strict element validation.
+    Private bool resolver recognizes only unquoted lowercase true and false.
+    Bare on/off/yes/no remain strings, preserving the on field and avoiding YAML 1.1
+    bool key collisions. Other SafeLoader scalar resolution remains unchanged:
+    non-string values such as parsed dates are rejected where strings are required.
+    This is a documented scalar policy, not a claim of full YAML 1.2 implementation.
+
+syntax_and_safety:
+  document: |
+    Read UTF-8 from one local file. Empty/comment-only file or explicit null fails
+    at $: expected mapping. Non-mapping root fails likewise. Require exactly one
+    document; even an additional empty document is rejected.
+  forbidden_features: |
+    Reject every explicitly written YAML tag (including explicit standard tags),
+    all anchor declarations and alias uses, and merge keys << at any mapping level.
+    Reject these during parsing/composition, before construction/expansion. No
+    arbitrary object construction, recursive alias structures or merge precedence.
+    Ordinary parser-generated implicit scalar tags are not explicit tags.
+    Safe loading is not a claim of sandboxing hostile resource-exhaustion inputs.
+  duplicate_keys: |
+    Private SafeLoader composition/construction must inspect every mapping node's
+    key-value pairs before dict insertion. Require string keys, compare decoded
+    key strings, and reject a repeated key instead of overwriting. Apply recursively
+    to top level, definitions, state fields and transitions. Quoted/unquoted spellings
+    of the same key collide. Do not flatten merges. Retain a logical path and source
+    mark for the duplicate. Anchors/aliases/tags may be checked through parser events
+    or private composition hooks, never by a handwritten lexical YAML scanner.
+
+paths:
+  flow_file: |
+    Convert input path to an absolute lexical path at the API boundary. Relative
+    input path is relative to caller cwd solely to identify the requested file.
+    Workspace base is this supplied absolute file path's parent, not the target
+    parent after dereferencing a flow-file symlink. Opening follows normal symlinks.
+    Thus a symlinked flow uses the directory where that symlink was addressed.
+    Determinism comparisons use the SAME absolute flow-file path, not an identical
+    relative argument that names different files in different working directories.
+  workspace: |
+    Omitted or '.' means flow-file parent. Resolve relative workspace against that
+    parent; resolve workspace symlinks and '..' to an absolute existing directory.
+    Pass this absolute path to existing constructors. Missing/non-directory workspace
+    is a configuration error; loader never creates it. No sandbox containment rule:
+    explicit absolute paths and '..' may name directories outside the flow directory.
+  executable: |
+    Choose A: require absolute path. No PATH search, tilde expansion, interpolation
+    or executable path rewriting. Preserve the absolute string for the executor.
+    Existing Command validation remains authoritative (including Windows .bat/.cmd).
+    Do not require executable existence/launch permissions at load: these can change
+    and remain normalized launch-error semantics. Workspace existence is a load-time
+    prerequisite only, not a guarantee against later filesystem changes.
+
+validation_layers:
+  syntax: |
+    Safe parsing plus document count/root, forbidden feature and duplicate-key checks.
+    Syntax errors report line/column and $, without echoing source lines or payloads.
+  schema: |
+    Validate version first after syntax/duplicate checks; exact keys/types, required
+    fields, per-type allowlists, local numeric bounds and references with logical paths.
+    Reject nonexistent executor/target/initial references and invalid outcome names
+    here for useful locations; this is local schema checking, not graph traversal.
+  construction: |
+    Resolve workspace and build Command/CommandExecutor, CodexConfig/CodexExecutor,
+    ClaudeConfig/ClaudeExecutor, State, Flow using validated values. Catch expected
+    constructor TypeError/ValueError with field/definition location and preserve cause.
+    Never catch arbitrary implementation bugs as malformed YAML; do not launch tools.
+  domain: |
+    Call existing runtime.validate(flow, executors) before returning LoadedFlow.
+    It is the final authoritative validator for bounded cycles (including unreachable
+    components), terminal existence, budget-handler scope/terminal targets and all
+    existing invariants. Do not duplicate its graph algorithm or inspect/rewrite its
+    error text to infer paths. Wrap FlowValidationError at states with a bounded
+    domain-validation message, preserving original exception as __cause__.
+    runtime.run still performs its own normal validation; do not bypass it.
+
+object_mapping: |
+  command -> Command(executable, tuple(argv), resolved_workspace, timeout_seconds,
+                     diagnostic_capture_max_bytes) -> CommandExecutor(command)
+  codex -> CodexConfig(executable, resolved_workspace, timeout_seconds) -> CodexExecutor
+  claude -> ClaudeConfig(executable, resolved_workspace, timeout_seconds) -> ClaudeExecutor
+  state -> State(executor, on, terminal, max_state_visits_per_run,
+                 diagnostics_from_previous_max_bytes), using keywords/defaults
+  root -> Flow(initial, states)
+  result -> LoadedFlow(flow, read-only copied executor mapping)
+  All three concrete executors are supported now; dispatch is a local fixed branch
+  over three schema variants, not a registration/capability/provider lifecycle API.
+
+errors: |
+  FlowConfigError covers file/UTF-8/parser/schema/expected constructor/domain errors.
+  Preserve original exceptions with raise ... from ... where applicable. Loader
+  dependency failure is included; runtime ExecutionError occurs only after loading.
+  Logical paths use executors.verifier.timeout_seconds or states.fix.on.succes;
+  ambiguous names use bracket notation. Truncate/control-escape user-derived path
+  components and cap the total public message at 512 characters; do not echo argv,
+  task-like values, YAML snippets, credentials or whole serialized documents.
+  Examples:
+    version: missing required field
+    version: unsupported flow configuration version: 2
+    executors.verifier.timeout_seconds: expected positive finite number, got str
+    states.fix.on.succes: unknown outcome/event
+    states.fix.max_state_visit_per_run: unknown field
+    states.fix.on.failed: duplicate mapping key (line 19, column 7)
+    states: domain validation failed (cause: FlowValidationError)
+    $dependency: PyYAML>=6.0.3,<7 required; install with python3 -m pip install -r requirements.txt
+
+example_yaml: |
+  version: 1
+  initial: verify
+  executors:
+    verifier:
+      type: command
+      executable: /usr/bin/python3
+      workspace: .
+      argv:
+        - -c
+        - |
+          import os
+          from pathlib import Path
+          p = Path('result.txt')
+          ok = p.is_file() and p.read_bytes() == b'runtime-009-ok\n'
+          if not ok:
+              os.write(2, b'result.txt must contain exactly runtime-009-ok followed by one newline; current bytes are incorrect')
+          raise SystemExit(0 if ok else 1)
+      timeout_seconds: 5
+      diagnostic_capture_max_bytes: 4096
+    fixer:
+      type: codex
+      executable: /opt/homebrew/bin/codex
+      workspace: .
+      timeout_seconds: 120
+  states:
+    verify:
+      executor: verifier
+      on:
+        success: accepted
+        failed: fix
+        error: escalated
+        timeout: escalated
+    fix:
+      executor: fixer
+      diagnostics_from_previous_max_bytes: 4096
+      max_state_visits_per_run: 1
+      on:
+        success: verify
+        error: escalated
+        timeout: escalated
+        budget_exceeded: escalated
+    accepted:
+      terminal: true
+    escalated:
+      terminal: true
+
+acceptance:
+  - Valid YAML loads into exact existing Flow/State objects.
+  - All three executor variants construct existing concrete implementations.
+  - Relative/omitted workspace resolves against addressed flow-file directory.
+  - Same absolute file location is independent of current cwd, including documented symlink policy.
+  - No task field is accepted; caller supplies a separate immutable WorkUnit.
+  - YAML bounded verify/fix flow runs offline with real Command and fake Codex boundary.
+  - Verifier diagnostics use unchanged bounded capture and immediate-predecessor handoff.
+  - Fake Codex receives exact RUNTIME-009 JSON-framed diagnostics.
+  - Accepted/escalated outcomes/events match equivalent Python-defined flow.
+  - Unknown top/executor/state fields are rejected, including misspelled limits.
+  - Misspelled transition outcome/event is rejected with a useful path.
+  - Invalid parsed types are rejected without coercion, including bool numeric limits.
+  - Unsupported version fails explicitly.
+  - Missing version fails without implicit default.
+  - Duplicate keys at all mapping levels are rejected deterministically.
+  - Unsafe tags cannot construct Python objects; forbidden YAML features fail before construction.
+  - Missing executor/state references are rejected before any execution.
+  - Existing domain validator rejects unbounded cycles and invalid budget/terminal definitions.
+  - Config errors expose logical path and preserve primary causes without dumping content.
+  - Core remains YAML-independent; immutable LoadedFlow mapping cannot be mutated.
+  - Existing 105 tests retain their meaning and pass on applicable platforms.
+  - Mandatory suite is offline and makes no real provider/model calls.
+
+verification:
+  - |
+    Use minimal inline YAML written to temporary files, not examples/flow.yaml as
+    an executable fixture. Assert exact constructed objects/defaults and read-only
+    mappings; load must not call Popen, runtime.run or provider executors.
+  - |
+    Generate bounded repair YAML with sys.executable and a controllable fake Codex
+    executable/process boundary. Start with broken artifact. Assert exact diagnostics,
+    accepted success path and failed-repair budget refusal with one scheduled repair.
+    Compare normalized event fields to Python equivalent, accounting only for new
+    run IDs. Compare state/executor definition equivalence after mapping reordering.
+  - |
+    Test command/codex/claude construction without AI calls; preserve fixed prompts,
+    capture/admission/recorder behavior through existing regression suite. No auth probe.
+    SHA-256 all runtime files before/after must match.
+  - |
+    Table-test missing/unknown fields at every level, invalid versions, bool limits,
+    numeric strings, nulls, terminal forbidden fields, argv element types, NaN/Inf,
+    relative executable, missing workspace, references, typo outcomes, and cycle errors.
+  - |
+    Test empty/comment/null/non-mapping files, multiple documents, duplicate logical
+    names/keys (also differently quoted), unsafe and explicit standard tags, anchors,
+    aliases, recursive aliases and merge keys. Assert bare on remains a string key;
+    true/false are booleans, quoted false is a string, yes/off are not coerced.
+    Ensure private loader changes do not mutate global PyYAML SafeLoader behavior.
+  - |
+    Test cwd independence, '.', omitted workspace, absolute workspace, '..', and
+    flow-file/workspace symlink cases on applicable platforms. Test cause identity,
+    bounded error messages with control characters, dependency absence and no fallback.
+  - |
+    Install declared dependency as setup, then run python3 -m unittest discover -s tests -v
+    from repo. Tests themselves do not download/install anything. Report parser/Python
+    version, platform/skips, new tests and preserved prior 105-test results.
+
+planned_files:
+  - flow_config.py (new library outside runtime)
+  - requirements.txt (first external dependency)
+  - tests/test_flow_config.py (new strict schema/safety/path tests)
+  - tests/test_flow_config_repair.py (new offline equivalent-flow proof)
+  - examples/bounded-repair.yaml (new documented example; explicit local executable prerequisites)
+  - README.md (installation, API, paths, accepted RUNTIME-009 smoke as user-reported fact)
+  - docs/plans/flow-001.yaml (this MicroSpec)
+
+non_goals:
+  - CLI, package publishing, plugin/provider registry or AgentGateway
+  - Schema migrations, includes/imports, YAML templates or environment interpolation
+  - Secrets/substitution, arbitrary environment overrides or credentials
+  - Conditions, dynamic transitions, Python hooks or custom executor plugins
+  - ContextEngine, ArtifactStore, remote definitions, UI or graph editor
+  - Changes to RUNTIME-001..009 or real provider invocation during loader verification
+
+references:
+  - https://pypi.org/project/PyYAML/6.0.3/
+  - https://pyyaml.org/wiki/PyYAMLDocumentation
+
+implementation_confirmations: |
+  Existing public runtime.validate(flow, executors) is present at runtime/__init__.py:
+  no new validation API, copying of graph rules or core changes are needed.
+  Keys at every mapping level must be scalar strings after private resolution.
+  Private resolver lists/dictionary are copied before modification; global safe_load
+  behavior is tested before/after. Import flow_config does not import PyYAML eagerly.
+  Explicit symlink test loads A/flow.yaml through B/flow.yaml and asserts workspace B.
+
+verification_result: |
+  2026-09-14: macOS 26.6.2 arm64, Python 3.14.7, PyYAML 6.0.3.
+  Full suite 114 tests: 113 PASS, one existing Windows batch-path skip, 6.263s.
+  All 22 acceptance criteria passed on this platform; no model calls.
+  YAML/Python accepted and escalated event semantics match after ID normalization.
+  Existing runtime.validate used unchanged; all runtime SHA-256 values match.
+  Symlink A/B resolution, controlled missing dependency, unchanged global resolver,
+  unsafe YAML, duplicate/non-string keys and canonical terminal forms verified.

@@ -1,0 +1,243 @@
+id: FLOW-002
+name: Switchyard CLI
+
+goal: |
+  Command line -> existing load_flow -> WorkUnit(task) -> existing runtime.run
+  -> human-readable terminal result and deterministic exit status. CLI is a thin
+  frontend, not a workflow engine or a second configuration validator.
+
+scope:
+  - Source-tree switchyard package with python -m entrypoint
+  - validate and run subcommands with optional terminal assertion
+  - Offline main(argv) and real CLI subprocess tests
+  - README usage documentation
+
+constraints:
+  - Accepted MicroSpec; implementation authorized.
+  - Do not change runtime, executors, recorder, invocation contracts or FLOW-001 schema.
+  - Do not change flow_config.py; any genuine blocker requires architecture review.
+  - No new dependencies beyond the existing PyYAML requirement for load_flow.
+  - No implicit transitions, retries, provider decisions or executor outcome exit codes.
+  - No CLI package publishing, installed console script or repository restructuring.
+
+entrypoint: |
+  Add switchyard/__init__.py (minimal package marker), switchyard/__main__.py
+  (raise SystemExit(main())), and switchyard/cli.py (main(argv=None) -> int).
+  argparse uses prog='switchyard', required subcommands and allow_abbrev=False
+  for root and subcommand parsers. main(None) reads sys.argv[1:]; tests may pass
+  a list. Expected application paths return int; argparse help/usage keep their
+  ordinary SystemExit(0/2) behavior. Do not catch SystemExit to disguise usage errors.
+  Source-tree execution from repo: python3 -m switchyard ... after installing
+  requirements into that interpreter's environment. From other directories the
+  package must already be importable (e.g. explicit PYTHONPATH pointing at repo).
+  Do not add sys.path hacks, chdir, an install step or a build backend.
+
+cli_grammar: |
+  python3 -m switchyard [-h]
+  python3 -m switchyard validate [-h] FLOW_FILE
+  python3 -m switchyard run [-h] FLOW_FILE --task TEXT
+      [--require-terminal NAME]...
+  Each repeated --require-terminal accepts exactly one name. It is run-only.
+  --task is required even for a terminal-initial flow; empty string is valid under
+  existing WorkUnit semantics. No task-file/stdin/environment input modes.
+  Standard argparse '--' separator and '--task=TEXT' spelling are available;
+  values beginning with '-' can use --task=... / --require-terminal=... .
+  Reject unknown options, missing subcommand/arguments and option abbreviations.
+  --help is read-only and must not call load_flow or require installed PyYAML.
+  No --json, --event-log, --record, --version or PATH resolution option in this slice.
+
+exit_codes:
+  0: validate succeeded, or run reached a normal terminal satisfying any requested assertion
+  1: run reached a normal terminal outside the explicitly required terminal set
+  2: argparse usage error, FlowConfigError, or invalid required-terminal expectation
+  3: runtime.run raised ExecutionError
+
+terminal_assertion: |
+  No terminal names are reserved. Without --require-terminal every normal terminal
+  yields exit 0, including escalated, failed or any user-defined name.
+  With the option, compare the actual terminal with the set of required names.
+  At least one match means exit 0; normal completion without a match means exit 1.
+  This is a post-run CLI assertion only. It cannot select transitions or change
+  executor results. Multiple values use membership, not conjunction.
+  Duplicates are harmless; preserve first-occurrence order for displayed requirements.
+  Before execution check EVERY supplied name against loaded.flow.states: it must
+  exist and be terminal. Even one invalid name among valid ones fails with exit 2
+  before WorkUnit construction/runtime.run/executor invocation. Do not discard an
+  invalid name because another one would match. No case folding or name coercion.
+
+validation_order: |
+  1. Parse CLI grammar with argparse; on usage error stop with exit 2.
+  2. Call load_flow(FLOW_FILE) once. This owns YAML/schema/constructor/domain validation.
+  3. For validate: print Valid and return 0; never construct WorkUnit or call runtime.
+  4. For run: validate all requested terminal names against the loaded states.
+  5. Construct WorkUnit(task) without additional task validation/coercion.
+  6. Call runtime.run(work_unit, loaded.flow, loaded.executors), with no recorder.
+  7. Print existing run ID/terminal; evaluate the optional terminal membership and
+     return 0 or 1. Do not reinterpret individual invocation outcomes.
+  No validation subprocess, provider authentication probe or model call precedes run.
+  Runtime retains its own normal validation. CLI does not call executors directly.
+
+paths: |
+  Pass the caller's flow path to load_flow without resolve() or chdir(). For Valid
+  output only, compute os.path.abspath(FLOW_FILE), preserving the addressed symlink
+  instead of dereferencing it. Relative CLI path identifies a file from caller cwd;
+  relative workspace inside YAML retains FLOW-001's addressed-file-directory rule.
+  Absolute executable paths remain required in YAML; no PATH lookup or schema change.
+
+output:
+  normal_run: |
+    stdout, two newline-terminated lines:
+      Run: <existing run_id>
+      Terminal: <terminal_name>
+    stderr empty; exit 0 if assertion absent or satisfied. Read run_id from the
+    existing run_started event in RunResult.events; do not generate another ID.
+    Formatting/order is deterministic; runtime-generated IDs naturally vary by run.
+  validate: |
+    stdout: Valid: <lexical absolute flow path> followed by newline.
+    stderr empty; exit 0. No run ID is allocated.
+  mismatch: |
+    stdout, three lines:
+      Run: <existing run_id>
+      Terminal: escalated
+      Required terminal: accepted
+    For multiple distinct names:
+      Required terminal: accepted, skipped
+    Names retain first-occurrence CLI order, never hash/set iteration order.
+    stderr empty; exit 1. This is normal runtime completion, not ExecutionError.
+  rendering: |
+    Ordinary printable names/paths are shown literally. Names/paths containing
+    nonprintable characters, whitespace or delimiters ambiguous in a requirements
+    list are displayed as a quoted escaped string (stdlib json.dumps with
+    ensure_ascii=True), preserving one-line output. This is human-readable display,
+    not a --json/reporting API. Comparison always uses original unmodified names.
+    Config error text is control-escaped and bounded to 512 display characters.
+    Never print task, diagnostic bytes, executor argv, environment, credentials,
+    natural-language provider output or full events on normal/known-error paths.
+
+exceptions:
+  config: |
+    Catch FlowConfigError from load_flow only. stderr:
+      switchyard: <bounded control-escaped FlowConfigError message>
+    stdout empty, exit 2, no traceback or chained cause rendering.
+    This includes missing dependency and missing/unreadable flow file errors.
+  terminal_validation: |
+    stderr examples (bounded, with safe name rendering):
+      switchyard: required terminal does not exist: accpeted
+      switchyard: required state is not terminal: verify
+    stdout empty, exit 2, no runtime invocation. Limit complete message to 512
+    display characters without changing the name used for validation.
+  execution: |
+    Catch ExecutionError from runtime.run only. Print this exact fixed stderr line:
+      switchyard: runtime execution failed
+    stdout empty, exit 3. Do not print str(error), __cause__, recorder_error or events:
+    arbitrary executor failures can carry sensitive content. A fixed description is
+    the minimal safe boundary, with programmatic diagnostics still available to
+    library callers. Do not display run_id on failure in this slice.
+    A timeout/error outcome followed by a declared terminal transition does NOT
+    enter this branch; it is ordinary completion and uses terminal assertion rules.
+  unexpected: |
+    Catch no blanket Exception/BaseException. Unexpected CLI/loader programmer bugs
+    propagate with a traceback. In particular do not relabel FlowValidationError
+    raised unexpectedly after successful load, TypeError, KeyboardInterrupt or I/O
+    errors writing output as config errors or exit 3. Only recognized application
+    boundaries have the stable 0/1/2/3 contract; uncaught Python failures/signals use
+    normal interpreter/OS behavior. Sensitive-output guarantees apply to known-error
+    handlers, not arbitrary unhandled programmer-error tracebacks.
+  argparse: |
+    Help uses stdout/SystemExit(0); usage uses stderr/SystemExit(2), no traceback.
+    Ordinary argparse error formatting may identify invalid supplied arguments;
+    do not add logging of the parsed namespace or separately echo --task.
+
+acceptance:
+  - validate valid YAML exits 0 with the lexical absolute path.
+  - validate invalid YAML exits 2 with safe config error on stderr.
+  - validate never runs runtime/executors or model calls.
+  - command-only run prints terminal/run ID and exits 0 on normal completion.
+  - YAML bounded repair with offline fake Codex reaches accepted.
+  - Normal escalated terminal without assertion exits 0.
+  - Normal escalated terminal requiring accepted exits 1.
+  - Normal accepted terminal requiring accepted exits 0.
+  - Multiple required terminals use set membership with deterministic display order.
+  - Unknown required terminal is rejected before any executor invocation.
+  - A nonterminal required state is rejected before any executor invocation.
+  - FlowConfigError shows no traceback, task or provider details.
+  - CLI usage errors exit 2; help exits 0 without loading a flow.
+  - ExecutionError exits 3 with a fixed safe message.
+  - Runtime failure output omits diagnostic bytes/task/cause/event history.
+  - Relative flow file paths work from the caller's cwd.
+  - Workspace and addressed-flow-symlink semantics remain unchanged without chdir.
+  - Task is passed separately and unchanged in the existing WorkUnit, including empty.
+  - Default suite is fully offline; no real Codex/Claude invocations.
+  - All existing 114 tests retain meaning; runtime/flow_config SHA-256 files match.
+
+verification:
+  main_tests: |
+    Invoke main(argv) with captured stdout/stderr and controlled loader/run boundaries.
+    Assert call ordering, one load, WorkUnit identity/content, empty task behavior,
+    no recorder and no direct executor calls. Prove validate/help and invalid
+    required-terminal cases never call run, even with valid names also present.
+    Assert all four exit statuses, duplicate/multiple requirements, safe name output,
+    unknown arbitrary terminal names (no special accepted/escalated logic), and fixed
+    ExecutionError output when exception/cause/events contain task/diagnostic markers.
+    Unknown internal exceptions must propagate unchanged instead of being relabeled.
+  process_tests: |
+    Use subprocess.run([sys.executable, '-m', 'switchyard', ...], timeout=..., capture_output=True)
+    in temporary test directories. Make repo importable via explicit test PYTHONPATH;
+    CLI itself must not rewrite imports/cwd. Test real exit status/stdout/stderr for
+    valid/invalid validate, missing --task usage, help, command-only terminal success,
+    terminal mismatch, invalid required state before a marker-writing command, and
+    ExecutionError from a real command flow with a missing declared outcome transition.
+    Use a marker-writing command to prove validate cannot execute it. Compare run-ID
+    formatting/identity without asserting a fixed UUID value. No shell=True.
+  repair_tests: |
+    Load the existing bounded repair YAML shape with absolute test executable paths.
+    A controllable fake Codex process checks exact existing prompt/flags and either
+    fixes the artifact or leaves it broken while claiming success. Exercise accepted,
+    escalated-without-assertion, escalated-mismatch, accepted-match and multiple-name
+    membership through main; at least a command-only subset runs through the real CLI
+    process entrypoint. Process-boundary interception is test-only, never a CLI feature.
+    Assert exactly one runtime-scheduled Codex repair invocation in each bounded run;
+    this does not constrain provider-internal turns/tokens/tools/cost. No model calls.
+  paths_and_regression: |
+    Explicit symlink A/flow.yaml addressed through B/flow.yaml: workspace '.' writes
+    its marker in B, not A or caller cwd. Run CLI with a relative path from another
+    directory. Confirm no runtime/loader changes with hashes. Run complete offline
+    suite after installing existing requirements; tests never install dependencies.
+    Report Python/PyYAML/platform versions, pass counts and platform-specific skips.
+
+planned_files:
+  - switchyard/__init__.py (new)
+  - switchyard/__main__.py (new)
+  - switchyard/cli.py (new)
+  - tests/test_cli.py (new main and offline repair tests)
+  - tests/test_cli_process.py (new process exit/output/path tests)
+  - README.md (source-tree invocation and exit-code contract)
+  - docs/plans/flow-002.yaml (this MicroSpec)
+
+non_goals:
+  - Installed console script, packaging metadata or publishing
+  - task-file/stdin, interactive shell, environment task input
+  - JSON reports, event-log/record/jsonl options or run persistence/replay
+  - PATH executable resolution or FLOW-001 schema changes
+  - Secret management, daemon/server, TUI/web UI or graph visualization
+  - Plugin discovery, remote flows, parallel runs or provider abstractions
+
+implementation_invariants: |
+  Fully write and flush normal stdout before returning 0/1; validate likewise before
+  returning 0. Output BrokenPipeError/OSError propagates, never maps to an expected
+  config/runtime failure. Keep output outside exception-mapping try blocks.
+  One private safe-display helper handles terminal names, required names, paths and
+  bounded known-error text without mutating comparison values. Quote ambiguous text
+  with json.dumps(ensure_ascii=True), escape controls and preserve one output line.
+  Find exactly one run_started event by kind, not tuple position. Missing/multiple
+  events raise an internal invariant exception; no fallback ID or ExecutionError.
+
+verification_result: |
+  2026-09-14: macOS 26.6.2 arm64, Python 3.14.7, PyYAML 6.0.3.
+  Full suite: 124 tests, 123 PASS, one existing Windows batch-path skip, 7.809s.
+  All 20 acceptance criteria passed; prior 114 tests unchanged. Real CLI process
+  status/output checks cover validate success/error, run normal/mismatch, invalid
+  terminal, usage/help and ExecutionError. Fake-Codex YAML repair through main
+  covers accepted/escalated/assertion membership with one scheduled invocation.
+  Output write/flush failures propagate; safe rendering and semantic run_started
+  lookup tested. Protected runtime/loader hashes match. No model calls.

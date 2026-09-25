@@ -1,0 +1,182 @@
+id: RUNTIME-006
+
+goal: |
+  Prove WorkUnit -> real Claude Code invocation -> workspace side effects ->
+  normalized ExecutorResult through the existing Executor contract. Demonstrate
+  that CodexExecutor, ClaudeExecutor, and CommandExecutor coexist without any
+  provider-specific core changes. Technical success is not task acceptance.
+
+scope:
+  - Concrete immutable ClaudeConfig and ClaudeExecutor
+  - Composition with unchanged CommandExecutor
+  - Offline fake-Claude/process-boundary tests
+  - Separate manual opt-in Claude smoke
+  - Documentation comparing two concrete AI executors, without generalization
+
+constraints:
+  - Accepted MicroSpec; implementation authorized.
+  - Python standard library only.
+  - Do not change state machine, Flow, WorkUnit, ExecutorResult, Event, budgets,
+    recorder, CommandExecutor, or CodexExecutor for provider integration.
+  - No AgentGateway, AgentDriver base class, registry, factory, capabilities,
+    generic AgentConfig, provider enum, or agent-process abstraction.
+  - WorkUnit remains task-only; ClaudeExecutor never receives workflow transitions.
+  - No natural-language output inspection, acceptance inference, or automatic retry.
+
+configuration:
+  claude_executable: Absolute executable path, preferably the native Claude binary.
+  workspace: Absolute existing directory; absent workspace is operational error.
+  invocation_timeout_seconds: Positive finite number excluding bool, per Command.
+  ownership: |
+    ClaudeExecutor(ClaudeConfig(...)).run(WorkUnit(task)). Configuration belongs
+    only to the concrete executor. No model/session/permissions fields in WorkUnit.
+    Reuse Command's structural validation; no filesystem provisioning or login.
+
+transport:
+  proposed_argv: |
+    [claude_executable, "--print", "--no-session-persistence",
+     "--output-format", "text", "--restricted",
+     "--permission-mode", "acceptEdits", "--permission-prompts", "none",
+     "--tools", "Read,Edit,Write,Glob,Grep", "--disallowedTools", "mcp__*",
+     "--", "WorkUnit task:\n" + work_unit.task]
+  launch: |
+    shell=False, cwd=workspace, inherited environment, all standard streams DEVNULL.
+    Task is one literal argument with a fixed label; no interpolation into flags,
+    shell parsing, stdin protocol, truncation, or prompt/result logging.
+  independence: |
+    Fresh --print process per invocation, no --continue, --resume, --session-id,
+    fork, or persisted conversation dependency. Native internal model/tool turns
+    can occur inside one invocation; runtime does not manage a conversation.
+  permissions: |
+    Proposed limited policy for this first slice: file read/edit/write/search
+    tools only; no Bash, subagent, or browser tool. acceptEdits permits ordinary
+    workspace edits; none denies anything still needing a permission prompt.
+    --tools restricts built-in tools only. Explicit --disallowedTools mcp__*
+    denies MCP tools, including any made available by managed configuration.
+    No bypassPermissions or dangerous-skip flags. This is CLI policy, not runtime
+    filesystem isolation. A restriction/policy refusal is not task acceptance.
+
+authentication_and_configuration:
+  local_auth: |
+    Use the existing local Claude authentication through its normal startup and
+    inherited environment. Do not read/copy credentials, run login/auth commands,
+    or print secrets. Do not replace the user's authentication directory.
+  isolation: |
+    Use --restricted, not --safe-mode or --setting-sources. User/project/local
+    settings are ignored; file tools are confined to working directories and
+    command/code tools and WebFetch are not enabled. Keep explicit file-only tools.
+    Managed settings and inherited environment may still affect invocation and
+    provider/model behavior. This is not hermetic execution; runtime does not
+    bypass organizational policy. Local authentication is not replaced.
+    The slice does not depend on CLAUDE.md loading and makes no claim about its
+    discovery under restricted mode. No Context Engine or instruction-file loader.
+  compatibility: |
+    Installed CLI checked read-only: Claude Code 2.1.266 at /opt/homebrew/bin/claude.
+    Combined flags checked with --help, without model/auth invocation. Official
+    docs corroborate flags; help is not proof of runtime auth or tool permissions.
+    Managed policy takes precedence; rejected flags/config follow technical error.
+
+process_execution:
+  reuse: |
+    Construct Command from the concrete config and argv; call unchanged
+    CommandExecutor(command).run(work_unit). Map its failed to Claude error;
+    preserve success, error, timeout, and propagate implementation exceptions.
+    Do not extract or duplicate deadline/kill/wait logic.
+  timeout: |
+    Deadline begins before Popen. Creation consumes time; wait only remaining
+    allowance. Timeout returns after direct-process exit and wait confirmation.
+    Descendants are not supervised and may continue workspace mutations after
+    timeout. This is not a complete cancellation boundary for agent side effects.
+    The same limitation applies to wrappers that spawn the actual Claude process.
+
+outcomes:
+  success: Exit 0 means technical CLI completion only, even if work is wrong or absent.
+  error: Launch OSError, absent workspace, or nonzero CLI exit including auth/provider failures.
+  timeout: Invocation deadline exhausted with the existing direct-process cleanup guarantee.
+  internal_error: Escaped implementation exceptions follow ADR-007 / ExecutionError without retry.
+  unused: failed and cancelled are not provider outcomes in this slice.
+
+workspace:
+  - Work directly in the configured existing workspace.
+  - No branch/worktree creation, rollback, or transactional mutations.
+  - Side effects before error/timeout may remain; descendants may mutate after timeout.
+  - A following CommandExecutor verifies observable file bytes, not agent text.
+
+output:
+  - stdout/stderr DEVNULL; no capture, parsing, or metadata extension.
+  - No text or JSON response inspection to decide correctness.
+  - Authentication/provider failure classification uses CLI nonzero exit only.
+  - If CLI reports a problem in text but exits 0, technical success remains success.
+
+acceptance:
+  - Literal WorkUnit.task reaches Claude without provider-specific fields in WorkUnit.
+  - Concrete ClaudeExecutor implements the unchanged Executor contract.
+  - Exit 0 maps to success; nonzero/launch failure to error; deadline to timeout.
+  - Misleading natural-language output never determines acceptance.
+  - Workspace mutations are visible to the following deterministic verifier.
+  - Claude -> Command verifier -> accepted/failed works without core changes.
+  - Changing only verifier transition changes terminal result without changing ClaudeExecutor.
+  - Every invocation starts a new process without continuation or automatic retry.
+  - Timeout preserves confirmed direct-process exit and documented descendant limitations.
+  - Existing CodexExecutor, CommandExecutor, persistence and budget behavior is unchanged.
+  - All 62 existing tests retain meaning and pass on applicable platforms.
+  - Default suite requires no real Claude/Codex calls, credentials, network, or model tokens.
+  - CodexExecutor, ClaudeExecutor and CommandExecutor coexist as ordinary executors.
+  - Manual opt-in smoke separately checks a real Claude artifact through CommandExecutor.
+
+verification:
+  - Run the full offline unittest suite, retaining applicable platform skips.
+  - |
+    Assert exact argv, including restricted/file-only policy and absence of safe-mode, literal task
+    (Unicode/newlines/flag-like text), cwd and DEVNULL, and no credential reads.
+  - |
+    Use controllable fake Claude executable/process boundary for correct/incorrect
+    artifacts, exit 0/nonzero, missing executable/workspace, timeout, mutations
+    before failure, misleading output, fresh processes and escaped exceptions.
+  - |
+    Use real CommandExecutor verification with fake Claude and vary only verifier
+    transitions. Test that CLI exit 0 with incorrect artifact reaches failed.
+  - |
+    Register concrete CodexExecutor, ClaudeExecutor and CommandExecutor objects
+    together in a test-local executor dictionary; intercept AI process boundaries
+    with fakes. Verify ordinary runtime dispatch without provider branches.
+  - Compare unchanged core/provider-independent files and existing tests before/after.
+
+real_smoke:
+  entrypoint: |
+    manual_smoke/claude_smoke.py, main guard, required --run-real and absolute
+    --claude-executable. Not a unittest-discovered test. Import/missing opt-in
+    must not launch CLI. One agent invocation, finite 120-second deadline, no retry.
+  scenario: |
+    Fresh TemporaryDirectory; task asks for result.txt with exact bytes
+    'runtime-006-ok\n'. ClaudeExecutor -> CommandExecutor verifier -> terminal.
+    Verifier uses sys.executable and exact-byte filesystem checks. Agent error or
+    timeout leads to failed. PASS only when terminal accepted; report technical
+    agent outcome separately from verifier outcome, CLI version and platform.
+  diagnostics: |
+    On smoke failure, print exact CLI argv as JSON and a shell-quoted manual rerun
+    command with its cwd. Retain the temporary workspace on failure so the command
+    remains usable; print its path. Successful smoke cleans up its test workspace.
+    Diagnostic rerun is manual, outside runtime acceptance, uses terminal output,
+    and may consume another model call. Never rerun automatically. The prompt is
+    a fixed nonsecret smoke task; credentials/environment values are not printed.
+    Preparation/implementation errors also print available diagnostic information
+    before exiting unsuccessfully. No capture is added to production executors.
+  prerequisites: |
+    Installed CLI and existing usable local authentication. Execution explicitly
+    opts into real network/model cost. If not run, report NOT RUN, never PASS.
+
+non_goals:
+  - Generic provider abstractions or refactoring Codex to a shared agent base
+  - Sessions/resume/continuation or runtime multi-turn protocol
+  - SDK/App Server integration
+  - Context Engine, model selection, token/cost budgets
+  - Fallback/retry/fix loops or agent-to-agent communication
+  - Process-tree supervision, worktree management, rollback
+  - Bounded verifier output or diagnostic feedback into agent
+  - Runtime sandbox/isolation infrastructure
+
+references:
+  - https://code.claude.com/docs/en/cli-reference
+  - https://code.claude.com/docs/en/settings
+  - https://code.claude.com/docs/en/permissions

@@ -1,0 +1,74 @@
+id: RUNTIME-001
+
+goal: |
+  Prove declarative flow -> executor result -> runtime-owned transition
+  -> terminal state using a deterministic fake executor and in-memory events.
+
+scope:
+  - WorkUnit as an explicit immutable invocation payload
+  - Flow definition with required initial, state definitions, and terminal states
+  - Normalized ExecutorResult and Executor interface
+  - Deterministic fake test executor
+  - Pure state-machine runner and pre-execution flow validation
+  - In-memory execution event collection
+  - Focused deterministic tests
+
+constraints:
+  - Python is the baseline; final language selection remains a separate decision.
+  - State declaration order has no semantic meaning.
+  - Every invocation receives the explicit immutable WorkUnit payload.
+  - Provider session history is never implicitly required context.
+  - Executor outcomes are success, failed, error, timeout, or cancelled.
+  - ExecutorResult has no next_state or other transition-selection authority.
+  - budget_exceeded is a runtime event, never an executor outcome.
+  - The runner alone maps outcomes to declared transitions.
+  - All cycles are prohibited in this slice.
+  - No implicit retries, fallbacks, or default transitions exist.
+  - The outcome vocabulary includes timeout, but deadline enforcement is deferred.
+
+acceptance:
+  - |
+    The entire flow is validated before any executor call, including required
+    initial, valid state definitions, terminal states, and executor references.
+  - References to nonexistent states, including initial, are rejected.
+  - All cycles are rejected, including self-loops and unreachable cycles.
+  - |
+    The executor returns only a normalized ExecutorResult; its contract cannot
+    express next_state, and malformed results produce an explicit runtime error.
+  - Only the runtime maps the executor outcome to a declared transition.
+  - |
+    Changing only a transition target in the flow changes the reached terminal
+    state without changing the executor or its returned result.
+  - Terminal states never invoke an executor, including when initial is terminal.
+  - A missing transition for a received outcome/event produces an explicit runtime error.
+  - |
+    Execution events distinguish run_id, state_visit_id, and invocation_id;
+    invocation events correlate all three, each visit/invocation has its own ID,
+    and terminal visits have no invocation.
+
+verification:
+  - |
+    Validate missing initial, nonexistent state references, invalid state/executor
+    definitions, self-loops, and multi-state cycles; assert zero executor calls.
+  - |
+    Run the same fake executor against flows differing only in a transition target;
+    assert different terminal states and matching recorded runtime transitions.
+  - |
+    Check terminal-only execution, missing transitions, malformed results, immutable
+    WorkUnit delivery, and independence from state declaration order.
+  - |
+    Inspect in-memory events across multiple visits, invocations, and runs to verify
+    distinct identities, correlation, and absence of terminal executor calls.
+
+non_goals:
+  - Command/subprocess executor
+  - Persistent event store / JSONL
+  - Retries
+  - Budgets
+  - Timeouts / deadline enforcement
+  - AI providers
+  - Agent Gateway
+  - Context Engine
+  - MicroSpec parsing
+  - Resume/replay
+  - Presets

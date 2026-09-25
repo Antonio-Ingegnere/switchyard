@@ -1,0 +1,266 @@
+id: RUNTIME-008
+
+goal: |
+  Prove real CommandExecutor stdout/stderr -> bounded diagnostic capture ->
+  InvocationResponse.diagnostics -> existing RUNTIME-007 handoff to an independent
+  fake consumer. Only the command exit/deadline result determines the outcome.
+
+scope:
+  - One optional Command field and private synchronous capture implementation
+  - Offline real-subprocess and controlled process-boundary tests
+  - Documentation of retention, cleanup, platform support and limitations
+
+constraints:
+  - Accepted MicroSpec; implementation authorized.
+  - Python standard library only; no model calls or manual provider smoke runs.
+  - No changes to public runtime.run, invocation envelopes or state admission.
+  - WorkUnit remains task-only and ExecutorResult remains outcome-only.
+  - CodexExecutor and ClaudeExecutor remain unchanged and use capture disabled.
+  - Event and JsonlRecorder remain unchanged; diagnostic content stays in memory.
+  - CommandExecutor still rejects diagnostic INPUT; this slice adds output only.
+
+command_api: |
+  Append diagnostic_capture_max_bytes: int | None = None to immutable Command.
+  None keeps stdin/stdout/stderr DEVNULL and response.diagnostics=None.
+  Exact int 0..4096 enables capture, including 0. Reject bool and other types
+  with TypeError; negative or >4096 with ValueError at Command construction.
+  Existing four positional arguments and their validation remain unchanged.
+
+stream_policy: |
+  With capture enabled use stdin=DEVNULL, stdout=PIPE, stderr=STDOUT, binary mode,
+  bufsize=0, shell=False. One pipe, one byte budget, no stream tags or channels.
+  Preserve bytes in their observed pipe order. This does not promise reproducible
+  interleaving between independently buffered stdout/stderr writers, or flush
+  output still buffered in the child. Exact ordering tests use sequential os.write.
+
+retention:
+  comparison: |
+    Prefix is simple and preserves the opening error/context, but loses final
+    summaries. Tail is equally bounded and favors verifier/compiler summaries,
+    while losing the beginning. Prefix+tail preserves both but needs a split,
+    joining and marker rules, especially at tiny caps. Choose tail for this slice.
+  rule: |
+    For cap B retain exactly the last min(B, bytes_read) RAW bytes of the observed
+    merged stream. Continue reading and discarding overwritten bytes after B.
+    B=0 retains nothing but still drains. There is no textual truncation marker
+    and no completeness/truncation metadata. A payload is a possibly incomplete
+    diagnostic tail, never a full-log guarantee.
+  utf8: |
+    At completion decode the retained raw tail as UTF-8 with errors='replace',
+    then encode as UTF-8. If the encoded value exceeds B, keep its longest suffix
+    of complete UTF-8 code points fitting B: take its last B bytes and discard
+    any leading continuation bytes. For B=0 the result is b''.
+    Construct DiagnosticPayload only from this final valid bounded byte string.
+    Decode once after retention, so read-chunk boundaries cannot change the result.
+    A raw tail starting mid-character may produce replacement characters; they
+    count toward B and may themselves be removed by final byte limiting.
+    Arbitrary invalid bytes never cause a verifier contract error merely because
+    they are invalid UTF-8. This is byte-tail retention, not a Unicode-text tail.
+  examples: |
+    ASCII b'abcdef', B=4 -> b'cdef'. B=0 always -> b'' after successful launch.
+    UTF-8 'Aé', B=3 -> 'Aé'; B=2 -> 'é'; B=1 -> empty payload.
+    Raw b'A\xff', B=4 -> UTF-8 'A�'; B=3 -> '�'; B=2 -> empty payload.
+    No marker is added when bytes/code points are discarded.
+
+bounded_io:
+  mechanism: |
+    Use one nonblocking read endpoint (os.set_blocking(fd, False)) and os.read
+    with a fixed maximum chunk of 4096 bytes. No communicate(), readline(),
+    read-all, background reader, queue, temporary output file or logging worker.
+    The synchronous invocation thread owns polling, draining, retention and cleanup.
+  live_process: |
+    Between every read attempt check direct-process completion and the invocation
+    deadline. While the process is live, keep draining regardless of retained cap.
+    On would-block, yield for at most 5 milliseconds, capped by remaining deadline,
+    then recheck. EOF disables further reads but does not imply process completion;
+    continue waiting for the direct process within its remaining deadline.
+    A continuously writing child cannot starve deadline/process-status checks.
+    Do not wait for process completion before starting to drain its pipe.
+  memory: |
+    Retained raw content <= B <= 4096; one read result <= 4096 bytes; each retention
+    update uses at most B+4096 bytes of temporary content. No list of read chunks.
+    UTF-8 decoding has at most B code points; re-encoding uses at most 3B bytes
+    due to replacement expansion. Suffix conversion uses only bounded copies of
+    these buffers. The final payload <= B. Python object/allocator overhead is
+    fixed or O(B+4096), independent of total produced output, not an exact RSS cap.
+    OS pipe buffers, subprocess/descendant memory and existing runtime event history
+    are outside this diagnostic-memory guarantee. No cumulative capture archive.
+  platforms: |
+    Nonblocking anonymous-pipe capture targets Unix on existing Python 3.10+ and
+    Windows on Python 3.12+. Windows Python 3.10/3.11 keeps existing capture-disabled
+    behavior; explicit capture raises NotImplementedError before Popen, never a
+    silent DEVNULL fallback. Under the runner this follows ADR-007/ExecutionError.
+    No ctypes, selector-on-Windows-pipes workaround or extra dependencies.
+    Platform-specific tests must report actual execution versus skips; do not claim
+    Windows termination/capture verification from a Unix test run.
+
+outcomes:
+  normal: |
+    Exit 0 -> success; any nonzero exit -> failed. Capture content cannot change
+    this mapping: exit 7 with next_state=accepted is failed; exit 0 with ERROR
+    on stderr is success. Runtime alone chooses the declared outcome transition.
+  launch: |
+    Popen OSError -> error with diagnostics=None. Only the launch boundary has
+    this normalization; capture/read/setup errors are not launch failures.
+  payload_presence: |
+    If capture is enabled and Popen successfully created the process, normal
+    success/failed/timeout responses include DiagnosticPayload, even if empty.
+    No emitted bytes, B=0, or all retained characters removed by normalization
+    produce present empty payload, not None. Disabled capture or launch failure
+    produces None. An internal failure raises rather than returning a response.
+
+deadline_and_shutdown:
+  accounting: |
+    Keep deadline = monotonic() + invocation_timeout_seconds immediately before
+    Popen. Process creation counts. If remaining <= 0 immediately after successful
+    Popen, outcome is timeout even if the process already exited. Otherwise drain
+    while awaiting completion within the remaining time. Output processing does
+    not restart the deadline. A process observed completed while waiting yields
+    its exit outcome; once deadline expiry is detected while still waiting, latch
+    timeout even if the process exits during cleanup. Final drain/normalization
+    after confirmed completion cannot turn an exit outcome into timeout.
+  termination: |
+    Reuse the existing direct-process kill/wait helper; do not duplicate its
+    implementation. On timeout kill if necessary and wait before returning timeout.
+    Confirm wait on ordinary direct-process completion as well. Popen/kill/wait
+    enforcement has the same OS scheduling limitations as RUNTIME-003; this is
+    not a new hard wall-time return guarantee or process-tree cancellation boundary.
+  final_drain: |
+    After direct-process termination is confirmed, make at most 256 nonblocking
+    read attempts, each requesting at most 4096 bytes (at most 1 MiB processed,
+    not retained). Stop earlier on EOF or would-block. Never sleep or wait for
+    additional output in this phase; interrupted attempts also consume the bound.
+    Close the read endpoint before returning. The rule applies to normal exit,
+    timeout, and the process-creation-deadline case.
+  descendants: |
+    Never wait for descendant EOF. A silent descendant holding the writer cannot
+    block a nonblocking read; a continuously writing descendant cannot exceed the
+    final attempt bound. No reader thread can survive the invocation: none exists.
+    Late/unread output may be lost, including queued output beyond final-drain cap;
+    the payload is the tail of bytes actually observed by this cutoff. This also
+    limits completeness for unusually large OS pipe buffers, even without descendants.
+    Descendants are not killed or reaped and can keep changing the workspace.
+    Closing the pipe can give their later writes broken-pipe/SIGPIPE behavior.
+    This slice does not promise full cancellation or a complete descendant log.
+
+capture_failure: |
+  Would-block is normal; EOF is normal; an interrupted read returns to the next
+  bounded iteration. Any other setup/read/poll/retention/normalization failure
+  aborts the invocation: kill/wait the direct process if needed and close its pipe.
+  Do not return success/failed/error/timeout with silently incomplete capture due
+  to such a failure. Propagate the exception through ADR-007 to ExecutionError,
+  with no normal transition, retry, fallback or budget event.
+  If cleanup also fails, preserve the first capture exception as primary and chain
+  the cleanup exception as secondary context; no new public error framework.
+  Never report confirmed timeout if direct-process wait failed. Error messages
+  describe the operation/type, never include diagnostic bytes. Existing recorder
+  failure and double-error handling remain unchanged.
+
+handoff_proof: |
+  verify uses real CommandExecutor with capture enabled and a small known tail;
+  its command writes sequentially to both streams and exits nonzero.
+  verify.failed -> fix; verify.success -> accepted.
+  fix is an independent fake consumer opted in with a sufficient byte cap;
+  fix.success -> accepted. Check exact bytes, original WorkUnit identity, and
+  provenance against verify's run/state/visit/invocation events. No command-specific
+  handoff code. Existing RUNTIME-007 target overflow rejection still applies.
+
+persistence:
+  - No diagnostic content or provenance added to Event, JSONL or ExecutionError messages.
+  - No new capture event or recorder API; diagnostics remain untrusted in-memory data.
+  - Recorded events do not reconstruct diagnostic content; no replay/persistence claim.
+
+acceptance:
+  - Default Command behavior remains DEVNULL and diagnostics=None.
+  - Opt-in capture returns a present valid bounded payload after successful launch.
+  - Diagnostic content never changes exit/deadline outcome or chooses a transition.
+  - Large output does not grow retained diagnostic memory with total output size.
+  - A child writing far beyond cap completes without capture-induced pipe deadlock.
+  - Final payload never exceeds the configured byte limit, including 0.
+  - Unicode and multibyte boundary cases always produce valid UTF-8.
+  - Invalid UTF-8 replacement and subsequent byte limiting are deterministic.
+  - Exact tests prove raw-byte tail retention and no-marker policy.
+  - Existing creation accounting and direct-process timeout kill/wait semantics hold.
+  - Surviving descendants holding or writing the pipe cannot cause an EOF wait hang.
+  - Capture failures explicitly abort through ExecutionError with cleanup and no transition.
+  - Command diagnostics reach the fake consumer through existing RUNTIME-007 provenance/handoff.
+  - Existing Command tests keep their meaning, including capture-disabled cleanup behavior.
+  - Codex/Claude implementation, CLI semantics and tests remain unchanged.
+  - Event/recorder contracts and budget/admission behavior remain unchanged.
+  - Full default suite is offline and performs no AI/model calls.
+
+verification:
+  - |
+    First prove one real command failed -> exact tail -> fake consumer -> accepted.
+    Then cover capture None/0/4096, invalid configuration, launched empty output,
+    success/stderr ERROR, failed/next_state=accepted, and missing executable.
+  - |
+    Exact table tests for ASCII, Unicode, invalid bytes, exact cap and cap+1,
+    split multibyte characters, replacement expansion, and cap smaller than a
+    replacement code point. Feed identical streams with different read chunking.
+  - |
+    A real child emits at least 8 MiB incrementally across both streams then a
+    known suffix and exits 7. Assert failed, exact retained suffix and byte cap.
+    Repeat at cap 0. Use an independent test-harness deadline so regressions fail
+    instead of hanging discovery. Generate/discard chunks without a full-output fixture.
+    Inspect private buffer high-water/read-size bounds with controlled reads and
+    compare traced capture allocations for increasing stream lengths, excluding
+    producer/test allocations; final payload length alone is not a memory proof.
+  - |
+    Timeout tests verify direct process stopped and wait called, including deadline
+    exhausted inside Popen and heavy continuous output. Verify EOF before process
+    exit still observes deadline rather than returning early.
+  - |
+    Real descendants hold inherited pipe open, both silently and while writing,
+    after normal parent exit and after parent timeout. Assert bounded return before
+    descendant EOF; test harness alone owns explicit descendant cleanup in finally.
+    Controlled boundary tests assert <=256 final attempts, no final sleeps, and
+    endpoint closure, including a stream that would produce bytes indefinitely.
+  - |
+    Inject nonblocking setup/read failures and cleanup failures. Assert direct
+    process cleanup, primary exception identity, no next executor or normal
+    transition, and no diagnostic content in event/JSONL/error messages.
+    Test unsupported-platform rejection before Popen separately from launch OSError.
+  - |
+    Run python3 -m unittest discover -s tests -v from repo. Preserve the existing
+    87-test suite's assertions (previously 86 PASS, 1 platform skip), adding tests
+    without weakening regressions. Report platform and every skip explicitly.
+
+planned_files:
+  - runtime/command.py (Command field and private capture loop; reuse kill/wait)
+  - tests/test_command_capture.py (new focused capture and handoff tests)
+  - README.md (document opt-in behavior, bounds and platform/cleanup limitations)
+  - docs/plans/runtime-008.yaml (this MicroSpec and later verification status)
+
+non_goals:
+  - Agent consumption, verifier feedback prompting or Codex/Claude output capture
+  - Retry/fix loop, process-tree kill or stronger cancellation boundary
+  - Generic OutputCapture, LogRecord, stream hierarchy or structured logging
+  - stdout/stderr persistence, temporary full logs or arbitrary stream artifacts
+  - Background threads/queues, async logging, output streaming UI
+  - Token counting, semantic compression or LLM summarization
+  - Changes to core runner, invocation envelopes, Event or recorder
+
+references:
+  - https://docs.python.org/3/library/os.html#os.set_blocking
+  - https://docs.python.org/3/library/subprocess.html#subprocess.Popen
+
+implementation_invariants:
+  deadline_latch: |
+    Immediately after successful Popen check the deadline and latch normal timeout
+    if creation exhausted it. Setup/read/normalization/cleanup failure still takes
+    precedence through ADR-007; timeout requires successful capture and cleanup.
+  read_classification: |
+    Nonempty bytes are data; b"" is EOF. BlockingIOError or EAGAIN/EWOULDBLOCK
+    means no data; interrupted read consumes a bounded retry iteration. All other
+    failures abort capture. Windows exception behavior is not claimed verified
+    without a real Windows run. Distinguish support from actually tested platform.
+    B=0 uses an explicit branch, tested against accidental [-0:] retention.
+
+verification_result: |
+  2026-09-13, macOS 26.6.2 arm64 / Python 3.14.7: 100 tests, 99 PASS,
+  one existing Windows batch-path skip, 5.199 seconds. All 17 acceptance criteria
+  passed on the tested platform. Windows support is implemented, not verified.
+  8 MiB producer at caps 4096/0: retained high-water 4096/0; read high-water 4096.
+  Retention/normalization traced peaks at 1/16 MiB: 16564/16564 bytes.
+  Protected-file SHA-256 comparisons and detailed results are recorded in README.
