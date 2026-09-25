@@ -1,0 +1,70 @@
+id: OBS-002
+goal: |
+  Read canonical recorded events and derive immutable generic summaries without
+  running a workflow or changing runtime contracts.
+scope:
+  - switchyard/observability.py
+  - tests/test_observability.py
+  - docs/plans/obs-002.yaml
+  - README.md (append OBS-002 documentation only)
+constraints:
+  - Standard library only; no runtime, recorder, Event, executor, loader or CLI changes.
+  - Preserve OBS-001 implementation, tests, MicroSpec and documentation.
+  - State names have no application-specific meaning.
+public_api:
+  - 'read_events(path) -> Iterator[Event]: lazy binary JSONL reader in source order.'
+  - 'summarize_runs(events: Iterable[Event]) -> tuple[RunSummary, ...]: first-seen run order.'
+  - 'RunSummary: frozen dataclass with copied read-only count mappings.'
+  - 'ObservabilityError(ValueError): invalid records or inconsistent event streams.'
+reader_contract: |
+  Require exactly all eleven current Event fields, including explicit nulls.
+  Reject duplicate keys, nonstandard JSON constants, nonobjects, unknown kinds,
+  wrong types (including bool for int), negative counters, and invalid per-kind
+  field combinations. Validate direct Event objects with the same rules.
+  Every record must end with LF, matching JsonlRecorder; even valid JSON without
+  its final LF is rejected as an incomplete record. Blank lines are errors.
+  Decode each line strictly as UTF-8. Errors identify line/event ordinal without
+  including source payloads. Filesystem OSError remains an OSError. Lazy reader
+  consumers must exhaust the iterator to validate the whole file.
+summary_contract: |
+  Count states from state_entered (including terminal visits), invocations from
+  invocation_started, outcomes from invocation_finished, transitions from
+  transition_selected and budget events from budget_exceeded. terminal_state is
+  set only by run_finished; completed_normally is true only then. All other
+  prefixes and run_error endings are incomplete/non-normal, with terminal None.
+  Empty input yields an empty tuple. Group by exact run_id, allowing interleaving,
+  and preserve each group's source order and first-seen run ordering.
+stream_integrity: |
+  Each run must begin with exactly one run_started. Reject events after run_finished
+  or run_error, overlapping/unmatched visits or invocations, reused identities,
+  mismatched state/visit/invocation references, outcomes without an invocation,
+  transitions without the corresponding outcome or budget event, and completion
+  without a closed non-invoking terminal visit. Partial prefixes are valid.
+  Validate event shape and lifecycle pairing only: no flow graph is available.
+  Do not validate reachability, declared transition targets, configured budgets,
+  executor identities, diagnostic handoff, or UUID/ID formatting conventions.
+acceptance:
+  - Terminal-only, command, failed-outcome, bounded-cycle and budget histories produce exact generic counts.
+  - Incomplete histories have no terminal and are not normally complete.
+  - JsonlRecorder output round-trips to equal Event objects in order.
+  - Appended and interleaved runs produce separate summaries in first-seen order.
+  - Malformed JSON, UTF-8, truncated lines, missing/extra/duplicate fields and invalid records fail explicitly.
+  - Structurally inconsistent direct and recorded histories are rejected.
+  - Summary collections cannot be mutated, including through constructor input aliasing.
+  - Arbitrary terminal/state names do not change counting or completion semantics.
+verification:
+  - Focused offline observability tests with real runtime events and JsonlRecorder files.
+  - Full offline unittest suite, including all unchanged OBS-001 tests.
+  - Compare protected runtime, loader and OBS-001 file hashes before and after.
+non_goals:
+  - Workflow validation/replay, log repair, schema migration or runtime changes.
+  - Delivery metrics, timing, correlation, provider usage, frameworks or CLI analytics commands.
+  - OBS-003 and later slices.
+verification_result: |
+  2026-09-25: macOS 26.6.2 arm64, Python 3.14.7, PyYAML 6.0.3.
+  Focused observability suite: 16 tests passed (0.091s).
+  Full offline regression: 146 tests, 145 passed, one existing Windows-only
+  batch-path skip (8.647s). No model calls. git diff --check passed.
+  SHA-256 before/after matches for every runtime Python file, flow_config.py,
+  switchyard/cli.py, tests/test_cli.py, tests/test_cli_process.py, and obs-001.yaml.
+  README was extended only with the OBS-002 section. OBS-003 was not started.

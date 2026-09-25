@@ -666,3 +666,58 @@ Verification (2026-09-25, macOS arm64, Python 3.14.7, PyYAML 6.0.3):
 16 focused CLI tests passed; full offline suite ran 130 tests, with 129 passing
 and one existing Windows-only skip. No model calls. Runtime, recorder and flow
 configuration code are unchanged.
+
+## OBS-002 historical events and generic run summaries
+
+Analyze an existing log without executing a workflow:
+
+```python
+from switchyard.observability import read_events, summarize_runs
+
+for summary in summarize_runs(read_events("events.jsonl")):
+    print(summary.run_id, summary.terminal_state, summary.completed_normally)
+    print(dict(summary.state_visit_counts), summary.invocation_count)
+    print(dict(summary.invocation_counts_by_state), dict(summary.outcome_counts))
+    print(summary.transition_count, summary.budget_exceeded_count)
+```
+
+`summarize_runs(events)` also accepts any iterable of existing `Event` objects,
+including `RunResult.events` and `ExecutionError.events`. It returns a tuple of
+frozen `RunSummary` objects with copied, read-only count mappings. Appended or
+interleaved runs are grouped by exact run ID in first-seen order. Empty input
+returns an empty tuple. Results depend only on the supplied events.
+
+Visits count `state_entered`, including terminal visits; invocations count
+`invocation_started`; outcomes count `invocation_finished`; transitions count
+`transition_selected`; budget counts count `budget_exceeded`. State names carry
+no built-in meaning. Only a valid `run_finished` sets `terminal_state` and
+`completed_normally=True`. A structurally valid prefix or a `run_error` ending
+has `terminal_state=None` and `completed_normally=False`. An unfinished invocation
+counts as started but has no invented outcome.
+
+`read_events(path)` lazily reconstructs canonical `Event` objects in file order.
+It requires all current Event fields (including explicit nulls), known kinds,
+valid types and per-kind field combinations. Malformed JSON, duplicate keys,
+invalid UTF-8, blank lines and missing/extra fields raise `ObservabilityError`.
+Every record must end with LF, as written by `JsonlRecorder`: a final line without
+LF is rejected even if its JSON is otherwise complete. No lines are skipped or
+repaired. Exhaust the iterator to check the entire file. Filesystem errors remain
+`OSError`; parse errors identify the line without echoing its payload.
+
+The projection applies the same record validation to direct Event input and
+checks run boundaries, state/invocation pairing, unique visit/invocation IDs,
+outcome/transition pairing and terminal completion. Inconsistent histories raise
+`ObservabilityError` with an event ordinal; no partial summaries are returned.
+It does not reconstruct the flow graph, check declared transition targets or
+configured budgets, or validate executor/diagnostic behavior. Logs can establish
+recorded facts, not independently prove that a workflow configuration was correct.
+
+This reader targets the existing unversioned canonical schema and rejects
+incompatible structures explicitly. The runtime, Event fields, JSONL writer and
+OBS-001 CLI behavior are unchanged. Timing, correlation and analytics CLI commands
+are outside OBS-002.
+
+Verification (2026-09-25): all 16 observability tests passed; the full offline
+suite ran 146 tests, with 145 passing and one existing Windows-only skip.
+Protected runtime, loader and OBS-001 implementation/test/MicroSpec hashes match
+before and after this slice.
