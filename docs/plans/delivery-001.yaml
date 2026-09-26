@@ -1,0 +1,114 @@
+id: DELIVERY-001
+goal: |
+  Express deliver, repair and human-approved accept as application-layer presets
+  using existing Flow, Executor, diagnostic, recording and correlation contracts.
+scope:
+  - examples/delivery/acceptance.py
+  - examples/delivery/presets.py
+  - examples/delivery/__main__.py
+  - examples/delivery/README.md
+  - tests/test_delivery.py
+  - tests/test_delivery_accept.py
+  - docs/plans/delivery-001.yaml
+  - README.md
+constraints:
+  - No runtime, Event, RunContext, loader/YAML, adapter, recorder, observability or generic CLI changes.
+  - No real provider calls in mandatory tests; Git tests use disposable local repositories.
+  - Human QA is external between completed independent runs; no waiting executor.
+  - No delivery analytics, OBS-006, push or hidden application retry loop.
+flows: |
+  deliver: ANALYZE -> IMPLEMENT -> VERIFY. VERIFY success -> READY_FOR_MANUAL_QA;
+  failed -> REPAIR_ONCE -> VERIFY_AGAIN; second verification success -> READY_FOR_MANUAL_QA,
+  failed -> NEEDS_REDIAGNOSIS. All other unsuccessful outcomes -> NEEDS_REDIAGNOSIS.
+  repair: FRESH_DIAGNOSIS -> FIX -> VERIFY, with the same single corrective attempt;
+  unsuccessful outcomes and second verification failure -> NEEDS_HUMAN.
+  accept: CHECK_WORKTREE -> CHECK_SCOPE -> COMMIT -> ACCEPTED; all unsuccessful
+  outcomes -> COMMIT_BLOCKED. All three graphs are acyclic. REPAIR_ONCE additionally
+  has max_state_visits_per_run=1 and a budget handler to the human terminal.
+agent_and_artifact_contract: |
+  Use existing CodexExecutor for all agent stages, including diagnostic-consuming
+  repair. Claude cannot consume diagnostics and needs no new adapter work here.
+  A small application executor constructs a stage-specific InvocationRequest from
+  the unchanged original task and forwards existing diagnostics unchanged.
+  No invocation/request dataclass or provider prompt builder is modified.
+  Allocate a unique working-tree .switchyard/delivery/<session>/ directory per build.
+  ANALYZE/FRESH_DIAGNOSIS must create nonempty analysis.md there; implementation
+  reads that exact path as advisory context and checks repository reality.
+  Diagnosis prompts separate investigation from production edits; fresh diagnosis
+  explicitly treats old conclusions and do-not-change assumptions as advisory.
+  A stage may report inability to proceed by writing blocked.txt; its wrapper then
+  reports failed. The Flow alone maps outcomes to terminals. This report is refusal,
+  not agent-authored acceptance evidence. Missing analysis also reports failed.
+  One application call per agent stage, no retries. Provider-internal tools/turns
+  are not bounded by this preset; existing adapter timeout limitations still apply.
+verification_contract: |
+  Both verification states share the exact same configured CommandExecutor with
+  4096-byte bounded capture. REPAIR_ONCE admits previous diagnostics up to 4096
+  bytes. Only deterministic verifier success produces READY_FOR_MANUAL_QA, which
+  does not claim human QA acceptance. Agent technical success alone is insufficient.
+acceptance_contract: |
+  This slice cannot infer semantic ownership of source edits. A human must review
+  the entire staged patch after manual QA and provide AcceptanceApproval containing
+  exact base HEAD, SHA-256 of canonical staged-tree diff, nonempty commit message,
+  and explicit manual_qa_passed=True. The application never generates this approval
+  on an agent's authority. A non-committing inspection helper prints HEAD/digest for
+  human review but does not approve or start accept. Inspection may materialize
+  an index tree object without changing refs or worktree.
+  Require a born local branch, repository-root workspace, no Git operation in
+  progress, no conflicted entries, no submodules or sparse/assume-unchanged index flags,
+  no unstaged tracked edits and
+  no nonignored untracked files. Require a nonempty staged change. Never auto-stage.
+  CHECK_WORKTREE snapshots branch, HEAD and immutable index tree. CHECK_SCOPE
+  re-inspects and compares the complete approved tree diff digest and HEAD.
+  COMMIT rechecks the same snapshot, creates a commit from that exact immutable
+  tree using git commit-tree, then advances the captured branch with update-ref
+  compare-and-swap against approved HEAD. Concurrent index edits cannot be included;
+  concurrent HEAD changes block publication of the commit. An unreferenced object
+  may remain if compare-and-swap fails. No reset/clean, index replacement or push.
+  Plumbing deliberately does not run commit hooks; deterministic verification and
+  human patch review happen before approval. Commit identity comes from local Git
+  configuration. No partial staging/isolation automation in this conservative slice.
+  A human approving an already mixed patch cannot be detected from Git bytes:
+  approved digest is a human scope attestation, not automated semantic proof.
+portability: |
+  Presets are Python Flow factories, not new YAML executor types. Static FLOW-001
+  cannot express per-stage task shaping; the existing Executor protocol can.
+  Run via python -m examples.delivery from the Switchyard source environment.
+  Require absolute project workspace, Codex executable, verifier executable and
+  Git executable as applicable. Verifier argv is a literal repeated CLI argument.
+  No PATH lookup, shell expansion or generic schema environment interpolation.
+  Application runner accepts --events-file, --correlation-id and --parent-run-id
+  and delegates unchanged to JsonlRecorder/RunContext/run. No automatic event dirs.
+  Generated analysis is temporary execution context; exclude .switchyard/ via local
+  Git exclude rules before use, and never include it in the accepted patch.
+acceptance:
+  - Deliver direct success, repaired success and second failure have exact required itineraries.
+  - No deliver or repair run schedules a second corrective invocation.
+  - Repair starts with a separate fresh diagnosis invocation and independent artifact.
+  - Missing analysis, refusal, provider errors/timeouts and verifier errors route explicitly to human terminals.
+  - Verifier diagnostics reach the single corrective Codex request through the existing bounded contract.
+  - Exact approved staged change commits and reaches ACCEPTED in a disposable repo.
+  - Unrelated files, added same-file hunks, stale approval and unsafe worktrees block without advancing HEAD.
+  - Commit creation uses only the immutable approved tree and never pushes or stages unrelated edits.
+  - Correlated runs, JSONL, timing, RunSummary and project_runs work without delivery-aware core changes.
+verification:
+  - Controlled adapter fakes and real offline verifier commands for delivery paths.
+  - Real temporary Git repositories for worktree/scope/commit paths and CLI inspection.
+  - Full offline regression suite; protected-core diff check.
+non_goals:
+  - Semantic automatic patch attribution, automatic hunk isolation or signed human attestation.
+  - Provider abstraction, generic prompt/YAML extensions or new core fields.
+  - Human waiting, remote publication, delivery analytics or OBS-006.
+verification_result: |
+  2026-09-26: focused delivery/acceptance suite 18 tests passed (10.634s).
+  Full offline suite: 206 tests, 205 passed, one existing Windows-only batch-path
+  skip (19.799s). No real provider calls. Delivery tests use controlled Codex
+  boundaries and real verifier processes; acceptance tests use disposable Git repos.
+  Verified direct success, repaired success, second failure, separate fresh diagnosis,
+  artifact refusal/missing output, provider failures, verifier launch error, exact
+  approved commit, mixed same-file/file scope blocking, precommit scope changes,
+  concurrent index preservation and branch compare-and-swap refusal, hidden index
+  flags, sequencer blocking, correlation/JSONL/timing/projection and application flags.
+  runtime/, switchyard/, flow_config.py and requirements.txt have no changes.
+  git diff --check and application --help passed; MicroSpec YAML validates.
+  DELIVERY-001 only; OBS-006 not started. Work remains uncommitted.

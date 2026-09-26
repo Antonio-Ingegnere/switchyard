@@ -918,3 +918,17 @@ new Event field or runtime change.
 Verification (2026-09-26): 11 focused projection tests and all 63 OBS-001 through
 OBS-004 regression tests passed. Full offline suite: 188 tests, 187 passed and one
 existing Windows-only skip. Runtime, Event, recorder and CLI contracts are unchanged.
+
+## DELIVERY-001 delivery workflow examples
+
+[Delivery presets](examples/delivery/README.md) define separate `deliver`, `repair`
+and human-approved `accept` workflows using the existing Python Flow/Executor API.
+Deliver and repair perform a distinct analysis/diagnosis, implementation, and
+at most one verifier-driven corrective attempt before terminating for human QA
+or diagnosis. Accept checks an exact human-reviewed staged patch before committing;
+it never pushes. Executable paths are explicitly project-local and absolute.
+
+Run with `python3 -m examples.delivery --help`. The application supports event
+recording and correlated follow-up runs without changing generic runtime, YAML or
+observability contracts. See the preset documentation for the human QA/scope
+approval boundary and Git limitations. No delivery analytics are included.
