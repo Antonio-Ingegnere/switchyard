@@ -1,4 +1,5 @@
 from runtime import InvocationRequest, InvocationResponse
+from dataclasses import replace
 import unittest
 
 from runtime import Event, ExecutionError, ExecutorResult, Flow, FlowValidationError, State, WorkUnit, run
@@ -36,7 +37,7 @@ class StateVisitBudgetTests(unittest.TestCase):
         self.assertTrue(all(payload is work for _, payload in calls))
         run_id = result.events[0].run_id
         expected = [Event("run_started", run_id)]
-        # Explicit accepted itinerary; every event and every field is compared.
+        # Explicit accepted itinerary; every non-timing field is compared.
         for number, state, outcome, target in (
             (1, "test", "failed", "fix"),
             (2, "fix", "success", "test"),
@@ -60,7 +61,8 @@ class StateVisitBudgetTests(unittest.TestCase):
             Event("state_exited", run_id, "human", f"{run_id}:visit:6"),
             Event("run_finished", run_id, "human"),
         ])
-        self.assertEqual(result.events, tuple(expected))
+        self.assertEqual(tuple(replace(e, occurred_at_unix_ns=None, duration_ns=None)
+                               for e in result.events), tuple(expected))
 
     def test_zero_initial_limit_denies_first_entry(self):
         executor = FakeExecutor()

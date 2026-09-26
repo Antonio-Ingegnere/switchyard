@@ -1,7 +1,7 @@
 """Strict canonical-event reading and generic, offline run summaries."""
 
 from collections import Counter
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 import json
 from pathlib import Path
 from types import MappingProxyType
@@ -15,7 +15,10 @@ class ObservabilityError(ValueError):
 
 
 _FIELDS = frozenset(field.name for field in fields(Event))
+_TIMING = {'occurred_at_unix_ns', 'duration_ns'}
+_LEGACY_FIELDS = _FIELDS - _TIMING
 _BASE = {'kind', 'run_id'}
+_DURATION_KINDS = {'invocation_finished', 'state_exited', 'run_finished', 'run_error'}
 _VISIT = {'state', 'state_visit_id'}
 _INVOCATION = _VISIT | {'invocation_id'}
 _SHAPES = {
@@ -42,15 +45,19 @@ def _validate(event: Event) -> None:
     _check(type(event) is Event, 'expected canonical Event')
     for name in _FIELDS:
         value = getattr(event, name)
-        if name in ('limit', 'observed'):
+        if name == 'occurred_at_unix_ns':
+            _check(value is None or type(value) is int, 'invalid occurrence timestamp type')
+        elif name in ('limit', 'observed', 'duration_ns'):
             _check(value is None or (type(value) is int and value >= 0),
                    'invalid counter field type or value')
         else:
             _check(value is None or (type(value) is str and bool(value)),
                    'expected nonempty string or null')
     _check(event.run_id is not None and event.kind in _SHAPES, 'unknown event kind or missing run ID')
-    present = {name for name in _FIELDS - _BASE if getattr(event, name) is not None}
+    present = {name for name in _LEGACY_FIELDS - _BASE if getattr(event, name) is not None}
     _check(present in _SHAPES[event.kind], 'invalid fields for event kind')
+    _check(event.duration_ns is None or event.kind in _DURATION_KINDS,
+           'duration on event without an elapsed interval')
     _check(event.outcome is None or event.outcome in OUTCOMES, 'unknown outcome')
     _check(event.trigger_event is None or event.trigger_event == 'budget_exceeded', 'unknown trigger event')
     if event.kind == 'budget_exceeded':
@@ -84,7 +91,7 @@ def read_events(path: str | Path) -> Iterator[Event]:
                 record = json.loads(line.decode('utf-8'), object_pairs_hook=_object,
                                     parse_constant=_constant)
                 _check(type(record) is dict, 'expected JSON object')
-                _check(record.keys() == _FIELDS, 'missing or unexpected Event fields')
+                _check(_LEGACY_FIELDS <= record.keys() <= _FIELDS, 'missing or unexpected Event fields')
                 event = Event(**record)
                 _validate(event)
             except (ValueError, RecursionError) as exc:
@@ -105,9 +112,12 @@ class RunSummary:
     transition_count: int
     budget_exceeded_count: int
     completed_normally: bool
+    run_duration_ns: int | None = None
+    invocation_duration_ns_total: int | None = None
+    state_duration_ns: Mapping[str, int | None] = field(default_factory=dict)
 
     def __post_init__(self):
-        for name in ('state_visit_counts', 'invocation_counts_by_state', 'outcome_counts'):
+        for name in ('state_visit_counts', 'invocation_counts_by_state', 'outcome_counts', 'state_duration_ns'):
             object.__setattr__(self, name, MappingProxyType(dict(getattr(self, name))))
 
 
@@ -130,6 +140,12 @@ class _Run:
         self.transitioned = False
         self.budget = None
         self.closed_terminal = None
+        self.timed_start = False
+        self.run_duration = None
+        self.invocation_duration = 0
+        self.timed_invocations = 0
+        self.state_durations = Counter()
+        self.timed_visits = Counter()
 
     def consume(self, event):
         kind = event.kind
@@ -137,6 +153,7 @@ class _Run:
         if not self.started:
             _check(kind == 'run_started', 'run must begin with run_started')
             self.started = True
+            self.timed_start = event.occurred_at_unix_ns is not None
             return
         _check(kind != 'run_started', 'duplicate run_started')
         _check(self.closed_terminal is None or kind == 'run_finished',
@@ -163,6 +180,9 @@ class _Run:
                        'unmatched or repeated invocation outcome')
                 self.outcome = event.outcome
                 self.outcomes[event.outcome] += 1
+                if event.duration_ns is not None:
+                    self.invocation_duration += event.duration_ns
+                    self.timed_invocations += 1
             elif kind == 'transition_selected':
                 _check(self.invocation == event.invocation_id and self.outcome == event.outcome
                        and not self.transitioned, 'unmatched or repeated outcome transition')
@@ -170,6 +190,9 @@ class _Run:
                 self.transitions += 1
             else:
                 _check(self.invocation is None or self.transitioned, 'state exit before invocation transition')
+                if event.duration_ns is not None:
+                    self.state_durations[event.state] += event.duration_ns
+                    self.timed_visits[event.state] += 1
                 self.closed_terminal = event.state if self.invocation is None else None
                 self.active = None
                 self.invocation = self.outcome = None
@@ -187,6 +210,7 @@ class _Run:
                    and self.closed_terminal == event.state, 'completion without closed terminal visit')
             self.terminal = event.state
             self.ended = True
+            self.run_duration = event.duration_ns
         elif kind == 'run_error':
             if self.active is not None:
                 _check(self.active == (event.state, event.state_visit_id)
@@ -198,12 +222,21 @@ class _Run:
                        (event.trigger_event == 'budget_exceeded' and self.budget == event.state),
                        'unmatched budget error')
             self.ended = True
+            self.run_duration = event.duration_ns
 
     def result(self):
+        invocations = sum(self.invocations.values())
+        invocation_duration = (self.invocation_duration
+                               if self.timed_invocations == invocations
+                               and (invocations > 0 or self.timed_start) else None)
+        state_durations = {state: self.state_durations[state]
+                           if self.timed_visits[state] == count else None
+                           for state, count in self.visits.items()}
         return RunSummary(self.run_id, self.terminal, self.visits,
                           sum(self.invocations.values()), self.invocations,
                           self.outcomes, self.transitions, self.budgets,
-                          self.terminal is not None)
+                          self.terminal is not None, self.run_duration,
+                          invocation_duration, state_durations)
 
 
 def summarize_runs(events: Iterable[Event]) -> tuple[RunSummary, ...]:

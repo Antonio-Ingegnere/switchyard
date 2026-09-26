@@ -721,3 +721,80 @@ Verification (2026-09-25): all 16 observability tests passed; the full offline
 suite ran 146 tests, with 145 passing and one existing Windows-only skip.
 Protected runtime, loader and OBS-001 implementation/test/MicroSpec hashes match
 before and after this slice.
+
+## OBS-003 event timing
+
+`Event` now appends two optional fields, both defaulting to `None` for existing
+callers and historical logs:
+
+- `occurred_at_unix_ns`: signed integer nanoseconds since the UTC/POSIX Unix epoch.
+  Every new runtime event receives this timestamp. It is chronology, not a duration
+  source; wall time may move backwards. Negative values represent pre-epoch times.
+- `duration_ns`: nonnegative integer elapsed nanoseconds from a monotonic clock.
+  `invocation_finished` measures from `invocation_started`, `state_exited` from
+  `state_entered`, and `run_finished` or `run_error` from `run_started`. Other
+  events carry `None`. Booleans and floating-point timing values are rejected by
+  the observability reader/projection.
+
+A private `_Clock.sample()` boundary supplies `time.time_ns()` and
+`time.monotonic_ns()`. Each run has its own interval bookkeeping. Each emission
+samples once, then stamps the immutable Event before the existing observed-history
+append and recorder call. The public `run()` signature and Executor API are
+unchanged. Tests replace this private clock with deterministic values, without
+sleeping. The two clock samples are not atomic; platform clock failures propagate
+as internal failures rather than generating fallback timing values.
+
+Durations measure emission-to-emission intervals. They include persistence of the
+starting event and intervening runtime/recorder work, but exclude persistence of
+the ending event. Invocation duration includes request preparation and response
+validation; it is not a measurement of executor CPU time alone. Run duration
+excludes initial validation and final event persistence. Timing never selects
+transitions, evaluates budgets or changes state admission or diagnostic handoff.
+
+The unchanged JSONL recorder automatically serializes both fields. The reader
+still requires the eleven original fields, permits only the two named timing
+fields to be omitted independently, and rejects unrelated fields. Missing or null
+timing remains `None`; it is never replaced by zero. Old and new records can
+coexist in the same file without migration or a new schema version. Consumers
+using the older strict OBS-002 reader must upgrade to read the added fields.
+The OBS-002 description of required fields above refers to the original schema;
+these two timing fields are its explicit backward-compatible extension.
+
+```python
+from switchyard.observability import read_events, summarize_runs
+
+for summary in summarize_runs(read_events("events.jsonl")):
+    print(summary.run_duration_ns)
+    print(summary.invocation_duration_ns_total)
+    print(dict(summary.state_duration_ns))
+```
+
+`RunSummary` adds:
+
+- `run_duration_ns`: the recorded duration from `run_finished` or `run_error`,
+  otherwise `None`. A failed run can have a known duration without normal completion.
+- `invocation_duration_ns_total`: sum of durations only when every observed started
+  invocation has a timed finish; otherwise `None`. With no observed invocations,
+  a timed `run_started` permits zero, while a historical untimed start yields `None`.
+- `state_duration_ns`: a copied, read-only mapping from visited state to the sum
+  of its visit durations. If any admitted visit to that state lacks a timed exit,
+  that state's value is `None`.
+
+These totals cover observed intervals, not future work. An incomplete run can have
+known durations for closed states while its active state and run duration remain
+unavailable. An executor exception does not synthesize an invocation finish or
+state exit. Durations are never calculated from occurrence timestamps or across
+run IDs. A recorded zero duration is valid and differs from unavailable timing.
+
+Recorder failures preserve the observed-versus-persisted distinction. The event
+whose write failed already exists with timing in `ExecutionError.events`, while
+the file may contain only a prefix or partial line. No additional error event is
+invented. If persistence of `run_finished` fails, projecting observed events can
+report normal completion and duration; projecting the earlier persisted prefix
+cannot. Existing exception causes and `recorder_error` behavior are preserved.
+
+Verification (2026-09-25, macOS arm64, Python 3.14.7, PyYAML 6.0.3): all 16
+deterministic timing tests passed, all 16 CLI and 16 observability regressions
+passed, and the full offline suite ran 162 tests: 161 passed, one existing
+Windows-only skip. No provider calls. OBS-001 and OBS-002 remain separate commits;
+OBS-004 has not started.

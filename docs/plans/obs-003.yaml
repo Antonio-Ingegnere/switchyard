@@ -1,0 +1,100 @@
+id: OBS-003
+goal: |
+  Add occurrence and elapsed timing facts to canonical events and generic run
+  summaries without changing control flow or the public run/Executor APIs.
+scope:
+  - runtime/__init__.py
+  - switchyard/observability.py
+  - tests/test_timing.py
+  - Existing event-equality and strict-reader tests affected by additive fields
+  - docs/plans/obs-003.yaml
+  - README.md
+constraints:
+  - OBS-001 a496501 and OBS-002 bfb8f1f remain separate, unchanged commits.
+  - No recorder implementation, CLI, loader, YAML, executor or diagnostic contract changes.
+  - No timing-based transitions, admission, budgets, retries or synthesized events.
+  - No public run signature change; standard library only; deterministic tests without sleeps.
+event_contract: |
+  Append occurred_at_unix_ns: int | None = None and duration_ns: int | None = None
+  to Event, preserving existing positional construction. Occurrence is signed
+  integer nanoseconds since Unix epoch (UTC/POSIX, no local timezone); negative
+  values represent pre-epoch chronology. New runtime events always populate it.
+  Duration is a nonnegative integer monotonic elapsed interval, never wall-time
+  subtraction. bool and float are not valid timing types.
+  invocation_finished carries invocation_started-to-finished emission duration;
+  state_exited carries state_entered-to-exited emission duration;
+  run_finished and existing run_error carry run_started-to-end emission duration.
+  All other events have duration_ns=None. A raised executor has no invented
+  invocation_finished or state_exited event; only run_error has run duration.
+clock_boundary: |
+  One private _Clock.sample() reads time.time_ns() and time.monotonic_ns(), once
+  per event at the start of emit(). A per-run private timing helper retains the
+  start samples for run, current admitted visit and current invocation. It stamps
+  a replaced immutable Event before the existing observed append/recorder path.
+  Tests patch the private clock factory. No public injection API is introduced.
+  Intervals include start-event recorder latency and intervening runtime work
+  (invocation includes request preparation and result validation), but exclude
+  end-event recorder latency. Run duration excludes pre-run validation and final
+  event persistence. Occurrence is sampled before persistence and need not be
+  increasing: wall-clock adjustments do not alter monotonic elapsed durations.
+  Timing snapshots are not atomic across the two clocks. Platform clock failures
+  propagate as internal failures; no fallback timestamps or durations are invented.
+compatibility: |
+  No schema version is necessary for this additive change. The reader still
+  requires all eleven legacy fields, rejects unrelated fields, and accepts only
+  the two named optional timing fields (independently omitted or null). Missing
+  timing reconstructs as None. Duration is allowed only on the four closing
+  event kinds; other record and stream checks remain unchanged. The unchanged
+  recorder automatically writes both new dataclass fields. Old OBS-002 readers
+  reject new fields; consumers must upgrade to this reader for new logs. Existing
+  logs need no migration and old/new records may coexist in one file.
+summary_contract: |
+  Append run_duration_ns: int | None, invocation_duration_ns_total: int | None,
+  and read-only state_duration_ns: Mapping[str, int | None] to RunSummary, with
+  defaults for compatibility with existing constructors.
+  Run duration comes only from run_finished/run_error.duration_ns; without that
+  fact it is None. Invocation total is available only when every observed started
+  invocation has a timed finish; otherwise None, including unfinished invocations.
+  A timed run_started with zero observed invocations yields zero; a legacy run
+  with zero invocations yields None. Totals cover observed intervals only, not
+  predictions about future events in an incomplete run.
+  Per-state duration sums all admitted visits only when every visit to that state
+  has a timed state_exited; otherwise that state's value is None. Closed states
+  can retain known durations in an otherwise incomplete run. Never derive time
+  from occurrence timestamps, infer missing zeroes, or combine different run IDs.
+recorder_failure: |
+  Stamp before the existing in-memory append and recording call. A recorder
+  failure still exposes the observed failing event and persisted prefix, with no
+  new run_error generated. If that observed event is run_finished, in-memory
+  projection reports its normal completion fact even though persistence failed;
+  projecting the earlier disk prefix does not. Existing primary exception/cause
+  and recorder_error semantics remain unchanged, including run_error write failure.
+acceptance:
+  - Exact occurrence and monotonic durations for terminal, invocation, multiple-state and bounded-repeat runs.
+  - Backward wall-clock movement leaves durations and normalized event sequence unchanged.
+  - Timeout, executor exception, missing transition, budget and recording failure keep original event order and failure semantics.
+  - RunSummary aggregates timed visits and invocations with explicit unavailable values for partial/historical data.
+  - Historical, new and mixed appended/interleaved runs round-trip and remain separately grouped.
+  - Wrong timing types, negative durations, misplaced durations and unknown fields are rejected.
+  - All OBS-001, OBS-002 and full offline regressions pass after narrow additive-schema test adjustments.
+verification:
+  - Deterministic fake clocks in tests/test_timing.py; no sleeps or provider calls.
+  - Run timing tests, then CLI/observability regression tests, then full offline suite.
+  - Compare all non-timing Event fields and protected files against pre-slice contracts.
+non_goals:
+  - OBS-004 correlation, delivery metrics, provider usage, dashboards or framework expansion.
+  - Executor CPU-only time, final persistence duration or invented unfinished interval duration.
+verification_result: |
+  2026-09-25: macOS 26.6.2 arm64, Python 3.14.7, PyYAML 6.0.3.
+  Focused timing suite: 16 passed (0.013s).
+  OBS-001 CLI regressions: 16 passed (2.440s), unchanged tests.
+  OBS-002 observability regressions: 16 passed (0.096s); required-field test now
+  excludes the two explicitly optional additions, preserving all legacy checks.
+  Full offline suite: 162 tests, 161 passed, one existing Windows batch-path
+  skip (8.837s). No provider calls or sleeps in timing tests.
+  Existing budget/diagnostic and YAML-equivalence assertions still compare all
+  original event facts, excluding only timing. Recorder failure equality uses
+  a controlled clock so repeated runs retain exact event comparisons.
+  No changes to runtime/recording.py, adapters, CLI, flow_config.py, requirements,
+  examples, or OBS-001/002 MicroSpecs. No public run/Executor API change.
+  OBS-001 a496501 and OBS-002 bfb8f1f remain separate commits; OBS-004 not started.

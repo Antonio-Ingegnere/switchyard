@@ -1,6 +1,7 @@
 """Small synchronous control plane with optional event recording."""
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+import time
 from types import MappingProxyType
 from typing import Mapping, Protocol
 from uuid import uuid4
@@ -112,6 +113,34 @@ class Event:
     metric: str | None = None
     limit: int | None = None
     observed: int | None = None
+    occurred_at_unix_ns: int | None = None
+    duration_ns: int | None = None
+
+
+class _Clock:
+    def sample(self) -> tuple[int, int]:
+        return time.time_ns(), time.monotonic_ns()
+
+
+class _EventTiming:
+    """Measure emission-to-emission intervals, before append and persistence."""
+
+    def __init__(self):
+        self.clock = _Clock()
+        self.starts: dict[str, int] = {}
+
+    def stamp(self, event: Event) -> Event:
+        wall, monotonic = self.clock.sample()
+        duration = None
+        if event.kind in ('run_started', 'state_entered', 'invocation_started'):
+            self.starts[event.kind] = monotonic
+        elif event.kind in ('run_finished', 'run_error'):
+            duration = monotonic - self.starts['run_started']
+        elif event.kind == 'state_exited':
+            duration = monotonic - self.starts.pop('state_entered')
+        elif event.kind == 'invocation_finished':
+            duration = monotonic - self.starts.pop('invocation_started')
+        return replace(event, occurred_at_unix_ns=wall, duration_ns=duration)
 
 
 class EventRecorder(Protocol):
@@ -205,8 +234,10 @@ def run(work_unit: WorkUnit, flow: Flow, executors: Mapping[str, Executor],
         raise TypeError("expected an immutable WorkUnit")
     run_id = f"run:{uuid4()}"
     events: list[Event] = []
+    timing = _EventTiming()
 
     def emit(event: Event, failure: ExecutionError | None = None) -> None:
+        event = timing.stamp(event)
         events.append(event)
         if failure is not None:
             failure.events = tuple(events)

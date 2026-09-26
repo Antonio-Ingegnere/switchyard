@@ -72,6 +72,7 @@ class RecordingTests(unittest.TestCase):
         self.assertEqual([json.loads(line) for line in self.path.read_text().splitlines()],
                          [asdict(e) for e in result.events])
 
+    @patch("runtime._Clock.sample", new=lambda self: (1000, 500))
     def test_failure_at_every_event_stops_without_later_executor_or_event(self):
         for bounded in (False, True):
             with patch("runtime.uuid4", return_value="fixed"):

@@ -15,6 +15,11 @@ from runtime.claude import ClaudeConfig, ClaudeExecutor
 from runtime.recording import JsonlRecorder
 
 
+def without_timing(events):
+    # These established assertions compare the unchanged diagnostic/control facts.
+    return tuple(replace(e, occurred_at_unix_ns=None, duration_ns=None) for e in events)
+
+
 class Fake:
     def __init__(self, *responses):
         self.responses = iter(responses)
@@ -79,7 +84,7 @@ class DiagnosticTests(unittest.TestCase):
             Event("transition_selected", rid, "fix", v, i, "success", "accepted"),
             Event("state_exited", rid, "fix", v), Event("state_entered", rid, "accepted", terminal),
             Event("state_exited", rid, "accepted", terminal), Event("run_finished", rid, "accepted")]
-        self.assertEqual(result.events, tuple(expected))
+        self.assertEqual(without_timing(result.events), tuple(expected))
         self.assertEqual([f.name for f in fields(WorkUnit)], ["task"])
         self.assertEqual([f.name for f in fields(ExecutorResult)], ["outcome"])
         for value, name in ((self.work, "task"), (request, "diagnostics"),
@@ -108,7 +113,7 @@ class DiagnosticTests(unittest.TestCase):
             run(self.work, handoff_flow(cap=1, visits=1),
                 {"verify": Fake(response()), "fix": consumer}, recorder=InspectRecorder())
         events = caught.exception.events
-        self.assertEqual(events, tuple(self.expected_prefix(events[0].run_id) + [Event("run_error", events[0].run_id, "fix")]))
+        self.assertEqual(without_timing(events), tuple(self.expected_prefix(events[0].run_id) + [Event("run_error", events[0].run_id, "fix")]))
         self.assertEqual(counters, [({"verify": 1, "fix": 0, "accepted": 0}, 1, 1)])
         self.assertEqual(consumer.requests, [])
 
@@ -120,7 +125,7 @@ class DiagnosticTests(unittest.TestCase):
             Event("transition_selected", rid, "fix", target="accepted", trigger_event="budget_exceeded"),
             Event("state_entered", rid, "accepted", f"{rid}:visit:2"),
             Event("state_exited", rid, "accepted", f"{rid}:visit:2"), Event("run_finished", rid, "accepted")]
-        self.assertEqual(result.events, tuple(expected))
+        self.assertEqual(without_timing(result.events), tuple(expected))
         self.assertEqual(consumer.requests, [])
 
     def test_boundary_revalidates_invalid_output_before_completion(self):
@@ -136,7 +141,7 @@ class DiagnosticTests(unittest.TestCase):
                 with self.assertRaisesRegex(ExecutionError, "malformed diagnostic") as caught:
                     run(self.work, handoff_flow(), {"verify": Fake(InvocationResponse(ExecutorResult("failed"), invalid)), "fix": consumer})
                 rid = caught.exception.events[0].run_id
-                self.assertEqual(caught.exception.events, tuple(self.expected_prefix(rid)[:3] + [
+                self.assertEqual(without_timing(caught.exception.events), tuple(self.expected_prefix(rid)[:3] + [
                     Event("run_error", rid, "verify", f"{rid}:visit:1", f"{rid}:invocation:1")]))
                 self.assertEqual(consumer.requests, [])
 

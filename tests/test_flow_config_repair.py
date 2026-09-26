@@ -60,6 +60,8 @@ class DeclarativeRepairTests(unittest.TestCase):
                     sequence=[]
                     for event in result.events:
                         item=asdict(event); rid=item.pop('run_id')
+                        # Separate executions have independent clock samples.
+                        item.pop('occurred_at_unix_ns'); item.pop('duration_ns')
                         for key in ('state_visit_id','invocation_id'):
                             if item[key]: item[key]=item[key].replace(rid,'RUN')
                         sequence.append(item)
