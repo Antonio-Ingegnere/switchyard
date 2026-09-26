@@ -1,0 +1,78 @@
+id: OBS-005
+goal: |
+  Let independent pure projections consume validated per-run canonical events,
+  sharing one grouping and integrity implementation outside the runtime.
+scope:
+  - switchyard/observability.py
+  - tests/test_projections.py
+  - docs/plans/obs-005.yaml
+  - README.md
+problem: |
+  A second standalone function can count events today, but cannot reuse the
+  existing grouping/integrity checks without computing RunSummary or depending on
+  its private accumulator. _Run currently mixes stream validation with summary
+  counters. Separate those responsibilities rather than duplicate validation.
+public_api: |
+  project_runs(events: Iterable[Event], projector: Callable[[tuple[Event, ...]], T])
+  -> tuple[T, ...]. Each callback receives one nonempty immutable event tuple with
+  exactly one run_id, in source order. Results follow first-seen run order.
+  Keep summarize_runs(events) as a specialization using a private pure projector.
+  Add summarize_budgets(events) -> tuple[BudgetSummary, ...] as the second
+  specialization. BudgetSummary is a frozen/slotted result with run_id,
+  budget_exceeded_count, and copied read-only counts_by_state.
+design_choice: |
+  A functional callback is sufficient. No Protocol, projector class hierarchy,
+  registry, RunHistory wrapper or multi-projection engine. A tuple already supplies
+  an immutable history, and its first event supplies run_id and context. Extract
+  the existing private integrity checker without changing its accepted streams;
+  pure summary functions derive counts/timing from validated histories.
+constraints:
+  - No runtime, Event, RunContext, recorder, executor, timing, YAML or CLI changes.
+  - Preserve all RunSummary fields, count/timing semantics and schema compatibility.
+  - No state name interpretation, delivery analytics or arbitrary metadata.
+validation_and_errors: |
+  Consume/group/validate the entire input before invoking any projector, so an
+  invalid later run never exposes earlier results to callbacks. Preserve existing
+  ObservabilityError messages/ordinals from shared record/stream checks. Reader
+  parsing stays unchanged. Direct Event input receives the same canonical checks.
+  Do not catch or relabel callback exceptions, including ObservabilityError raised
+  by callback code. Empty input returns (), with no callbacks.
+  User callbacks are responsible for purity/determinism and immutable results;
+  built-in projections satisfy those properties. No attempt to sandbox callbacks.
+history_and_reuse: |
+  Support incomplete and interleaved histories exactly as before. Materializing
+  immutable per-run histories requires O(event count) memory, unlike the former
+  summary accumulator. Document this tradeoff; no streaming orchestration API.
+  Read once with events = tuple(read_events(path)), then call summarize_runs(events)
+  and summarize_budgets(events). Each call validates its own traversal, but neither
+  rereads the file. Passing the same exhausted reader twice is not supported.
+budget_semantics: |
+  Count only budget_exceeded facts, by event.state, with no inferred attempts,
+  terminal semantics or configured budgets. No observed budget events means zero,
+  including valid incomplete/historical input: the count covers only recorded
+  facts and does not claim an unfinished run can never exhaust a budget later.
+acceptance:
+  - Functional projection receives immutable histories for one/multiple/interleaved/incomplete runs in first-seen order.
+  - Shared integrity validation rejects bad histories before any callback and runs once per supplied event per project_runs call.
+  - Existing RunSummary regression outputs, timing, correlation and historical behavior remain unchanged.
+  - BudgetSummary gives deterministic generic counts for Event and JSONL inputs without special state names.
+  - Built-in result mappings cannot be mutated or changed through constructor aliases.
+  - Both built-in summaries consume one already-read immutable sequence without file access.
+  - Callback programming errors propagate unchanged without malformed-history wrapping.
+verification:
+  - Focused projection tests including manually specified summary expectations.
+  - All OBS-001 through OBS-004 regression tests.
+  - Complete offline suite and protected-file diff check.
+  - Commit OBS-005 separately after verification.
+non_goals:
+  - OBS-006, delivery metrics, plugin systems, DSLs, dashboards, persistence or CLI analytics.
+  - Run graph/lifecycle aggregation or new Event fields.
+verification_result: |
+  2026-09-26: focused projection suite 11 passed (0.004s).
+  OBS-001 CLI 16 passed (2.333s); OBS-002 observability 16 passed (0.097s);
+  OBS-003 timing 16 passed (0.012s); OBS-004 correlation 15 passed (0.275s).
+  Full offline suite: 188 tests, 187 passed, one existing Windows-only batch-path
+  skip (9.592s). No provider calls. Prior regression tests are unchanged.
+  Runtime, Event, RunContext, recorder, CLI, loader, requirements and examples
+  have no diff against OBS-004. git diff --check passed; MicroSpec YAML validates.
+  OBS-004 committed separately as 507ec56 before this slice. OBS-006 not started.

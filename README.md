@@ -866,3 +866,55 @@ Verification (2026-09-26): 15 focused correlation tests and all 48 OBS-001/002/0
 regressions passed. Full offline suite: 177 tests, 176 passed and one existing
 Windows-only skip. No provider calls; executor, WorkUnit, flow and timing semantics
 are unchanged.
+
+## OBS-005 generic projection extension point
+
+`project_runs(events, projector)` validates and groups canonical events, then calls
+`projector(run_events)` once per run. `run_events` is a nonempty immutable tuple of
+Events for exactly one run, in source order. The returned tuple of projection
+results follows first-seen run order, including for interleaved runs. Valid
+incomplete histories are supported; empty input returns an empty tuple.
+
+```python
+from switchyard.observability import (
+    read_events, project_runs, summarize_runs, summarize_budgets,
+)
+
+# Materialize once: a read_events iterator cannot be consumed twice.
+events = tuple(read_events("events.jsonl"))
+run_summaries = summarize_runs(events)
+budget_summaries = summarize_budgets(events)
+
+# A custom pure projection needs no registry, protocol or runtime changes.
+event_counts = project_runs(events, lambda run_events: (
+    run_events[0].run_id, len(run_events),
+))
+```
+
+The previous summary accumulator coupled integrity checks to RunSummary counting.
+Those checks now live in one private validator shared by `project_runs`,
+`summarize_runs` and `summarize_budgets`. RunSummary's fields and semantics remain
+unchanged, including historical timing/correlation absence and incomplete runs.
+A tuple already represents a validated run history; no RunHistory wrapper or
+projector class hierarchy is needed.
+
+`BudgetSummary` is a frozen result containing `run_id`, `budget_exceeded_count`,
+and a copied read-only `counts_by_state` mapping. It counts only recorded
+`budget_exceeded` events; state names have no special meaning. Zero means no such
+facts were observed, not that an incomplete run can never exceed a budget later.
+
+Each `project_runs` call validates the complete input before invoking any callback.
+Invalid histories raise the existing `ObservabilityError`; callback exceptions
+propagate unchanged. Built-in results are immutable. Custom callbacks are
+responsible for determinism, purity and immutable results; the API does not enforce
+or sandbox those properties. Parsing and schema compatibility remain in the reader.
+
+This functional API retains all events, requiring O(event count) memory, unlike
+the previous summary-only accumulator. Reusing a materialized sequence avoids
+rereading JSONL, though each separate projection call validates its own traversal.
+There is no multi-projection engine, streaming framework, CLI analytics command,
+new Event field or runtime change.
+
+Verification (2026-09-26): 11 focused projection tests and all 63 OBS-001 through
+OBS-004 regression tests passed. Full offline suite: 188 tests, 187 passed and one
+existing Windows-only skip. Runtime, Event, recorder and CLI contracts are unchanged.

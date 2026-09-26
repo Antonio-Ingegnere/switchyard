@@ -5,7 +5,7 @@ from dataclasses import dataclass, field, fields
 import json
 from pathlib import Path
 from types import MappingProxyType
-from typing import Iterable, Iterator, Mapping
+from typing import Callable, Iterable, Iterator, Mapping, TypeVar
 
 from runtime import Event, OUTCOMES, RunContext
 
@@ -128,17 +128,12 @@ class RunSummary:
             object.__setattr__(self, name, MappingProxyType(dict(getattr(self, name))))
 
 
-class _Run:
-    def __init__(self, run_id):
-        self.run_id = run_id
+class _RunShape:
+    """Shared event-stream integrity only; independent of projection facts."""
+
+    def __init__(self):
         self.started = False
         self.ended = False
-        self.terminal = None
-        self.visits = Counter()
-        self.invocations = Counter()
-        self.outcomes = Counter()
-        self.transitions = 0
-        self.budgets = 0
         self.visit_ids = set()
         self.invocation_ids = set()
         self.active = None
@@ -147,12 +142,6 @@ class _Run:
         self.transitioned = False
         self.budget = None
         self.closed_terminal = None
-        self.timed_start = False
-        self.run_duration = None
-        self.invocation_duration = 0
-        self.timed_invocations = 0
-        self.state_durations = Counter()
-        self.timed_visits = Counter()
         self.context = (None, None)
 
     def consume(self, event):
@@ -162,7 +151,6 @@ class _Run:
             _check(kind == 'run_started', 'run must begin with run_started')
             self.context = (event.correlation_id, event.parent_run_id)
             self.started = True
-            self.timed_start = event.occurred_at_unix_ns is not None
             return
         _check(self.context == (event.correlation_id, event.parent_run_id),
                'inconsistent run correlation')
@@ -176,7 +164,6 @@ class _Run:
             self.active = (event.state, event.state_visit_id)
             self.invocation = self.outcome = self.closed_terminal = None
             self.transitioned = False
-            self.visits[event.state] += 1
         elif kind in ('invocation_started', 'invocation_finished', 'state_exited') or (
                 kind == 'transition_selected' and event.outcome is not None):
             _check(self.active == (event.state, event.state_visit_id), 'unmatched state visit')
@@ -185,25 +172,16 @@ class _Run:
                 _check(event.invocation_id not in self.invocation_ids, 'reused invocation ID')
                 self.invocation_ids.add(event.invocation_id)
                 self.invocation = event.invocation_id
-                self.invocations[event.state] += 1
             elif kind == 'invocation_finished':
                 _check(self.invocation == event.invocation_id and self.outcome is None,
                        'unmatched or repeated invocation outcome')
                 self.outcome = event.outcome
-                self.outcomes[event.outcome] += 1
-                if event.duration_ns is not None:
-                    self.invocation_duration += event.duration_ns
-                    self.timed_invocations += 1
             elif kind == 'transition_selected':
                 _check(self.invocation == event.invocation_id and self.outcome == event.outcome
                        and not self.transitioned, 'unmatched or repeated outcome transition')
                 self.transitioned = True
-                self.transitions += 1
             else:
                 _check(self.invocation is None or self.transitioned, 'state exit before invocation transition')
-                if event.duration_ns is not None:
-                    self.state_durations[event.state] += event.duration_ns
-                    self.timed_visits[event.state] += 1
                 self.closed_terminal = event.state if self.invocation is None else None
                 self.active = None
                 self.invocation = self.outcome = None
@@ -211,17 +189,13 @@ class _Run:
             _check(self.active is None and self.budget is None, 'budget event during active visit or pending budget')
             self.budget = event.state
             self.closed_terminal = None
-            self.budgets += 1
         elif kind == 'transition_selected':
             _check(self.budget == event.state, 'budget transition without budget event')
             self.budget = None
-            self.transitions += 1
         elif kind == 'run_finished':
             _check(self.active is None and self.budget is None
                    and self.closed_terminal == event.state, 'completion without closed terminal visit')
-            self.terminal = event.state
             self.ended = True
-            self.run_duration = event.duration_ns
         elif kind == 'run_error':
             if self.active is not None:
                 _check(self.active == (event.state, event.state_visit_id)
@@ -233,37 +207,98 @@ class _Run:
                        (event.trigger_event == 'budget_exceeded' and self.budget == event.state),
                        'unmatched budget error')
             self.ended = True
-            self.run_duration = event.duration_ns
-
-    def result(self):
-        invocations = sum(self.invocations.values())
-        invocation_duration = (self.invocation_duration
-                               if self.timed_invocations == invocations
-                               and (invocations > 0 or self.timed_start) else None)
-        state_durations = {state: self.state_durations[state]
-                           if self.timed_visits[state] == count else None
-                           for state, count in self.visits.items()}
-        return RunSummary(self.run_id, self.terminal, self.visits,
-                          sum(self.invocations.values()), self.invocations,
-                          self.outcomes, self.transitions, self.budgets,
-                          self.terminal is not None, self.run_duration,
-                          invocation_duration, state_durations, *self.context)
 
 
-def summarize_runs(events: Iterable[Event]) -> tuple[RunSummary, ...]:
-    """Summarize runs in first-seen order, accepting structurally valid prefixes.
+T = TypeVar('T')
 
-    Interleaved runs are supported. Checks cover record shape and event pairing,
-    not graph correctness, configured budgets, or executor/diagnostic contracts.
-    No results are returned if any input record or run is invalid.
+
+def project_runs(events: Iterable[Event],
+                 projector: Callable[[tuple[Event, ...]], T]) -> tuple[T, ...]:
+    """Apply a pure callback to each validated run history in first-seen order.
+
+    All input is validated before any callback. Histories are nonempty tuples in
+    source order; incomplete and interleaved runs are supported. This retains
+    O(event count) memory. Callback errors propagate unchanged. Callers define
+    callback purity and result immutability; neither is enforced by this function.
     """
     runs = {}
     for number, event in enumerate(events, 1):
         try:
             _validate(event)
             if event.run_id not in runs:
-                runs[event.run_id] = _Run(event.run_id)
-            runs[event.run_id].consume(event)
+                runs[event.run_id] = (_RunShape(), [])
+            shape, history = runs[event.run_id]
+            shape.consume(event)
+            history.append(event)
         except ObservabilityError as exc:
             raise ObservabilityError(f'event {number}: {exc}') from None
-    return tuple(run.result() for run in runs.values())
+    return tuple(projector(tuple(history)) for _, history in runs.values())
+
+
+def _summarize_run(events: tuple[Event, ...]) -> RunSummary:
+    visits = Counter()
+    invocations = Counter()
+    outcomes = Counter()
+    transitions = budgets = 0
+    invocation_duration = timed_invocations = 0
+    state_durations = Counter()
+    timed_visits = Counter()
+    terminal = run_duration = None
+    for event in events:
+        if event.kind == 'state_entered':
+            visits[event.state] += 1
+        elif event.kind == 'invocation_started':
+            invocations[event.state] += 1
+        elif event.kind == 'invocation_finished':
+            outcomes[event.outcome] += 1
+            if event.duration_ns is not None:
+                invocation_duration += event.duration_ns
+                timed_invocations += 1
+        elif event.kind == 'state_exited':
+            if event.duration_ns is not None:
+                state_durations[event.state] += event.duration_ns
+                timed_visits[event.state] += 1
+        elif event.kind == 'transition_selected':
+            transitions += 1
+        elif event.kind == 'budget_exceeded':
+            budgets += 1
+        elif event.kind in ('run_finished', 'run_error'):
+            run_duration = event.duration_ns
+            if event.kind == 'run_finished':
+                terminal = event.state
+    count = sum(invocations.values())
+    total = (invocation_duration if timed_invocations == count
+             and (count > 0 or events[0].occurred_at_unix_ns is not None) else None)
+    durations = {state: state_durations[state] if timed_visits[state] == visits_count else None
+                 for state, visits_count in visits.items()}
+    return RunSummary(events[0].run_id, terminal, visits, count, invocations,
+                      outcomes, transitions, budgets, terminal is not None,
+                      run_duration, total, durations,
+                      events[0].correlation_id, events[0].parent_run_id)
+
+
+def summarize_runs(events: Iterable[Event]) -> tuple[RunSummary, ...]:
+    """Summarize validated runs in first-seen order, including valid prefixes."""
+    return project_runs(events, _summarize_run)
+
+
+@dataclass(frozen=True, slots=True)
+class BudgetSummary:
+    """Recorded budget-exhaustion facts, not predictions about unfinished runs."""
+
+    run_id: str
+    budget_exceeded_count: int
+    counts_by_state: Mapping[str, int]
+
+    def __post_init__(self):
+        object.__setattr__(self, 'counts_by_state', MappingProxyType(dict(self.counts_by_state)))
+
+
+def _summarize_budget(events: tuple[Event, ...]) -> BudgetSummary:
+    counts = Counter(event.state for event in events if event.kind == 'budget_exceeded')
+    return BudgetSummary(events[0].run_id, sum(counts.values()), counts)
+
+
+def summarize_budgets(events: Iterable[Event]) -> tuple[BudgetSummary, ...]:
+    """Count budget_exceeded facts independently for each validated run."""
+    return project_runs(events, _summarize_budget)
