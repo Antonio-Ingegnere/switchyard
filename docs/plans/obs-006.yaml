@@ -1,0 +1,120 @@
+id: OBS-006
+goal: |
+  Derive delivery-specific run/lifecycle facts from DELIVERY-001 canonical histories
+  using public generic observability APIs, without changing any generic contract.
+scope:
+  - examples/delivery/analytics.py
+  - examples/delivery/README.md
+  - tests/test_delivery_analytics.py
+  - docs/plans/obs-006.yaml
+naming: |
+  Use obs-006.yaml to retain the requested observability delivery sequence. The
+  implementation and usage documentation live with the delivery application.
+constraints:
+  - DELIVERY-001 committed separately as 554ab26 before implementation.
+  - No runtime, Event, RunContext, recorder, loader, generic observability, CLI or preset behavior changes.
+  - Use project_runs and summarize_runs; do not reproduce generic grouping/integrity validation.
+  - Pure Python API, standard library only, no provider calls or new file-loading convenience API.
+public_api: |
+  summarize_delivery_analytics(events) -> DeliveryAnalyticsSummary.
+  summarize_delivery_lifecycles(events) -> tuple[DeliveryLifecycleSummary, ...].
+  Both consume canonical Event iterables, including read_events output, once.
+  Frozen DeliveryRunSummary contains workflow, generic RunSummary, verification
+  eligibility and optional first_pass_verification/automatic_repair_used/repair_success.
+  Dataset result includes recognized run summaries, lifecycles, uncorrelated IDs,
+  unrecognized IDs, immutable Ratio metrics, and count properties.
+  Ratio(numerator, denominator, unknown_count=0).value returns exact Fraction only
+  when denominator > 0 and unknown_count == 0; otherwise None. Counts retain all
+  eligible observations. This preserves requested denominators without counting
+  unfinished unknown outcomes as negative observations. No binary floats.
+classification: |
+  Use first state_entered only: ANALYZE=deliver, FRESH_DIAGNOSIS=repair,
+  CHECK_WORKTREE=accept. Check observed state/transition history against the
+  corresponding DELIVERY-001 acyclic preset shape, including outcome targets,
+  terminal sets, single visits and allowed invocation states. Accept valid prefixes.
+  Wrong shapes are unrecognized, not silently reinterpreted. A candidate containing
+  more than one distinct workflow initial state raises DeliveryAnalyticsError.
+  run_started alone cannot yet identify a workflow and is explicitly unrecognized.
+  Unrecognized records sharing an observed lifecycle correlation make its final
+  terminal unknown and mark it incomplete, without including those runs in metrics.
+  State history cannot prove which executable/provider actually ran: this consumer
+  recognizes preset shapes, not authenticated preset provenance.
+metric_definitions: |
+  Reached VERIFY means actual state_entered VERIFY, not a selected future target.
+  First-pass numerator: VERIFY success + completed READY_FOR_MANUAL_QA, no entered
+  REPAIR_ONCE. Denominator: all recognized deliver/repair runs that reached VERIFY.
+  False is established by a non-success VERIFY result, entered REPAIR_ONCE, or a
+  closed run without the required success. Otherwise pending is None. Runs ending
+  before VERIFY are ineligible (None) and excluded from this denominator.
+  Automatic-repair numerator: actual REPAIR_ONCE entries among that same VERIFY
+  cohort. Absent entry is false only after run end; otherwise unknown. Automatic
+  repair success denominator: all runs entering REPAIR_ONCE; numerator: VERIFY_AGAIN
+  success and completed READY_FOR_MANUAL_QA. Non-success reverify or closed run
+  without QA-ready is false; unfinished unresolved attempt is unknown.
+  Rediagnosis: NEEDS_REDIAGNOSIS terminals / all recognized deliver runs.
+  Needs-human: NEEDS_HUMAN terminals / all recognized repair runs.
+  Commit-blocked: COMMIT_BLOCKED terminals / all recognized accept runs.
+  For these terminal ratios, unfinished runs are unknown; run_error closes a run
+  without claiming one of those terminals. No missing future outcome is false.
+  QA decision denominator: distinct QA-ready completed parents with an observed
+  same-correlation repair or accept child. Reopen numerator: parents with repair
+  children; pass numerator: parents with accept children (accept need not finish).
+  Repeated same-kind children count one parent decision. Both repair and accept
+  children of one parent are ambiguous decisions and raise DeliveryAnalyticsError.
+  Pending QA-ready parents are excluded from QA ratios and make a lifecycle incomplete.
+  Accepted lifecycle: any recognized accept run completed ACCEPTED, never QA-ready
+  or COMMIT_BLOCKED. Accepted counts retain that historical fact even if later work
+  reopens the lifecycle. Invocations-per-accepted-lifecycle uses only groups whose
+  unique observed final run ends ACCEPTED; numerator sums all their observed
+  RunSummary.invocation_count values, denominator is those final-accepted groups.
+  This counts all executor invocations, not agent/provider invocations.
+lifecycle_contract: |
+  Group recognized runs by non-null correlation_id; preserve lifecycle first-seen
+  order. Never combine None values: surface uncorrelated IDs and per-run summaries;
+  their run-level metrics remain eligible but they contribute no lifecycle metrics.
+  Use parent edges first and stable first-seen topological ordering within groups;
+  do not use wall-clock ordering or durations. Preserve individual run IDs.
+  Missing/unrecognized/uncorrelated parents are partial observation, not fabricated
+  nodes. Present parents with different non-null correlation IDs, parent cycles,
+  contradictory QA decisions, and accept children of known completed non-QA-ready
+  parents raise DeliveryAnalyticsError. Incomplete parent logs are not contradictions.
+  Multiple roots/branches are preserved, marked incomplete, and never assigned an
+  invented last run. final_terminal is available only from a unique observed leaf.
+  A lifecycle is incomplete if any run lacks run_finished/run_error, a parent is
+  unavailable, there is not one connected linear chain rooted at a parentless
+  deliver run, or any QA-ready parent has no observed QA decision. Explicit failed
+  terminal endings are resolved outcomes, not intrinsically missing data.
+  automation_duration_ns sums observed per-run durations only if all are available;
+  otherwise None. Missing external history is separately marked incomplete. This
+  is observed automation time, not human QA or cross-run wall-clock elapsed time.
+errors: |
+  Generic malformed records/history still raise ObservabilityError unchanged.
+  DeliveryAnalyticsError(ValueError) covers only application lifecycle contradictions.
+  No blanket exception catches, automatic repairs or mutation of input events.
+verification:
+  - Focused deterministic real-runtime event fixtures from DELIVERY-001 flow objects, with fake executors.
+  - First pass, corrected pass, second failure, QA pass/reopen, blocked accept, incomplete and historical cases.
+  - Parent-first ordering, interleaving, multiple/uncorrelated groups, missing parents and contradictions.
+  - Exact ratio denominators, unknown/zero distinction, immutable results and arbitrary-flow rejection.
+  - DELIVERY-001 tests, all OBS-001..005 regressions and full offline suite.
+  - Protected file diff check and separate OBS-006 commit after verification.
+acceptance:
+  - Every metric follows the explicit numerator/denominator definitions and zero-denominator rates are unavailable.
+  - Unknown future outcomes are surfaced without contributing false failures.
+  - Delivery classification uses unique initial states and matching preset histories, never terminal names alone.
+  - Missing parent history remains incomplete; contradictory observed provenance fails explicitly.
+  - Historical timing/correlation semantics, generic APIs and DELIVERY-001 execution semantics remain unchanged.
+non_goals:
+  - New Event fields, workflow_type, authenticated provenance, provider/agent attribution or lifecycle clock.
+  - Dashboards, analytics CLI, file reopening, new generic projections or preset execution changes.
+verification_result: |
+  2026-09-26: focused analytics suite 25 passed (0.040s).
+  DELIVERY-001 regressions: 7 delivery tests (0.489s) and 11 acceptance tests
+  (11.505s) passed. OBS-001..005 regressions: 74 passed across CLI (16),
+  observability (16), timing (16), correlation (15) and projections (11).
+  Full offline suite: 231 tests, 230 passed, one existing Windows-only batch-path
+  skip (20.931s). No real provider calls. Generic runtime/observability, recorder,
+  loader, CLI and DELIVERY-001 execution files have no diff against 554ab26.
+  git diff --check passed and MicroSpec YAML validates.
+  DELIVERY-001 remains separate commit 554ab26. OBS-006 is committed separately
+  after verification; no analytics CLI or dashboard was implemented.

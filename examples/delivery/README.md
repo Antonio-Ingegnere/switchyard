@@ -205,3 +205,146 @@ offline suite ran 206 tests: 205 passed and one existing Windows-only skip.
 Tests use controlled Codex boundaries, real deterministic verifier subprocesses,
 and disposable Git repositories; they make no provider calls. No generic
 Switchyard contract or implementation changed in DELIVERY-001.
+
+## OBS-006 delivery analytics Python API
+
+The application-specific consumer in `examples.delivery.analytics` recognizes
+DELIVERY-001 history shapes without changing runtime or generic observability:
+
+```python
+from switchyard.observability import read_events
+from examples.delivery.analytics import (
+    summarize_delivery_analytics, summarize_delivery_lifecycles,
+)
+
+events = tuple(read_events("events.jsonl"))  # read once; iterators are single-use
+report = summarize_delivery_analytics(events)
+for lifecycle in report.lifecycles:
+    print(lifecycle.correlation_id, lifecycle.run_ids, lifecycle.final_terminal)
+    print(lifecycle.accepted, lifecycle.incomplete, lifecycle.automation_duration_ns)
+
+rate = report.first_pass_verification_rate
+print(rate.numerator, rate.denominator, rate.unknown_count, rate.value)
+# Or request just the lifecycle tuple:
+assert summarize_delivery_lifecycles(events) == report.lifecycles
+```
+
+Both functions accept canonical Event iterables, including `read_events()` output,
+and never open files themselves. They use public `project_runs()` and
+`summarize_runs()` for generic validation, grouping, counts, timing and provenance.
+Their result dataclasses, nested run summaries, identifier tuples and ratio values
+are immutable. `docs/plans/obs-006.yaml` retains the observability sequence name;
+all delivery interpretation stays in the application directory.
+
+### Classification and lifecycle membership
+
+The first actual `state_entered` identifies a candidate: `ANALYZE` means deliver,
+`FRESH_DIAGNOSIS` repair, and `CHECK_WORKTREE` accept. Observed states, transitions,
+outcome targets and terminals must match the corresponding DELIVERY-001 graph or
+a valid prefix of it. A terminal name alone never establishes a workflow type.
+Unrelated or incompatible shapes, and `run_started`-only prefixes, appear in
+`report.unrecognized_run_ids`. This is shape recognition, not authenticated proof
+of which executor/provider or preset generator produced the events.
+
+Recognized runs appear individually in `report.runs` as `DeliveryRunSummary`,
+with `.workflow`, the unchanged generic `.run` RunSummary, `.ended`,
+`.verification_eligible`, and optional `.first_pass_verification`,
+`.automatic_repair_used`, and `.repair_success` facts.
+
+Non-null correlation IDs group recognized runs into separate lifecycle summaries.
+Uncorrelated recognized runs remain in run-level metrics and are explicitly listed
+in `uncorrelated_run_ids`/`uncorrelated_run_count`; they contribute no lifecycle
+metrics and are never grouped under a fabricated ID. Lifecycle groups retain
+first-seen order. Within a group, explicit parent edges take precedence; ties use
+first-seen order. Wall clocks are not used to override provenance.
+
+`DeliveryLifecycleSummary` exposes individual `run_ids`, deliver/repair/accept run
+counts, final terminal, acceptance, QA decision/reopen/pass counts, automatic
+repair count, separate rediagnosis/needs-human counts, total executor invocations,
+observed automation duration and an incomplete flag.
+
+### Exact metrics
+
+Each aggregate `*_rate` is a `Ratio` with integer `numerator`, `denominator` and
+`unknown_count`. `.value` is an exact `fractions.Fraction` when the denominator is
+positive and no eligible outcome is unresolved. Otherwise it is `None`, including
+zero denominators. Counts remain available even when a complete rate is unknown.
+The consumer does not silently turn unfinished runs into negative observations.
+
+| Metric field | Numerator | Denominator |
+| --- | --- | --- |
+| `first_pass_verification_rate` | First VERIFY succeeds, run finishes QA-ready, and REPAIR_ONCE was not entered | Deliver/repair runs actually entering VERIFY |
+| `automatic_repair_rate` | Actual REPAIR_ONCE entries | Deliver/repair runs actually entering VERIFY |
+| `automatic_repair_success_rate` | VERIFY_AGAIN succeeds and run finishes QA-ready | Runs actually entering REPAIR_ONCE |
+| `rediagnosis_rate` | Deliver runs ending NEEDS_REDIAGNOSIS | Recognized deliver runs |
+| `needs_human_rate` | Repair runs ending NEEDS_HUMAN | Recognized repair runs |
+| `manual_qa_reopen_rate` | QA-ready parent runs with an observed repair child | QA-ready parent runs with an observed repair or accept child in the same correlation |
+| `manual_qa_pass_rate` | QA-ready parent runs with an observed accept child | Same observed-decision cohort |
+| `commit_blocked_rate` | Accept runs ending COMMIT_BLOCKED | Recognized accept runs |
+
+Reaching VERIFY means actual state entry, not a transition selecting it. A run
+ending before VERIFY is ineligible for the first two ratios. A recorded failed
+VERIFY already disproves first-pass verification; it does not establish repair
+use until REPAIR_ONCE is entered. A successful VERIFY without the required
+QA-ready completion is still pending. An unfinished corrective attempt has unknown
+success unless a non-success second verification already disproves it. A
+`run_error` is an observed end, not a missing future completion.
+
+Manual QA is inferred only from the documented external command convention:
+a QA-ready parent followed by a recognized repair or accept child. The child need
+only start its initial state; it need not finish. Automatic REPAIR_ONCE is never
+a manual reopen. A QA-ready parent with no decision child is pending, excluded
+from the QA denominator. Multiple same-kind children count one parent decision;
+repair and accept children of the same parent are contradictory decisions.
+An accept child records the human-QA-pass convention even if committing is blocked.
+The runtime did not itself conduct manual QA.
+
+`accepted` means at least one accept run reached ACCEPTED. READY_FOR_MANUAL_QA and
+COMMIT_BLOCKED are not acceptance. This historical acceptance fact survives a later
+reopen. `invocations_per_accepted_lifecycle` is a Ratio whose numerator sums all
+observed executor invocations in groups with a unique observed final ACCEPTED run,
+and whose denominator counts those groups. Its `.value` is also exposed as
+`mean_invocations_per_accepted_lifecycle`; the numerator is
+`total_invocations_for_accepted_lifecycles`. Groups reopened after acceptance or
+with ambiguous final branches are excluded from this mean, even when their
+historical `accepted` flag remains true. These are **executor** invocations,
+including deterministic commands, not inferred agent/provider invocations.
+
+Count properties on the dataset include `lifecycle_count`,
+`accepted_lifecycle_count`, `incomplete_lifecycle_count`,
+`eligible_verification_run_count`, `first_pass_verification_count`,
+`automatic_repair_count`, `automatic_repair_success_count`, `rediagnosis_count`,
+`needs_human_count`, `qa_decision_count`, `manual_qa_reopen_count`,
+`manual_qa_pass_count`, `accept_run_count`, and `commit_blocked_count`.
+
+### Partial histories and errors
+
+A lifecycle is incomplete when a recognized run is unfinished, a parent is absent
+or cannot be classified/grouped, the available runs are not one linear chain
+rooted in a parentless deliver run, or a QA-ready run lacks an observed decision.
+Missing external parents are tolerated. Multiple roots/branches are retained;
+multiple leaves yield no invented final terminal. Unrecognized records sharing a
+correlation also mark its lifecycle incomplete and make the final terminal unknown,
+without adding those records to delivery metrics. Explicit failed terminal endings
+are resolved outcomes rather than intrinsically incomplete data.
+
+`automation_duration_ns` sums OBS-003 `run_duration_ns` for observed recognized
+runs in the lifecycle. If any such duration is unavailable, the sum is `None`.
+Missing external history is separately signaled by `incomplete`; the sum never
+claims to include unobserved work. Human testing time is excluded. No cross-run
+monotonic subtraction, wall-clock duration, provider cost or token estimate is used.
+
+Generic invalid event records/history still raise `ObservabilityError` unchanged.
+`DeliveryAnalyticsError` covers contradictory application evidence: different
+present non-null parent/child correlation IDs, parent cycles, conflicting QA
+choices, accept children of known ended non-QA-ready parents, or multiple workflow
+initial-state signatures in one candidate run. An incomplete parent log is not
+proof of an invalid relationship. No data is repaired or silently discarded.
+
+There is no analytics CLI, dashboard, file-loading wrapper or generic contract
+change in OBS-006.
+
+OBS-006 verification (2026-09-26): 25 focused analytics tests, all 18 DELIVERY-001
+regressions, and all 74 OBS-001..005 regressions passed. Full offline suite:
+231 tests, 230 passed and one existing Windows-only skip. No real provider calls.
+Generic contracts and DELIVERY-001 execution behavior are unchanged.
