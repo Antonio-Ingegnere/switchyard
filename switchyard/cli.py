@@ -6,7 +6,7 @@ import os
 import sys
 
 from flow_config import FlowConfigError, load_flow
-from runtime import ExecutionError, WorkUnit, run
+from runtime import ExecutionError, RunContext, WorkUnit, run
 from runtime.recording import JsonlRecorder
 
 
@@ -32,6 +32,8 @@ def _parser():
     execute.add_argument('--require-terminal', action='append', default=[], metavar='NAME')
     execute.add_argument('--events-file', metavar='PATH',
                          help='append runtime events as JSONL (parent directory must exist)')
+    execute.add_argument('--correlation-id', metavar='VALUE', help='opaque external lifecycle identifier')
+    execute.add_argument('--parent-run-id', metavar='VALUE', help='opaque parent run identifier')
     return parser
 
 
@@ -60,10 +62,23 @@ def main(argv=None) -> int:
             continue
         print(prefix + _safe_display(name, 512-len(prefix)), file=sys.stderr, flush=True)
         return 2
+    options = {}
+    if args.correlation_id is not None or args.parent_run_id is not None:
+        try:
+            context = RunContext(args.correlation_id, args.parent_run_id)
+        except (TypeError, ValueError):
+            invalid_context = True
+        else:
+            invalid_context = False
+        if invalid_context:
+            print('switchyard: invalid run context', file=sys.stderr, flush=True)
+            return 2
+        options['context'] = context
     work = WorkUnit(args.task)
-    recording = {} if args.events_file is None else {'recorder': JsonlRecorder(args.events_file)}
+    if args.events_file is not None:
+        options['recorder'] = JsonlRecorder(args.events_file)
     try:
-        result = run(work, loaded.flow, loaded.executors, **recording)
+        result = run(work, loaded.flow, loaded.executors, **options)
     except ExecutionError:
         failed = True
     else:

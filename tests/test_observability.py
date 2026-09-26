@@ -166,7 +166,7 @@ class ObservabilityTests(unittest.TestCase):
     def test_missing_and_extra_fields(self):
         base = asdict(Event('run_started', 'r'))
         records = [dict(base, extra=None)]
-        for key in base.keys() - {'occurred_at_unix_ns', 'duration_ns'}:
+        for key in base.keys() - {'occurred_at_unix_ns', 'duration_ns', 'correlation_id', 'parent_run_id'}:
             records.append({name: value for name, value in base.items() if name != key})
         for record in records:
             with self.subTest(record=record):

@@ -7,7 +7,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Iterable, Iterator, Mapping
 
-from runtime import Event, OUTCOMES
+from runtime import Event, OUTCOMES, RunContext
 
 
 class ObservabilityError(ValueError):
@@ -16,7 +16,8 @@ class ObservabilityError(ValueError):
 
 _FIELDS = frozenset(field.name for field in fields(Event))
 _TIMING = {'occurred_at_unix_ns', 'duration_ns'}
-_LEGACY_FIELDS = _FIELDS - _TIMING
+_CORRELATION = {'correlation_id', 'parent_run_id'}
+_LEGACY_FIELDS = _FIELDS - _TIMING - _CORRELATION
 _BASE = {'kind', 'run_id'}
 _DURATION_KINDS = {'invocation_finished', 'state_exited', 'run_finished', 'run_error'}
 _VISIT = {'state', 'state_visit_id'}
@@ -53,6 +54,10 @@ def _validate(event: Event) -> None:
         else:
             _check(value is None or (type(value) is str and bool(value)),
                    'expected nonempty string or null')
+    try:
+        RunContext(event.correlation_id, event.parent_run_id)
+    except (TypeError, ValueError) as exc:
+        raise ObservabilityError(str(exc)) from None
     _check(event.run_id is not None and event.kind in _SHAPES, 'unknown event kind or missing run ID')
     present = {name for name in _LEGACY_FIELDS - _BASE if getattr(event, name) is not None}
     _check(present in _SHAPES[event.kind], 'invalid fields for event kind')
@@ -115,6 +120,8 @@ class RunSummary:
     run_duration_ns: int | None = None
     invocation_duration_ns_total: int | None = None
     state_duration_ns: Mapping[str, int | None] = field(default_factory=dict)
+    correlation_id: str | None = None
+    parent_run_id: str | None = None
 
     def __post_init__(self):
         for name in ('state_visit_counts', 'invocation_counts_by_state', 'outcome_counts', 'state_duration_ns'):
@@ -146,15 +153,19 @@ class _Run:
         self.timed_invocations = 0
         self.state_durations = Counter()
         self.timed_visits = Counter()
+        self.context = (None, None)
 
     def consume(self, event):
         kind = event.kind
         _check(not self.ended, 'event after run end')
         if not self.started:
             _check(kind == 'run_started', 'run must begin with run_started')
+            self.context = (event.correlation_id, event.parent_run_id)
             self.started = True
             self.timed_start = event.occurred_at_unix_ns is not None
             return
+        _check(self.context == (event.correlation_id, event.parent_run_id),
+               'inconsistent run correlation')
         _check(kind != 'run_started', 'duplicate run_started')
         _check(self.closed_terminal is None or kind == 'run_finished',
                'expected completion after terminal visit')
@@ -236,7 +247,7 @@ class _Run:
                           sum(self.invocations.values()), self.invocations,
                           self.outcomes, self.transitions, self.budgets,
                           self.terminal is not None, self.run_duration,
-                          invocation_duration, state_durations)
+                          invocation_duration, state_durations, *self.context)
 
 
 def summarize_runs(events: Iterable[Event]) -> tuple[RunSummary, ...]:

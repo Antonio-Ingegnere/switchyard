@@ -20,6 +20,23 @@ class WorkUnit:
 
 
 @dataclass(frozen=True, slots=True)
+class RunContext:
+    """Opaque control-plane provenance; never passed to executors."""
+
+    correlation_id: str | None = None
+    parent_run_id: str | None = None
+
+    def __post_init__(self):
+        for name in ('correlation_id', 'parent_run_id'):
+            value = getattr(self, name)
+            if value is not None:
+                if type(value) is not str:
+                    raise TypeError(f'{name} must be a string or None')
+                if not value or '\0' in value:
+                    raise ValueError(f'{name} must be nonempty and contain no NUL')
+
+
+@dataclass(frozen=True, slots=True)
 class ExecutorResult:
     outcome: str
 
@@ -115,6 +132,8 @@ class Event:
     observed: int | None = None
     occurred_at_unix_ns: int | None = None
     duration_ns: int | None = None
+    correlation_id: str | None = None
+    parent_run_id: str | None = None
 
 
 class _Clock:
@@ -227,17 +246,25 @@ def validate(flow: Flow, executors: Mapping[str, Executor]) -> None:
 
 
 def run(work_unit: WorkUnit, flow: Flow, executors: Mapping[str, Executor],
-        *, recorder: EventRecorder | None = None) -> RunResult:
+        *, recorder: EventRecorder | None = None,
+        context: RunContext | None = None) -> RunResult:
     executors = dict(executors)
     validate(flow, executors)
     if type(work_unit) is not WorkUnit:
         raise TypeError("expected an immutable WorkUnit")
+    if context is None:
+        context = RunContext()
+    elif type(context) is not RunContext:
+        raise TypeError("expected an immutable RunContext or None")
+    else:
+        context = RunContext(context.correlation_id, context.parent_run_id)
     run_id = f"run:{uuid4()}"
     events: list[Event] = []
     timing = _EventTiming()
 
     def emit(event: Event, failure: ExecutionError | None = None) -> None:
-        event = timing.stamp(event)
+        event = replace(timing.stamp(event), correlation_id=context.correlation_id,
+                        parent_run_id=context.parent_run_id)
         events.append(event)
         if failure is not None:
             failure.events = tuple(events)

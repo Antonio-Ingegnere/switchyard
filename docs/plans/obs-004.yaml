@@ -1,0 +1,90 @@
+id: OBS-004
+goal: |
+  Associate independent runs through opaque correlation and parent identifiers
+  without adding lifecycle semantics or passing context to executors.
+scope:
+  - runtime/__init__.py
+  - switchyard/cli.py
+  - switchyard/observability.py
+  - tests/test_correlation.py
+  - tests/test_observability.py (optional-field regression adjustment)
+  - README.md
+  - docs/plans/obs-004.yaml
+constraints:
+  - OBS-003 committed separately as d8c9dde before implementation.
+  - Preserve transition, budget, admission, diagnostic and timing semantics.
+  - Do not change WorkUnit, InvocationRequest, Executor API, adapters, YAML or recorder.
+public_api: |
+  Add frozen, slotted RunContext(correlation_id: str | None = None,
+  parent_run_id: str | None = None). Append keyword-only context: RunContext | None
+  = None to run(), after recorder. None means both identifiers are unavailable.
+  Validate the exact context type and snapshot/revalidate its two values before
+  run ID allocation, timing, events, recorder calls or executor invocation.
+  RunResult remains unchanged: run_id and context are available from its events.
+  Defer flow_name: no current requirement needs a separate flow label, and adding
+  naming/configuration semantics would widen this slice. No metadata or grouping helper.
+identifier_contract: |
+  Each value must be exactly str or None. Reject empty strings and NUL characters;
+  preserve all other strings verbatim, including Unicode, whitespace and punctuation.
+  No coercion, trimming, UUID requirement, length limit or external-system format.
+  Constructor/type errors use TypeError; invalid string values use ValueError, with
+  fixed field-specific messages that never include the supplied value. No parent
+  existence, graph, cycle or relationship validation; provenance is opaque.
+event_contract: |
+  Append correlation_id: str | None = None and parent_run_id: str | None = None
+  to Event. Every observed event, including failure events, receives the same
+  validated context after timing stamping and before observed append/recording.
+  Correlation is never added to WorkUnit, InvocationRequest or provider prompts.
+  Timing helper, sample ordering and interval meanings are unchanged.
+compatibility: |
+  Keep all eleven original Event fields mandatory. Only the two OBS-003 timing
+  fields and two OBS-004 correlation fields may be independently omitted/null.
+  Missing fields reconstruct as None; unrelated fields are rejected. Validate
+  identifier values consistently with RunContext for JSONL and direct Events.
+  read_events checks record shape; summarize_runs additionally rejects any change
+  in either correlation value within one run, including None-to-value changes.
+  Earlier strict readers must upgrade for newly written fields; old logs require
+  no migration. Old, timing-only and correlated runs may coexist in one file.
+summary_contract: |
+  Append optional correlation_id and parent_run_id to immutable RunSummary.
+  Preserve exact run_id grouping, first-seen order and all timing/count semantics.
+  Multiple runs sharing a correlation_id remain separate summaries. Consumers may
+  group those summaries themselves. A parent may be absent from the supplied log.
+cli_contract: |
+  run gains --correlation-id VALUE and --parent-run-id VALUE; validate rejects both.
+  After loading the flow and validating required terminals, construct RunContext
+  only if at least one flag was provided. Invalid context returns exit 2 with a
+  fixed safe stderr message before WorkUnit/recorder/runtime construction or execution.
+  No flags preserves existing runtime kwargs. Task and normal/error output remain
+  unchanged. --events-file still uses the existing recorder and caller-relative path.
+acceptance:
+  - Absent, single-field and full contexts appear consistently on every runtime event.
+  - Invalid context/type/identifiers fail deterministically before execution or recording.
+  - Correlation cannot mutate and never changes requests, event order or timing under controlled clocks.
+  - CLI flags pass control-plane context separately from unchanged task text.
+  - Validate rejects run-only flags; old CLI calls and exit codes remain intact.
+  - New logs round-trip; old, timed and correlated histories coexist without migration.
+  - Both direct and JSONL projection reject inconsistent correlation within one run.
+  - Summaries preserve independent runs, opaque parent references and first-seen ordering.
+verification:
+  - Focused runtime, main(argv), real CLI process and historical reader/projection tests.
+  - Run OBS-001 CLI, OBS-002 observability and OBS-003 timing regressions.
+  - Run complete offline suite; no provider calls.
+  - Confirm protected recorder, loader, adapters and previous MicroSpecs are unchanged.
+non_goals:
+  - flow_name, arbitrary metadata, graph validation/execution or parent resolution.
+  - Delivery metrics, lifecycle duration, provider telemetry, storage or dashboards.
+  - OBS-005 or any new projection framework.
+verification_result: |
+  2026-09-26: focused correlation suite 15 passed (0.275s).
+  OBS-001 CLI regressions 16 passed (2.345s); OBS-002 observability regressions
+  16 passed (0.059s); OBS-003 timing regressions 16 passed (0.012s).
+  Full offline suite: 177 tests, 176 passed, one existing Windows-only batch-path
+  skip (9.141s). No provider calls. Controlled-clock comparison preserves exact
+  occurrence/duration values and all original event fields with/without context.
+  Required-field regression excludes only the four named optional additions.
+  Protected recorder, loader, adapters, examples and previous MicroSpecs unchanged.
+  WorkUnit, InvocationRequest, Executor, diagnostic contracts, timing helpers and
+  flow validation ASTs unchanged from OBS-003. git diff --check passed.
+  OBS-003 is separate commit d8c9dde; OBS-004 remains a separate working-tree slice.
+  OBS-005 not started.

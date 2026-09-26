@@ -798,3 +798,71 @@ deterministic timing tests passed, all 16 CLI and 16 observability regressions
 passed, and the full offline suite ran 162 tests: 161 passed, one existing
 Windows-only skip. No provider calls. OBS-001 and OBS-002 remain separate commits;
 OBS-004 has not started.
+
+## OBS-004 generic run correlation
+
+Independent runs may carry opaque provenance through a frozen, slotted
+`RunContext`. The runtime adds one keyword-only argument:
+
+```python
+from runtime import RunContext, run
+
+first = run(work_unit, flow, executors,
+            context=RunContext(correlation_id="lifecycle-42"))
+parent_id = next(e.run_id for e in first.events if e.kind == "run_started")
+second = run(work_unit, flow, executors,
+             context=RunContext(correlation_id="lifecycle-42",
+                                parent_run_id=parent_id))
+```
+
+`run(..., recorder=None, context=None)` preserves all existing arguments.
+`RunContext` has only `correlation_id: str | None` and `parent_run_id: str | None`,
+both defaulting to `None`. Each supplied value must be exactly a string: empty
+strings and NUL characters are rejected. Other strings, including Unicode,
+whitespace and punctuation, are preserved without coercion, trimming, UUID rules
+or external-system assumptions. Type mismatches raise `TypeError`; invalid string
+values raise `ValueError`. The runtime accepts only an exact `RunContext` or
+`None`, and snapshots/revalidates values before allocating a run ID or recording
+or executing anything. Flow and WorkUnit validation retain their existing order.
+
+Every Event gains optional `correlation_id` and `parent_run_id` fields, populated
+consistently for the run, including error and observed-but-unpersisted events.
+`RunSummary` exposes the same optional fields. `RunResult` remains unchanged:
+its events already expose both provenance and the runtime-generated run ID.
+Executors receive the same `InvocationRequest`, WorkUnit and diagnostics as before;
+context is not added to tasks or provider prompts.
+
+The CLI exposes both flags on `run` only:
+
+```sh
+python3 -m switchyard run flow.yaml --task "Check the workspace" \
+  --correlation-id lifecycle-42 --parent-run-id run:previous \
+  --events-file events.jsonl
+```
+
+`validate` rejects the flags. Invalid context returns exit 2 with
+`switchyard: invalid run context`, without echoing values or constructing a
+recorder. Without the flags, the CLI runtime call is unchanged. Normal output,
+exit codes, and caller-relative `--events-file` append behavior remain intact.
+
+The reader now permits four named optional fields: the two OBS-003 timing fields
+and these two correlation fields. All eleven original fields remain mandatory;
+unknown fields still fail. Missing correlation reconstructs as `None`, never an
+empty or synthesized identifier. Old, timing-only and correlated runs can coexist
+in one JSONL file without migration. Older strict readers need upgrading for the
+new fields. Identifier validation applies to both JSONL and direct Event input.
+
+`summarize_runs()` rejects changes in either correlation value within a run,
+including changes between `None` and a string. Separate runs retain separate
+summaries in first-seen order even when sharing a correlation ID. Consumers may
+use `summary.correlation_id` to group them externally. A referenced parent need
+not appear in the log; there is no parent lookup, cycle detection or run graph.
+Timing aggregation remains per-run and unchanged. No lifecycle duration is inferred.
+
+`flow_name` and a grouping helper are deferred: the two identifiers provide the
+required provenance without adding workflow naming or another projection API.
+
+Verification (2026-09-26): 15 focused correlation tests and all 48 OBS-001/002/003
+regressions passed. Full offline suite: 177 tests, 176 passed and one existing
+Windows-only skip. No provider calls; executor, WorkUnit, flow and timing semantics
+are unchanged.
