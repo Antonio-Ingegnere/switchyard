@@ -102,10 +102,10 @@ would require a separate explicit future contract.
 | Location | Accepted fields | Exact declared scope |
 |---|---|---|
 | Primary/escalation rung `budget` | **max_invocations** | Calls to this rung of this logical state across all its visits in one run |
-| Normal state `budget` | `max_invocations`, `max_state_visits` (at least one) | Invocations across all its rungs; logical entries into this state, respectively, within one run |
-| Flow `run_budget` | **max_invocations** only | All executor invocations across the entire run |
+| Normal state `budget` | `max_invocations`, `max_state_visits` (at least one), required **on_exceeded** | Invocations across all its rungs; logical entries into this state, respectively, within one run |
+| Flow `run_budget` | **max_invocations**, **on_exceeded** | All executor invocations across the entire run |
 
-All values must be positive integers, excluding bool, floats, strings, zero, negatives
+All numeric limits must be positive integers, excluding bool, floats, strings, zero, negatives
 and null. Supplied mappings cannot be empty. Omitted state limits are unspecified
 (`None`), subject to the mandatory run invocation cap. Omitted rung budgets normalize
 to `BudgetSpec(max_invocations=1)`: one invocation for that logical state's rung per
@@ -128,11 +128,45 @@ visit, role, duration, cost or token budget is part of this DSL.
 unchanged; measuring durations is not deadline enforcement. Exact deadline/cancellation
 semantics need separate future work. No declared duration is silently ignored.
 
-This loader remains schema only. RUNTIME-V2-A/B/C provide the required generic
-outcome, routing and invocation-accounting primitives; all remaining V2 budget
-fields have exact mappings in the compiler audit. No mandatory budget runtime
-prerequisite remains. Compilation is still deferred, and compiled graphs must satisfy
-existing runtime cycle validation. Existing version-1 budgets are unchanged.
+### Explicit exhaustion ownership (V2-001C)
+
+Flow `run_budget.on_exceeded` is required and must name an existing terminal.
+State `budget.on_exceeded` is required whenever a state budget is supplied and may
+name an existing terminal or executable state. A state budget needs at least one
+numeric limit; the route alone is insufficient. Terminal states cannot declare budgets.
+Rung budgets accept only `max_invocations`, never `on_exceeded`. Both run and state
+budget targets participate in reachability; no target or implicit default is invented.
+
+```yaml
+run_budget: {max_invocations: 12, on_exceeded: NEEDS_HUMAN}
+# Within a normal state:
+budget: {max_invocations: 3, max_state_visits: 1, on_exceeded: NEEDS_HUMAN}
+escalation_exhausted: NEEDS_REDIAGNOSIS
+```
+
+The causes remain distinct even if destinations coincide:
+
+- Run invocation exhaustion selects the flow's terminal safety route.
+- Logical-state invocation or entry-visit exhaustion selects the state budget route;
+  it must not select another rung as a way to bypass refused admission.
+- Rung invocation exhaustion may select the immediately next rung if its incoming
+  triggers contain `budget_exceeded`; otherwise normal `on.budget_exceeded` applies
+  if explicitly present, then `escalation_exhausted` for a ladder-bearing state.
+  Non-ladder unhandled refusal is an error. Never skip forward through the ladder.
+- Semantic ladder exhaustion continues to use `escalation_exhausted`, independently
+  of the enclosing state's capacity and route.
+
+Cause precedence preserves existing runtime order: entry visit limit first, run
+invocation limit second, then scopes. The future compiler must declare the shared
+logical-state invocation scope before the individual rung scope. If both scopes
+are exhausted, the enclosing state route wins. This slice does not change runtime.
+
+RUNTIME-V2-D is required before compilation: generic cause-aware refusal routing
+must distinguish run invocation, state visits, and exact named invocation scopes.
+Preferred direction is an exact cause route with the legacy `budget_exceeded` route
+as fallback, plus a flow-owned run invocation route. API details remain deferred.
+Runtime must not learn logical-state, role, rung, escalation or provider semantics.
+The loader remains declarative; no compiler or execution behavior is implemented here.
 
 ## Exhaustion and matching
 
@@ -163,7 +197,7 @@ admission; the V2 loader does not execute any of these declarations.
 ## Graph and YAML validation
 
 Entry and transition targets must exist within their own flow. All states must be
-reachable from entry through normal transitions or explicit exhaustion edges. Terminal states have no role, transitions or artifact fields;
+reachable from entry through normal transitions, explicit escalation exhaustion or budget exhaustion edges. Terminal states have no role, transitions or artifact fields;
 normal states require a known role and transitions. `terminal: false` is not accepted;
 normal states omit that key. A terminal-only flow is valid if it still has the required
 run budget. No static requirement for a path to a terminal is imposed beyond reachability.

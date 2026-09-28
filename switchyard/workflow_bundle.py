@@ -22,6 +22,7 @@ ESCALATION_TRIGGERS = frozenset({'inconclusive', 'budget_exceeded', 'diagnosis_d
 class BudgetSpec:
     max_invocations: int | None = None
     max_state_visits: int | None = None
+    on_exceeded: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -137,12 +138,20 @@ def _names(value, path, *, triggers=False):
 def _budget(value, scope, path):
     allowed = {
         'rung': {'max_invocations'},
-        'state': {'max_invocations', 'max_state_visits'},
-        'run': {'max_invocations'},
+        'state': {'max_invocations', 'max_state_visits', 'on_exceeded'},
+        'run': {'max_invocations', 'on_exceeded'},
     }[scope]
-    _fields(value, {'max_invocations'} if scope in ('run', 'rung') else set(), allowed, path)
+    required = {'max_invocations'} if scope == 'rung' else {'on_exceeded'}
+    if scope == 'run':
+        required.add('max_invocations')
+    _fields(value, required, allowed, path)
     _nonempty_mapping(value, path)
+    if not any(key in value for key in ('max_invocations', 'max_state_visits')):
+        raise _error(path, 'expected at least one numeric limit')
     for key, limit in value.items():
+        if key == 'on_exceeded':
+            _name(limit, _at(path, key))
+            continue
         if type(limit) is not int or limit <= 0:
             raise _error(_at(path, key), 'expected positive integer, excluding bool')
     return BudgetSpec(**value)
@@ -235,14 +244,25 @@ def _workflow(data, roles, path):
             if target not in data['states']:
                 raise _error(location, f'unknown target {target!r}')
         states[name] = WorkflowStateSpec(role, state['on'], consumes, produces, budget=local_budget, escalation_exhausted=exhaustion)
+    run_target = budget.on_exceeded
+    if run_target not in states:
+        raise _error(path + '.run_budget.on_exceeded', f'unknown target {run_target!r}')
+    if not states[run_target].terminal:
+        raise _error(path + '.run_budget.on_exceeded', 'target must be terminal')
+    for name, state in states.items():
+        if state.budget is not None and state.budget.on_exceeded not in states:
+            raise _error(_at(path + '.states', name) + '.budget.on_exceeded',
+                         f'unknown target {state.budget.on_exceeded!r}')
     if entry not in states:
         raise _error(path + '.entry', f'unknown entry {entry!r}')
-    seen, pending = set(), [entry]
+    seen, pending = set(), [entry, run_target]
     while pending:
         name = pending.pop()
         if name not in seen:
             seen.add(name)
             pending.extend(states[name].on.values())
+            if states[name].budget is not None:
+                pending.append(states[name].budget.on_exceeded)
             if states[name].escalation_exhausted is not None:
                 pending.append(states[name].escalation_exhausted)
     for name in states:

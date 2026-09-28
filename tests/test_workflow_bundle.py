@@ -19,7 +19,7 @@ EXAMPLE = Path(__file__).resolve().parents[1] / 'examples/delivery/workflows-v2.
 def minimal():
     return {'version': 2, 'profiles': {'cmd': {'provider': 'command'}},
             'roles': {'verify': {'primary': {'profile': 'cmd'}}},
-            'flows': {'check': {'entry': 'VERIFY', 'run_budget': {'max_invocations': 1},
+            'flows': {'check': {'entry': 'VERIFY', 'run_budget': {'max_invocations': 1, 'on_exceeded': 'DONE'},
                                'states': {'VERIFY': {'role': 'verify', 'on': {'pass': 'DONE'}},
                                           'DONE': {'terminal': True}}}}}
 
@@ -193,26 +193,26 @@ class WorkflowBundleTests(unittest.TestCase):
 
     def test_state_rung_and_run_budget_scopes(self):
         data = ladder()
-        data['flows']['check']['states']['VERIFY']['budget'] = {'max_invocations': 3, 'max_state_visits': 2}
-        data['flows']['check']['run_budget'] = {'max_invocations': 10}
+        data['flows']['check']['states']['VERIFY']['budget'] = {'max_invocations': 3, 'max_state_visits': 2, 'on_exceeded': 'DONE'}
+        data['flows']['check']['run_budget'] = {'max_invocations': 10, 'on_exceeded': 'DONE'}
         bundle = self.load(data)
-        self.assertEqual(bundle.flow('check').states['VERIFY'].budget, BudgetSpec(3, 2))
-        self.assertEqual(bundle.flow('check').run_budget, BudgetSpec(10))
+        self.assertEqual(bundle.flow('check').states['VERIFY'].budget, BudgetSpec(3, 2, 'DONE'))
+        self.assertEqual(bundle.flow('check').run_budget, BudgetSpec(10, on_exceeded='DONE'))
         self.assertEqual(bundle.roles['verify'].primary.budget, BudgetSpec(max_invocations=1))
         self.assertEqual(bundle.roles['diagnostician'].escalation[0].binding.budget, BudgetSpec(max_invocations=1))
         self.assertIsNone(self.load().flow('check').states['VERIFY'].budget)
         for limits in ({'max_invocations': 2}, {'max_state_visits': 2}):
-            data['flows']['check']['states']['VERIFY']['budget'] = limits
+            data['flows']['check']['states']['VERIFY']['budget'] = {**limits, 'on_exceeded': 'DONE'}
             self.load(data)
         data['roles']['verify']['primary']['budget'] = {'max_invocations': 2}
         self.assertEqual(self.load(data).roles['verify'].primary.budget.max_invocations, 2)
 
     def test_run_budget_only_accepts_mandatory_invocation_cap(self):
-        self.assertEqual(self.load().flow('check').run_budget, BudgetSpec(max_invocations=1))
+        self.assertEqual(self.load().flow('check').run_budget, BudgetSpec(max_invocations=1, on_exceeded='DONE'))
         for key in ('max_state_visits', 'unknown_limit', 'max_tokens', 'max_cost'):
             with self.subTest(key=key):
                 data = minimal()
-                data['flows']['check']['run_budget'] = {'max_invocations': 12, key: 20}
+                data['flows']['check']['run_budget'] = {'max_invocations': 12, 'on_exceeded': 'DONE', key: 20}
                 self.invalid(data, 'flows.check.run_budget.' + key)
         data = minimal()
         data['flows']['check']['run_budget'] = {}
@@ -232,6 +232,8 @@ class WorkflowBundleTests(unittest.TestCase):
                                   data['roles']['diagnostician']['escalation'][0] if where == 'step' else
                                   data['flows']['check']['states']['VERIFY'] if where == 'state' else data['flows']['check'])
                         target['run_budget' if where == 'run' else 'budget'] = {'max_invocations': 1, key: value}
+                        if where in ('state', 'run'):
+                            target['run_budget' if where == 'run' else 'budget']['on_exceeded'] = 'DONE'
                         self.invalid(data, key)
         data = minimal(); data['roles']['verify']['primary']['budget'] = {'max_invocations': 1, 'max_state_visits': 1}
         self.invalid(data, 'max_state_visits')
@@ -250,7 +252,7 @@ class WorkflowBundleTests(unittest.TestCase):
             self.invalid(data, 'roles.diagnostician.budget')
             data = ladder(); data['roles']['diagnostician'][key] = 1
             self.invalid(data, key)
-        self.assertEqual(set(BudgetSpec.__dataclass_fields__), {'max_invocations', 'max_state_visits'})
+        self.assertEqual(set(BudgetSpec.__dataclass_fields__), {'max_invocations', 'max_state_visits', 'on_exceeded'})
 
     def test_malformed_and_missing_budgets(self):
         for value in ({}, [], None, 1, 'x'):
@@ -270,11 +272,70 @@ class WorkflowBundleTests(unittest.TestCase):
         for flow in bundle.flows.values():
             first, second = flow.states['VERIFY'], flow.states['VERIFY_AGAIN']
             self.assertEqual((first.role, second.role), ('verifier', 'verifier'))
-            self.assertEqual(first.budget, BudgetSpec(1, 1))
-            self.assertEqual(second.budget, BudgetSpec(1, 1))
+            self.assertEqual(first.budget, BudgetSpec(1, 1, 'NEEDS_HUMAN'))
+            self.assertEqual(second.budget, BudgetSpec(1, 1, 'NEEDS_HUMAN'))
             self.assertIsNot(first.budget, second.budget)
         self.assertFalse(hasattr(bundle.roles['verifier'], 'budget'))
         self.assertEqual(bundle.roles['verifier'].primary.budget.max_invocations, 1)
+
+    def test_run_exhaustion_requires_existing_terminal(self):
+        data = minimal(); del data['flows']['check']['run_budget']['on_exceeded']
+        self.invalid(data, 'run_budget.on_exceeded')
+        for target in ('ABSENT', 'VERIFY', '', None, True, 4, []):
+            with self.subTest(target=target):
+                data = minimal(); data['flows']['check']['run_budget']['on_exceeded'] = target
+                self.invalid(data, 'run_budget.on_exceeded')
+        data = minimal(); del data['flows']['check']['run_budget']['max_invocations']
+        self.invalid(data, 'run_budget.max_invocations')
+
+    def test_state_exhaustion_contract_and_executable_target(self):
+        for budget, path in [({'max_invocations': 1}, 'on_exceeded'),
+                             ({'on_exceeded': 'DONE'}, 'budget'),
+                             ({'max_invocations': 1, 'on_exceeded': 'ABSENT'}, 'on_exceeded'),
+                             ({'max_invocations': 1, 'on_exceeded': None}, 'on_exceeded'),
+                             ({'max_invocations': 1, 'on_exceeded': 'DONE', 'extra': 1}, 'extra')]:
+            with self.subTest(budget=budget):
+                data = minimal(); data['flows']['check']['states']['VERIFY']['budget'] = budget
+                self.invalid(data, path)
+        for limit in ('max_invocations', 'max_state_visits'):
+            data = minimal()
+            data['flows']['check']['states']['VERIFY']['budget'] = {limit: 2, 'on_exceeded': 'RECOVER'}
+            data['flows']['check']['states']['RECOVER'] = {'role': 'verify', 'on': {'pass': 'DONE'}}
+            self.assertEqual(self.load(data).flow('check').states['VERIFY'].budget.on_exceeded, 'RECOVER')
+
+    def test_budget_routes_participate_in_reachability(self):
+        data = minimal()
+        data['flows']['check']['states']['STOP'] = {'terminal': True}
+        data['flows']['check']['run_budget']['on_exceeded'] = 'STOP'
+        self.load(data)  # STOP is reachable only through the flow safety route.
+        data['flows']['check']['run_budget']['on_exceeded'] = 'DONE'
+        self.invalid(data, 'states.STOP')
+
+    def test_rung_and_terminal_budget_routes_rejected(self):
+        for where in ('primary', 'step'):
+            data = ladder()
+            binding = (data['roles']['diagnostician']['primary'] if where == 'primary' else
+                       data['roles']['diagnostician']['escalation'][0])
+            binding['budget']['on_exceeded'] = 'DONE'
+            self.invalid(data, 'budget.on_exceeded')
+        data = minimal()
+        data['flows']['check']['states']['DONE']['budget'] = {'max_invocations': 1, 'on_exceeded': 'DONE'}
+        self.invalid(data, 'states.DONE.budget')
+
+    def test_canonical_exhaustion_ownership_is_explicit(self):
+        bundle = load_workflow_bundle(EXAMPLE)
+        for flow in bundle.flows.values():
+            self.assertEqual(flow.run_budget.on_exceeded, 'NEEDS_HUMAN')
+            for state in flow.states.values():
+                if state.budget:
+                    self.assertEqual(state.budget.on_exceeded, 'NEEDS_HUMAN')
+        diagnosis = bundle.flow('feature').states['DIAGNOSE_FAILURE']
+        self.assertEqual(diagnosis.escalation_exhausted, 'NEEDS_REDIAGNOSIS')
+        self.assertNotEqual(diagnosis.escalation_exhausted, diagnosis.budget.on_exceeded)
+        for role in bundle.roles.values():
+            self.assertIsNone(role.primary.budget.on_exceeded)
+            for step in role.escalation:
+                self.assertIsNone(step.binding.budget.on_exceeded)
 
     def test_valid_adjacent_escalations(self):
         role = self.load(ladder()).roles['diagnostician']

@@ -1,0 +1,50 @@
+id: V2-001C
+goal: |
+  Distinguish flow safety exhaustion, enclosing state exhaustion and local rung
+  exhaustion declaratively before compiling any workflows.
+scope:
+  - switchyard/workflow_bundle.py
+  - examples/delivery/workflows-v2.yaml
+  - tests/test_workflow_bundle.py
+  - docs/design/workflow-bundle-v2.md
+  - docs/plans/v2-002-workflow-compiler.yaml
+constraints:
+  - No runtime, Event, executor, observability, V1 loader, delivery or Adeo changes.
+  - No compiler or cause-aware routing implementation.
+problem: |
+  A single runtime budget target cannot distinguish refused logical entry from
+  an exhausted rung. Routing both to a next rung bypasses enclosing admission;
+  routing both away prevents valid local escalation.
+contract: |
+  BudgetSpec gains optional on_exceeded. Loader requires run max_invocations and
+  on_exceeded referencing an existing terminal. A supplied state budget requires
+  at least one of max_invocations/max_state_visits plus on_exceeded referencing any
+  existing state. Rung budgets allow only max_invocations; on_exceeded is forbidden.
+  Budget targets participate in graph reachability. Terminal states forbid budgets.
+  Limits remain positive exact integers; names retain the existing lexical contract.
+precedence: |
+  Existing runtime ordering remains state visit admission, run invocation limit,
+  named invocation scopes. Future compiler declares enclosing state invocation scope
+  before rung scope. State visit/invocation refusals select state.budget.on_exceeded;
+  run refusal selects run_budget.on_exceeded. Only rung refusal uses adjacent-rung
+  budget_exceeded matching, then explicit normal on, then escalation_exhausted for
+  ladder-bearing states. Non-ladder unhandled conditions retain explicit error
+  semantics. No forward search, executor spoofing or inferred global fallback.
+prerequisite: |
+  RUNTIME-V2-D must provide generic cause-aware refusal routing: exact state-visit
+  and named-scope routes with legacy budget_exceeded fallback, plus a flow-level
+  run-invocation refusal route. No role/rung/provider concepts in runtime.
+acceptance:
+  - Required run/state routes validated with precise paths; run target must be terminal.
+  - Executable state-budget destinations and budget-only reachable states are allowed.
+  - Rung routes, invalid limits, unknown fields and terminal budgets are rejected.
+  - Canonical graphs, routing roles, ladders and existing escalation exhaustion preserved.
+verification:
+  - Focused V2 loader tests, V1 loader tests, complete offline regression suite.
+non_goals:
+  - RUNTIME-V2-D implementation, compiler, artifact transport or provider calls.
+verification_results:
+  focused: "36 V2 loader tests passed; 9 V1 loader tests passed."
+  full_offline: "305 tests run: 304 passed, one existing platform skip (21.684 seconds), including complete runtime regressions."
+  command: ".venv/bin/python -m unittest discover -s tests -v"
+  protected_scope: "Runtime, Event, Executor API, observability, V1 loader and delivery untouched; no compiler or Adeo changes."
