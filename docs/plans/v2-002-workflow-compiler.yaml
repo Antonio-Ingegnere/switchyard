@@ -1,0 +1,103 @@
+id: V2-002
+status: blocked_pending_runtime_prerequisites
+updated_by: V2-001A
+goal: |
+  Compile corrected v2 bundles to existing runtime plans after generic outcome,
+  budget-routing and exact local/run accounting prerequisites are implemented.
+scope:
+  - docs/plans/v2-002-workflow-compiler.yaml (audit only; compiler not implemented)
+constraints:
+  - No runtime, Event, executor, v1, observability, delivery or Adeo changes here.
+  - No hidden semantic retries, fake budget outcomes, approximate counters or provider calls.
+  - Do not commit a compiler implementation with unresolved capability gaps.
+contract_correction: |
+  V2-001A removes role budget, max_total_invocations, max_escalations and all duration
+  budgets. Routing reuse must not accidentally share execution allowances. No shared
+  named scope is introduced. State max_invocations covers its rungs across one run;
+  state max_state_visits counts logical entries. Rung max_invocations is local to
+  that logical state/rung across visits, default one. Run invocation/visit caps are
+  whole-run totals, not repeated per-state limits. All provided limits are positive ints.
+execution_completeness: |
+  Resolved declaratively by V2-001A: ladder-bearing states require an existing
+  escalation_exhausted target; executable targets are permitted and reachability
+  includes the edge. Non-ladder states and terminals forbid the field. No fallback
+  destination is invented by Python. Semantic outcome names remain declarative.
+proposed_precedence: |
+  Match only the immediately next rung. A matching permitted escalation takes
+  precedence, otherwise normal state on applies, otherwise a recognized escalation
+  trigger in a ladder-bearing state uses escalation_exhausted. No skipping. Unknown
+  unhandled outcomes are errors. Control-plane refusal/admission must distinguish
+  rung limits from enclosing state/run limits: exhaustion cannot authorize work over
+  an enclosing cap. Generic refusal/error policy belongs to RUNTIME-V2-B/C.
+budget_capability_mapping:
+  - field: state.max_invocations
+    classification: NOT CURRENTLY SUPPORTED
+    reason: Requires one logical-state invocation count spanning its compiled rungs and visits.
+  - field: state.max_state_visits
+    classification: DERIVABLE THROUGH COMPILED GRAPH
+    reason: |
+      Capping each logical entry rung with State.max_state_visits_per_run counts
+      logical entries if every normal transition targets rung zero. Escalation
+      hops must not increment this logical counter. Refusal routing still needs B.
+  - field: rung.max_invocations
+    classification: DERIVABLE THROUGH COMPILED GRAPH
+    reason: |
+      A dedicated runtime state per logical state/rung invokes exactly once per
+      admitted visit. Its visit cap can represent the rung count; reuse of a role
+      must produce separate rung states/counters. B is needed for refusal-to-rung
+      routing and C for combining independent logical-state and rung limits.
+  - field: run.max_invocations
+    classification: NOT CURRENTLY SUPPORTED
+    reason: Runtime invocation counter allocates IDs, but does not enforce run admission caps.
+  - field: run.max_state_visits
+    classification: NOT CURRENTLY SUPPORTED
+    reason: |
+      Optional whole-run logical-entry count, including terminal admission. Existing
+      counters are per concrete state and would count rung hops if naively summed.
+removed_requirements:
+  - No shared role invocation/escalation accounting.
+  - No rung, role or run duration/deadline enforcement.
+  - No provider-specific budget semantics.
+prerequisites:
+  RUNTIME-V2-A: |
+    State-declared outcomes: validate executor results against the current state's
+    declared outcomes, retaining success/failed/error/timeout/cancelled compatibility.
+    Current OUTCOMES rejects ready and inconclusive both as transition labels and
+    returned results. budget_exceeded must remain reserved for the control plane.
+  RUNTIME-V2-B: |
+    Permit explicitly configured nonterminal budget-refusal targets with generic
+    cycle safety. Current validate rejects them with 'budget target must be terminal'.
+    No executor may synthesize refusal as an outcome; preserve truthful event order.
+  RUNTIME-V2-C: |
+    Exact run/local invocation and visit accounting for state max_invocations,
+    state max_state_visits, rung max_invocations, run max_invocations and optional
+    whole-run max_state_visits. No role/provider semantics or duration enforcement.
+    Define admission/refusal scope and precedence, including terminal visit admission,
+    and preserve existing direct-runtime behavior. Do not disguise a hard-run refusal
+    as a successful synthetic terminal transition. The mandatory run cap must also
+    support valid v2 cycles without inventing local limits or termination guarantees.
+proposed_public_api: |
+  Not implemented: compile_workflow(bundle, flow_name, executor_resolver) -> CompiledWorkflow.
+  Resolver is Callable[[ResolvedInvocation], Executor]. Frozen binding carries
+  flow_name, logical_state, role_name, profile_name, provider, model, effort,
+  rung_index, escalation_kind and context_mode (initial/continue/fresh).
+  Frozen CompiledWorkflow contains Flow, read-only executors and read-only steps
+  mapping runtime-state IDs to logical identity/binding and consumes/produces tuples.
+  Terminal metadata has no invocation binding. Event schema need not change for
+  logical identity: consumers use this external mapping. Deterministic IDs use a
+  reserved namespace forbidden by logical identifiers, not parsed business semantics.
+  Vertical continue and horizontal fresh are policy only until V2-003; no fabricated
+  history sharing or artifact transport. Compiler errors use WorkflowCompileError;
+  loader schema errors continue using FlowConfigError.
+acceptance:
+  - Future fake executions prove explicit rungs, adjacent matching, effort/context and exact caps.
+  - Existing v1, runtime, recording, observability and presets retain behavior.
+verification:
+  - V2-001A loader regression tests validate the corrected declarative contract.
+  - Existing full offline suite; compiler tests wait for prerequisites A/B/C.
+non_goals:
+  - Compiler or prerequisite implementation, duration budgets, role counters, artifacts or Adeo migration.
+historical_audit_evidence:
+  - "Nonterminal budget target -> FlowValidationError: budget target must be terminal: a"
+  - "inconclusive transition -> FlowValidationError: invalid outcome: inconclusive"
+  - "inconclusive executor response -> ExecutionError: executor returned a malformed result"

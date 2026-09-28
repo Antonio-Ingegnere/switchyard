@@ -21,10 +21,7 @@ ESCALATION_TRIGGERS = frozenset({'inconclusive', 'budget_exceeded', 'diagnosis_d
 @dataclass(frozen=True, slots=True)
 class BudgetSpec:
     max_invocations: int | None = None
-    max_total_invocations: int | None = None
-    max_escalations: int | None = None
     max_state_visits: int | None = None
-    max_duration_seconds: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,7 +34,7 @@ class ExecutionProfile:
 class InvocationBinding:
     profile: str
     effort: Effort | None = None
-    budget: BudgetSpec | None = None
+    budget: BudgetSpec = field(default_factory=lambda: BudgetSpec(max_invocations=1))
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,7 +52,6 @@ class EscalationStep:
 class RoleBinding:
     primary: InvocationBinding
     escalation: tuple[EscalationStep, ...] = ()
-    budget: BudgetSpec | None = None
 
     def __post_init__(self):
         object.__setattr__(self, 'escalation', tuple(self.escalation))
@@ -68,6 +64,8 @@ class WorkflowStateSpec:
     consumes: tuple[str, ...] = ()
     produces: tuple[str, ...] = ()
     terminal: bool = False
+    budget: BudgetSpec | None = None
+    escalation_exhausted: str | None = None
 
     def __post_init__(self):
         object.__setattr__(self, 'on', MappingProxyType(dict(self.on)))
@@ -138,11 +136,11 @@ def _names(value, path, *, triggers=False):
 
 def _budget(value, scope, path):
     allowed = {
-        'rung': {'max_invocations', 'max_duration_seconds'},
-        'role': {'max_total_invocations', 'max_escalations', 'max_duration_seconds'},
-        'run': {'max_invocations', 'max_state_visits', 'max_duration_seconds'},
+        'rung': {'max_invocations'},
+        'state': {'max_invocations', 'max_state_visits'},
+        'run': {'max_invocations', 'max_state_visits'},
     }[scope]
-    _fields(value, {'max_invocations'} if scope == 'run' else set(), allowed, path)
+    _fields(value, {'max_invocations'} if scope in ('run', 'rung') else set(), allowed, path)
     _nonempty_mapping(value, path)
     for key, limit in value.items():
         if type(limit) is not int or limit <= 0:
@@ -160,12 +158,12 @@ def _binding(data, profiles, path):
         if profiles[ref].provider == 'command':
             raise _error(path + '.effort', 'command bindings must omit effort')
         effort = _enum(data['effort'], {'low', 'medium', 'high'}, path + '.effort')
-    budget = _budget(data['budget'], 'rung', path + '.budget') if 'budget' in data else None
+    budget = _budget(data['budget'], 'rung', path + '.budget') if 'budget' in data else BudgetSpec(max_invocations=1)
     return InvocationBinding(ref, effort, budget)
 
 
 def _role(data, profiles, path):
-    _fields(data, {'primary'}, {'escalation', 'budget'}, path)
+    _fields(data, {'primary'}, {'escalation'}, path)
     _fields(data['primary'], {'profile'}, {'effort', 'budget'}, path + '.primary')
     primary = previous = _binding(data['primary'], profiles, path + '.primary')
     ladder = data.get('escalation', [])
@@ -194,13 +192,7 @@ def _role(data, profiles, path):
                 raise _error(here + '.context', 'horizontal escalation requires fresh')
         steps.append(EscalationStep(kind, triggers, binding, context))
         previous = binding
-    budget = _budget(data['budget'], 'role', path + '.budget') if 'budget' in data else None
-    if budget is not None and budget.max_escalations is not None:
-        if budget.max_escalations > len(steps):
-            raise _error(path + '.budget.max_escalations', 'exceeds configured ladder length')
-        if budget.max_total_invocations is not None and budget.max_escalations >= budget.max_total_invocations:
-            raise _error(path + '.budget.max_escalations', 'requires primary plus escalation invocations within role total')
-    return RoleBinding(primary, tuple(steps), budget)
+    return RoleBinding(primary, tuple(steps))
 
 
 def _workflow(data, roles, path):
@@ -219,10 +211,20 @@ def _workflow(data, roles, path):
             _fields(state, {'terminal'}, set(), here)
             states[name] = WorkflowStateSpec(terminal=True)
             continue
-        _fields(state, {'role', 'on'}, {'consumes', 'produces'}, here)
+        _fields(state, {'role', 'on'}, {'consumes', 'produces', 'budget', 'escalation_exhausted'}, here)
         role = _name(state['role'], here + '.role')
         if role not in roles:
             raise _error(here + '.role', f'unknown role {role!r}')
+        local_budget = _budget(state['budget'], 'state', here + '.budget') if 'budget' in state else None
+        exhaustion = None
+        if roles[role].escalation:
+            if 'escalation_exhausted' not in state:
+                raise _error(here + '.escalation_exhausted', 'required for a role with an escalation ladder')
+            exhaustion = _name(state['escalation_exhausted'], here + '.escalation_exhausted')
+            if exhaustion not in data['states']:
+                raise _error(here + '.escalation_exhausted', f'unknown target {exhaustion!r}')
+        elif 'escalation_exhausted' in state:
+            raise _error(here + '.escalation_exhausted', 'only allowed for a role with an escalation ladder')
         consumes = _names(state.get('consumes', []), here + '.consumes')
         produces = _names(state.get('produces', []), here + '.produces')
         _nonempty_mapping(state['on'], here + '.on')
@@ -232,7 +234,7 @@ def _workflow(data, roles, path):
             _name(target, location)
             if target not in data['states']:
                 raise _error(location, f'unknown target {target!r}')
-        states[name] = WorkflowStateSpec(role, state['on'], consumes, produces)
+        states[name] = WorkflowStateSpec(role, state['on'], consumes, produces, budget=local_budget, escalation_exhausted=exhaustion)
     if entry not in states:
         raise _error(path + '.entry', f'unknown entry {entry!r}')
     seen, pending = set(), [entry]
@@ -241,6 +243,8 @@ def _workflow(data, roles, path):
         if name not in seen:
             seen.add(name)
             pending.extend(states[name].on.values())
+            if states[name].escalation_exhausted is not None:
+                pending.append(states[name].escalation_exhausted)
     for name in states:
         if name not in seen:
             raise _error(_at(path + '.states', name), 'unreachable state')

@@ -35,8 +35,7 @@ def ladder():
             {'kind': 'vertical', 'on': ['inconclusive'], 'profile': 'sonnet',
              'effort': 'high', 'context': 'continue', 'budget': {'max_invocations': 1}},
             {'kind': 'horizontal', 'on': ['diagnosis_disproved'], 'profile': 'codex',
-             'effort': 'high', 'context': 'fresh', 'budget': {'max_invocations': 1}}],
-        'budget': {'max_total_invocations': 3, 'max_escalations': 2}}
+             'effort': 'high', 'context': 'fresh', 'budget': {'max_invocations': 1}}]}
     return data
 
 
@@ -75,7 +74,7 @@ class WorkflowBundleTests(unittest.TestCase):
         self.assertEqual(bundle.flow('feature').states['VERIFY'].on['fail'], 'DIAGNOSE_FAILURE')
         self.assertEqual(bundle.flow('bugfix').states['VERIFY'].on['fail'], 'REDIAGNOSE')
         self.assertEqual(bundle.flow('bugfix').states['REFIX'].role, 'fixer')
-        self.assertEqual(bundle.roles['verifier'].budget.max_total_invocations, 2)
+        self.assertFalse(hasattr(bundle.roles['verifier'], 'budget'))
         self.assertEqual(bundle.flow('feature').states['SPECIFY'].produces, ('microspec',))
         self.assertEqual(bundle, load_workflow_bundle(EXAMPLE))
 
@@ -143,7 +142,7 @@ class WorkflowBundleTests(unittest.TestCase):
                      ('roles', 'diagnostician', 'primary'), ('roles', 'diagnostician', 'primary', 'budget'),
                      ('roles', 'diagnostician', 'escalation', 0),
                      ('roles', 'diagnostician', 'escalation', 0, 'budget'),
-                     ('roles', 'diagnostician', 'budget'), ('flows', 'check'),
+                     ('flows', 'check'),
                      ('flows', 'check', 'run_budget'), ('flows', 'check', 'states', 'VERIFY'),
                      ('flows', 'check', 'states', 'DONE')]
         for selector in selectors:
@@ -192,41 +191,75 @@ class WorkflowBundleTests(unittest.TestCase):
         data = ladder(); del data['roles']['diagnostician']['primary']['effort']
         self.assertIsNone(self.load(data).roles['diagnostician'].primary.effort)
 
-    def test_all_budget_fields_and_scopes(self):
-        data = ladder(); role = data['roles']['diagnostician']
-        role['primary']['budget']['max_duration_seconds'] = 10
-        role['budget']['max_duration_seconds'] = 20
-        data['flows']['check']['run_budget'].update(max_state_visits=2, max_duration_seconds=30)
+    def test_state_rung_and_run_budget_scopes(self):
+        data = ladder()
+        data['flows']['check']['states']['VERIFY']['budget'] = {'max_invocations': 3, 'max_state_visits': 2}
+        data['flows']['check']['run_budget'] = {'max_invocations': 10, 'max_state_visits': 20}
         bundle = self.load(data)
-        self.assertEqual(bundle.roles['diagnostician'].budget.max_duration_seconds, 20)
-        self.assertEqual(bundle.flow('check').run_budget.max_state_visits, 2)
-        self.assertEqual(bundle.roles['diagnostician'].primary.budget.max_duration_seconds, 10)
-        allowed = {'rung': {'max_invocations', 'max_duration_seconds'},
-                   'role': {'max_total_invocations', 'max_escalations', 'max_duration_seconds'},
-                   'run': {'max_invocations', 'max_state_visits', 'max_duration_seconds'}}
-        all_fields = set().union(*allowed.values())
-        for scope, fields in allowed.items():
-            for key in all_fields:
-                for value in ([0, -1, True, 1.0, '1', None] if key in fields else [1]):
-                    with self.subTest(scope=scope, key=key, value=value):
+        self.assertEqual(bundle.flow('check').states['VERIFY'].budget, BudgetSpec(3, 2))
+        self.assertEqual(bundle.flow('check').run_budget, BudgetSpec(10, 20))
+        self.assertEqual(bundle.roles['verify'].primary.budget, BudgetSpec(max_invocations=1))
+        self.assertEqual(bundle.roles['diagnostician'].escalation[0].binding.budget, BudgetSpec(max_invocations=1))
+        self.assertIsNone(self.load().flow('check').states['VERIFY'].budget)
+        for limits in ({'max_invocations': 2}, {'max_state_visits': 2}):
+            data['flows']['check']['states']['VERIFY']['budget'] = limits
+            self.load(data)
+        data['roles']['verify']['primary']['budget'] = {'max_invocations': 2}
+        self.assertEqual(self.load(data).roles['verify'].primary.budget.max_invocations, 2)
+
+    def test_invalid_budget_values_at_every_scope(self):
+        for where in ('primary', 'step', 'state', 'run'):
+            for key in ('max_invocations', 'max_state_visits'):
+                for value in (0, -1, True, 1.0, '1', None):
+                    with self.subTest(where=where, key=key, value=value):
                         data = ladder()
-                        target = (data['roles']['diagnostician']['primary']['budget'] if scope == 'rung' else
-                                  data['roles']['diagnostician']['budget'] if scope == 'role' else data['flows']['check']['run_budget'])
-                        target[key] = value
+                        target = (data['roles']['diagnostician']['primary'] if where == 'primary' else
+                                  data['roles']['diagnostician']['escalation'][0] if where == 'step' else
+                                  data['flows']['check']['states']['VERIFY'] if where == 'state' else data['flows']['check'])
+                        target['run_budget' if where == 'run' else 'budget'] = {'max_invocations': 1, key: value}
                         self.invalid(data, key)
+        data = minimal(); data['roles']['verify']['primary']['budget'] = {'max_invocations': 1, 'max_state_visits': 1}
+        self.invalid(data, 'max_state_visits')
+
+    def test_removed_budget_fields_rejected(self):
+        for where in ('primary', 'step', 'state', 'run'):
+            for key in ('max_duration_seconds', 'max_total_invocations', 'max_escalations'):
+                data = ladder()
+                target = (data['roles']['diagnostician']['primary'] if where == 'primary' else
+                          data['roles']['diagnostician']['escalation'][0] if where == 'step' else
+                          data['flows']['check']['states']['VERIFY'] if where == 'state' else data['flows']['check'])
+                target['run_budget' if where == 'run' else 'budget'] = {'max_invocations': 1, key: 1}
+                self.invalid(data, key)
+        for key in ('max_invocations', 'max_total_invocations', 'max_escalations', 'max_duration_seconds'):
+            data = ladder(); data['roles']['diagnostician']['budget'] = {key: 1}
+            self.invalid(data, 'roles.diagnostician.budget')
+            data = ladder(); data['roles']['diagnostician'][key] = 1
+            self.invalid(data, key)
+        self.assertEqual(set(BudgetSpec.__dataclass_fields__), {'max_invocations', 'max_state_visits'})
 
     def test_malformed_and_missing_budgets(self):
         for value in ({}, [], None, 1, 'x'):
-            for where in ('primary', 'role', 'step', 'run'):
+            for where in ('primary', 'state', 'step', 'run'):
                 data = ladder(); role = data['roles']['diagnostician']
-                target = role['primary'] if where == 'primary' else role['escalation'][0] if where == 'step' else role
+                target = role['primary'] if where == 'primary' else role['escalation'][0] if where == 'step' else data['flows']['check']['states']['VERIFY']
                 if where == 'run': data['flows']['check']['run_budget'] = value
                 else: target['budget'] = value
                 self.invalid(data, 'budget')
         data = minimal(); del data['flows']['check']['run_budget']
         self.invalid(data, 'flows.check.run_budget')
-        data = minimal(); data['flows']['check']['run_budget'] = {'max_duration_seconds': 10}
+        data = minimal(); data['flows']['check']['run_budget'] = {'max_state_visits': 10}
         self.invalid(data, 'flows.check.run_budget.max_invocations')
+
+    def test_verifier_reuse_has_independent_state_budgets(self):
+        bundle = load_workflow_bundle(EXAMPLE)
+        for flow in bundle.flows.values():
+            first, second = flow.states['VERIFY'], flow.states['VERIFY_AGAIN']
+            self.assertEqual((first.role, second.role), ('verifier', 'verifier'))
+            self.assertEqual(first.budget, BudgetSpec(1, 1))
+            self.assertEqual(second.budget, BudgetSpec(1, 1))
+            self.assertIsNot(first.budget, second.budget)
+        self.assertFalse(hasattr(bundle.roles['verifier'], 'budget'))
+        self.assertEqual(bundle.roles['verifier'].primary.budget.max_invocations, 1)
 
     def test_valid_adjacent_escalations(self):
         role = self.load(ladder()).roles['diagnostician']
@@ -276,15 +309,38 @@ class WorkflowBundleTests(unittest.TestCase):
         step['profile'] = 'cmd'
         self.invalid(data, 'escalation[1].effort')
 
-    def test_contradictory_escalation_caps(self):
-        data = ladder(); data['roles']['diagnostician']['budget']['max_escalations'] = 3
-        self.invalid(data, 'budget.max_escalations')
-        data = ladder(); data['roles']['diagnostician']['budget']['max_total_invocations'] = 2
-        self.invalid(data, 'budget.max_escalations')
-        data = minimal(); data['roles']['verify']['budget'] = {'max_escalations': 1}
-        self.invalid(data, 'budget.max_escalations')
-        data = ladder(); data['roles']['diagnostician']['budget']['max_escalations'] = 1
-        self.load(data)  # fuse may intentionally stop before last rung
+    def test_exhaustion_required_and_targets_validated(self):
+        data = ladder(); state = data['flows']['check']['states']['VERIFY']
+        state['role'] = 'diagnostician'
+        self.invalid(data, 'states.VERIFY.escalation_exhausted')
+        for target in ('MISSING', '', None, [], True):
+            state['escalation_exhausted'] = target
+            self.invalid(data, 'states.VERIFY.escalation_exhausted')
+        state['escalation_exhausted'] = 'DONE'
+        result = self.load(data).flow('check').states['VERIFY']
+        self.assertEqual(result.escalation_exhausted, 'DONE')
+        with self.assertRaises(FrozenInstanceError): result.escalation_exhausted = 'OTHER'
+        data['flows']['check']['states']['DONE']['escalation_exhausted'] = 'VERIFY'
+        self.invalid(data, 'states.DONE.escalation_exhausted')
+        data = minimal(); data['flows']['check']['states']['VERIFY']['escalation_exhausted'] = 'DONE'
+        self.invalid(data, 'states.VERIFY.escalation_exhausted')
+
+    def test_exhaustion_edge_counts_for_reachability(self):
+        data = ladder(); flow = data['flows']['check']
+        flow['states']['VERIFY'].update(role='diagnostician', escalation_exhausted='RECOVER')
+        flow['states']['RECOVER'] = {'role': 'verify', 'on': {'ready': 'DONE'}}
+        bundle = self.load(data)
+        self.assertFalse(bundle.flow('check').states['RECOVER'].terminal)
+        self.assertEqual(bundle.flow('check').states['VERIFY'].escalation_exhausted, 'RECOVER')
+
+    def test_semantic_outcomes_and_adjacent_trigger_lists_preserved(self):
+        data = ladder(); flow = data['flows']['check']
+        flow['states']['VERIFY'].update(role='diagnostician', escalation_exhausted='DONE',
+            on={name: 'DONE' for name in ('ready', 'reproduced', 'not_reproduced', 'inconclusive', 'diagnosis_disproved', 'needs_human', 'pass', 'fail')})
+        bundle = self.load(data)
+        self.assertEqual(dict(bundle.flow('check').states['VERIFY'].on), flow['states']['VERIFY']['on'])
+        self.assertEqual(bundle.roles['diagnostician'].escalation[0].on, ('inconclusive',))
+        self.assertEqual(bundle.roles['diagnostician'].escalation[1].on, ('diagnosis_disproved',))
 
     def test_states_entry_targets_and_reachability(self):
         for key, value in [('entry', 'MISSING'), ('entry', None), ('states', {}), ('states', [])]:

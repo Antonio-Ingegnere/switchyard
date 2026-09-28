@@ -946,8 +946,13 @@ bugfix = bundle.flow("bugfix")
 ```
 
 The [canonical bundle](examples/delivery/workflows-v2.yaml) declares profiles, role
-bindings, escalation ladders, scoped budgets, logical artifacts and two independent
+bindings, escalation ladders, state/rung/run budgets, explicit exhaustion routes,
+logical artifacts and two independent
 workflow graphs. Results are immutable; invalid configuration raises `FlowConfigError`.
 See the [exact v2 schema and budget scopes](docs/design/workflow-bundle-v2.md).
 This loader does not execute or compile workflows. Existing version-1 loading, CLI,
 runtime and delivery presets remain unchanged; neither loader accepts the other version.
+
+V2-001A removes role-wide execution counters and duration limits: reusable roles route
+work, while states and their rungs own local budgets. Run limits cover the whole run.
+The corrected schema rejects the superseded fields rather than silently migrating them.

@@ -1,0 +1,43 @@
+id: V2-001A
+goal: |
+  Correct the opt-in v2 declarative contract: roles route, logical states own local
+  work budgets, rungs bound their attempts, flows own whole-run safety limits.
+scope:
+  - switchyard/workflow_bundle.py
+  - examples/delivery/workflows-v2.yaml
+  - tests/test_workflow_bundle.py
+  - docs/design/workflow-bundle-v2.md
+  - docs/plans/v2-002-workflow-compiler.yaml
+  - README.md
+constraints:
+  - No compiler, runtime, Event, v1 loader, executor, observability or Adeo changes.
+  - Reject legacy role budgets and duration fields rather than silently reinterpret them.
+semantics: |
+  RoleBinding no longer has budget. BudgetSpec has only max_invocations and
+  max_state_visits. State budget is optional, nonempty when supplied; absent limits
+  are unspecified and the mandatory run invocation fuse still applies.
+  State max_invocations totals all its rungs across visits in one run;
+  state max_state_visits counts logical entries (escalation does not re-enter).
+  Rung max_invocations counts that logical state's rung across visits in one run,
+  never across distinct states sharing a role. Omitted rung budget defaults to one.
+  Run max_invocations totals all executor calls; optional max_state_visits totals
+  logical entries across the whole run, including a reached terminal, not rung hops.
+  No limit grants retries; a larger rung limit only permits later explicit work.
+  Each ladder-bearing state must specify escalation_exhausted with an existing target.
+  Non-ladder states and terminals forbid the field. Reachability includes this edge.
+  Match only the next rung, then normal on, then exhaustion for recognized escalation
+  triggers; unknown/unhandled non-trigger outcomes are errors. No global destination.
+acceptance:
+  - Shared verifier routing has independent VERIFY and VERIFY_AGAIN budgets.
+  - Strict positive integer limits, no role counters or durations, unchanged escalation rules.
+  - Explicit exhaustion is validated without implementing routing or artifact transport.
+verification:
+  - Focused bundle tests and v1 flow-config tests.
+  - Complete offline regression suite.
+non_goals:
+  - Runtime prerequisites, compiler, duration enforcement or shared named budget scopes.
+verification_results:
+  focused: "30 bundle tests passed, including shared verifier routing with independent state limits."
+  v1: "9 existing flow-config tests passed."
+  full_offline: "261 tests run: 260 passed, one existing platform skip (22.108 seconds)."
+  protected_contracts: "Runtime, Event, v1 loader, executors, observability and delivery presets unchanged; Adeo untouched."

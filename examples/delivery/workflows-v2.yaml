@@ -1,4 +1,4 @@
-# Descriptive only: V2-001 does not compile or execute this bundle.
+# Descriptive only: V2-001A does not compile or execute this bundle.
 version: 2
 profiles:
   claude-haiku:
@@ -15,13 +15,10 @@ profiles:
 roles:
   specifier:
     primary: {profile: claude-sonnet, effort: medium}
-    budget: {max_total_invocations: 1}
   triager:
     primary: {profile: claude-haiku, effort: medium}
-    budget: {max_total_invocations: 1}
   reproducer:
     primary: {profile: claude-haiku, effort: medium}
-    budget: {max_total_invocations: 2}
   diagnostician:
     primary:
       profile: claude-haiku
@@ -40,53 +37,53 @@ roles:
         effort: high
         context: fresh
         budget: {max_invocations: 1}
-    budget: {max_total_invocations: 3, max_escalations: 2}
   rediagnostician:
     primary: {profile: codex, effort: high}
-    budget: {max_total_invocations: 1}
   implementer:
     primary: {profile: claude-sonnet, effort: medium}
-    budget: {max_total_invocations: 1}
   fixer:
     primary: {profile: claude-sonnet, effort: medium}
-    # FIX and REFIX share this role in bugfix; totals are per role per run.
-    budget: {max_total_invocations: 2}
   verifier:
     primary: {profile: command}
-    # Both VERIFY and VERIFY_AGAIN may invoke this role.
-    budget: {max_total_invocations: 2}
 flows:
   feature:
     entry: SPECIFY
-    run_budget: {max_invocations: 10, max_state_visits: 1, max_duration_seconds: 1800}
+    run_budget: {max_invocations: 10, max_state_visits: 20}
     states:
       SPECIFY:
         role: specifier
+        budget: {max_invocations: 1, max_state_visits: 1}
         consumes: [request]
         produces: [microspec]
         on: {ready: IMPLEMENT, needs_clarification: NEEDS_HUMAN}
       IMPLEMENT:
         role: implementer
+        budget: {max_invocations: 1, max_state_visits: 1}
         consumes: [request, microspec]
         produces: [implementation_handoff]
         on: {ready: VERIFY, blocked: NEEDS_HUMAN}
       VERIFY:
         role: verifier
+        budget: {max_invocations: 1, max_state_visits: 1}
         consumes: [microspec, implementation_handoff]
         produces: [verifier_evidence]
         on: {pass: READY_FOR_MANUAL_QA, fail: DIAGNOSE_FAILURE}
       DIAGNOSE_FAILURE:
         role: diagnostician
+        budget: {max_invocations: 3, max_state_visits: 1}
+        escalation_exhausted: NEEDS_REDIAGNOSIS
         consumes: [microspec, implementation_handoff, verifier_evidence]
         produces: [failure_diagnosis]
         on: {ready: REPAIR_ONCE, inconclusive: NEEDS_REDIAGNOSIS, needs_clarification: NEEDS_HUMAN}
       REPAIR_ONCE:
         role: fixer
+        budget: {max_invocations: 1, max_state_visits: 1}
         consumes: [microspec, verifier_evidence, failure_diagnosis]
         produces: [implementation_handoff]
         on: {ready: VERIFY_AGAIN, blocked: NEEDS_REDIAGNOSIS}
       VERIFY_AGAIN:
         role: verifier
+        budget: {max_invocations: 1, max_state_visits: 1}
         consumes: [microspec, implementation_handoff]
         produces: [verifier_evidence]
         on: {pass: READY_FOR_MANUAL_QA, fail: NEEDS_REDIAGNOSIS}
@@ -95,50 +92,60 @@ flows:
       NEEDS_HUMAN: {terminal: true}
   bugfix:
     entry: TRIAGE
-    run_budget: {max_invocations: 14, max_state_visits: 1, max_duration_seconds: 2400}
+    run_budget: {max_invocations: 14, max_state_visits: 20}
     states:
       TRIAGE:
         role: triager
+        budget: {max_invocations: 1, max_state_visits: 1}
         consumes: [request]
         produces: [triage]
         on: {ready: REPRODUCE, needs_clarification: NEEDS_HUMAN}
       REPRODUCE:
         role: reproducer
+        budget: {max_invocations: 1, max_state_visits: 1}
         consumes: [request, triage]
         produces: [reproduction_evidence]
         on: {ready: DIAGNOSE, inconclusive: NEEDS_HUMAN}
       DIAGNOSE:
         role: diagnostician
+        budget: {max_invocations: 3, max_state_visits: 1}
+        escalation_exhausted: NEEDS_HUMAN
         consumes: [request, reproduction_evidence]
         produces: [failure_diagnosis]
         on: {ready: SPECIFY_FIX, inconclusive: NEEDS_HUMAN}
       SPECIFY_FIX:
         role: specifier
+        budget: {max_invocations: 1, max_state_visits: 1}
         consumes: [request, reproduction_evidence, failure_diagnosis]
         produces: [microspec]
         on: {ready: FIX, needs_clarification: NEEDS_HUMAN}
       FIX:
         role: fixer
+        budget: {max_invocations: 1, max_state_visits: 1}
         consumes: [microspec, failure_diagnosis]
         produces: [implementation_handoff]
         on: {ready: VERIFY, blocked: NEEDS_HUMAN}
       VERIFY:
         role: verifier
+        budget: {max_invocations: 1, max_state_visits: 1}
         consumes: [microspec, reproduction_evidence, implementation_handoff]
         produces: [verifier_evidence]
         on: {pass: READY_FOR_MANUAL_QA, fail: REDIAGNOSE}
       REDIAGNOSE:
         role: rediagnostician
+        budget: {max_invocations: 1, max_state_visits: 1}
         consumes: [request, reproduction_evidence, verifier_evidence, failure_diagnosis]
         produces: [revised_diagnosis]
         on: {ready: REFIX, inconclusive: NEEDS_HUMAN}
       REFIX:
         role: fixer
+        budget: {max_invocations: 1, max_state_visits: 1}
         consumes: [microspec, revised_diagnosis, verifier_evidence]
         produces: [implementation_handoff]
         on: {ready: VERIFY_AGAIN, blocked: NEEDS_HUMAN}
       VERIFY_AGAIN:
         role: verifier
+        budget: {max_invocations: 1, max_state_visits: 1}
         consumes: [microspec, reproduction_evidence, implementation_handoff]
         produces: [verifier_evidence]
         on: {pass: READY_FOR_MANUAL_QA, fail: NEEDS_HUMAN}
