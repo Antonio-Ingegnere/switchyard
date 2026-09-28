@@ -1027,3 +1027,28 @@ legacy fallback are unchanged. Historical logs remain readable with the updated 
 The repeated-entry/alternate-execution probe now respects the entry visit cap exactly.
 See [admission and compatibility details](docs/design/budgets.md). Compiler work remains
 a separate slice; no V2 compiler is included here.
+
+## Compile a V2 workflow (V2-002)
+
+```python
+from runtime import WorkUnit, run
+from switchyard.workflow_bundle import load_workflow_bundle
+from switchyard.workflow_compiler import compile_workflow
+
+bundle = load_workflow_bundle("examples/delivery/workflows-v2.yaml")
+# resolve_executor(binding) is an application-supplied callable returning an Executor.
+compiled = compile_workflow(bundle, "bugfix", resolve_executor)
+result = run(WorkUnit("Investigate the reported behavior"), compiled.flow, compiled.executors)
+
+entry = compiled.entry_states["DIAGNOSE"]
+print(compiled.plan[entry].binding)
+print(result.terminal_state)
+```
+
+Compilation resolves one executor per explicit rung and produces an immutable inspection
+plan. Semantic transitions, all budget causes and two-phase admission execute through
+existing runtime primitives. Terminal names remain readable. The compiler introduces
+no provider-specific logic or real adapter wiring; required tests use fake executors.
+Artifact declarations and `continue`/`fresh` policies remain metadata until V2-003.
+See [the compilation contract](docs/design/workflow-bundle-v2.md#compilation-api-v2-002),
+including explicit rejection of graphs incompatible with existing runtime cycle rules.

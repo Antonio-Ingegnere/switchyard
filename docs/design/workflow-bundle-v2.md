@@ -161,12 +161,11 @@ invocation limit second, then scopes. The future compiler must declare the share
 logical-state invocation scope before the individual rung scope. If both scopes
 are exhausted, the enclosing state route wins. This slice does not change runtime.
 
-RUNTIME-V2-D is required before compilation: generic cause-aware refusal routing
-must distinguish run invocation, state visits, and exact named invocation scopes.
-Preferred direction is an exact cause route with the legacy `budget_exceeded` route
-as fallback, plus a flow-owned run invocation route. API details remain deferred.
+RUNTIME-V2-D supplies cause-aware refusal routing for run invocation, state visits,
+and exact named invocation scopes, with legacy fallback. RUNTIME-V2-E commits visits
+before invocation checks, so invocation-refused logical entries remain counted.
 Runtime must not learn logical-state, role, rung, escalation or provider semantics.
-The loader remains declarative; no compiler or execution behavior is implemented here.
+The loader remains declarative; opt-in compilation is described below.
 
 ## Exhaustion and matching
 
@@ -218,3 +217,53 @@ configuration validation boundary. There is no mutable builder, registry or plug
 
 V2-002 compilation/routing and V2-003 artifact/context behavior are outside this slice.
 Do not pass these specifications directly to `runtime.run()` or the v1 CLI.
+
+## Compilation API (V2-002)
+
+`switchyard.workflow_compiler.compile_workflow(bundle, flow_name, executor_resolver)`
+returns a frozen `CompiledWorkflow` with `flow`, read-only `executors`, `plan`, and
+`entry_states`. Execute it with the existing `runtime.run`; compilation never invokes
+an executor. Existing V1 and delivery presets do not pass through this compiler.
+
+The resolver is a callable `ExecutionBinding -> Executor`, called once per executable
+compiled state during compilation, sorted by logical state then ascending rung index.
+Each frozen binding contains `flow_name`, `logical_state`, `role_name`, `rung_index`,
+`profile_name`, `provider`, `model`, `effort`, `escalation_kind`, and `context_mode`.
+Primary kind/context are `None`; later bindings preserve `vertical`/`continue` or
+`horizontal`/`fresh`. Effort is copied verbatim; command effort remains `None`.
+The compiler has no provider-specific branches or adapter construction.
+
+`plan[runtime_state_id]` is a frozen `CompiledStatePlan` containing:
+
+- `logical_state` and `binding` (None for terminal states).
+- `declaration`: immutable source state, including logical transitions, budgets,
+  `consumes`, and `produces`.
+- `state`: the actual runtime State with compiled transitions, scope order and routes.
+
+`entry_states[logical_name]` identifies each logical entry. Terminal IDs preserve
+logical names, so `RunResult.terminal_state` is directly usable. Executable IDs and
+scope names use separate deterministic compiler namespaces that cannot collide with
+validated logical identifiers. Their formatting is private; use the mappings rather
+than splitting generated strings. Role reuse never shares state or scope identity.
+
+The compiler encodes adjacent escalation, normal transitions and exhaustion directly
+in `State.on`. `budget_exceeded` never becomes a semantic executor outcome; the same
+precedence selects only the rung scope's refusal destination. Run refusal uses the
+flow route, visit refusal uses the entry state's route, and shared invocation refusal
+uses the enclosing scope route. Shared scope precedes local scope. Only entry states
+carry logical visit caps; default rung invocation caps are retained.
+
+There are no synthetic executor calls, counters or execution loops in the compiler.
+Artifact declarations and context policies are inspection metadata only. Executors
+receive the existing InvocationRequest; no artifact data or chat history is fabricated.
+
+`WorkflowCompileError` identifies resolver failures (with the original cause), invalid
+resolved executors, generated identifier collisions and runtime representation errors.
+Unknown flow selection retains `WorkflowBundle.flow`'s `FlowConfigError`. The compiler
+assumes loader-validated input and does not duplicate the schema validator.
+
+The existing conservative runtime cycle validator remains authoritative. A loader-valid
+cyclic graph that lacks the visit bounds required by runtime fails compilation explicitly;
+the compiler neither invents additional limits nor relaxes cycle safety. This is a
+representation constraint, not silent approximation. Real provider resolution and
+artifact/context transport remain future slices.

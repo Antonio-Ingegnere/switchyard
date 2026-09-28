@@ -1,196 +1,98 @@
 id: V2-002
-status: runtime_prerequisites_satisfied_compiler_deferred
-updated_by: RUNTIME-V2-E
+status: implemented_and_verified
 goal: |
-  Compile corrected v2 bundles to existing runtime plans after generic outcome,
-  budget-routing and exact local/run accounting prerequisites are implemented.
+  Compile a selected validated WorkflowBundle flow to ordinary runtime states,
+  executors and immutable metadata with explicit bounded invocation attempts.
 scope:
-  - docs/plans/v2-002-workflow-compiler.yaml (audit only; compiler not implemented)
+  - switchyard/workflow_compiler.py
+  - tests/test_workflow_compiler.py
+  - docs/plans/v2-002-workflow-compiler.yaml
+  - docs/design/workflow-bundle-v2.md
+  - README.md
 constraints:
-  - No runtime, Event, executor, v1, observability, delivery or Adeo changes here.
-  - No hidden semantic retries, fake budget outcomes, approximate counters or provider calls.
-  - Do not commit a compiler implementation with unresolved capability gaps.
-contract_correction: |
-  V2-001A removes role budget, max_total_invocations, max_escalations and all duration
-  budgets. Routing reuse must not accidentally share execution allowances. No shared
-  named scope is introduced. State max_invocations covers its rungs across one run;
-  state max_state_visits counts logical entries. Rung max_invocations is local to
-  that logical state/rung across visits, default one. V2-001B removes the optional
-  whole-run visit cap rather than implementing it. Mandatory run max_invocations is
-  the sole whole-run budget. All provided limits are positive ints.
-execution_completeness: |
-  Resolved declaratively by V2-001A: ladder-bearing states require an existing
-  escalation_exhausted target; executable targets are permitted and reachability
-  includes the edge. Non-ladder states and terminals forbid the field. No fallback
-  destination is invented by Python. Semantic outcome names remain declarative.
-proposed_precedence: |
-  Match only the immediately next rung. A matching permitted escalation takes
-  precedence, otherwise normal state on applies, otherwise a recognized escalation
-  trigger in a ladder-bearing state uses escalation_exhausted. No skipping. Unknown
-  unhandled outcomes are errors. Control-plane refusal/admission must distinguish
-  rung limits from enclosing state/run limits: exhaustion cannot authorize work over
-  an enclosing cap. Generic refusal/error policy belongs to RUNTIME-V2-B/C.
+  - No runtime, Event, executor API, recorder, observability, loader or existing preset changes.
+  - No hidden retries, compiler accounting, provider branches or real provider calls.
+  - No artifact/context transport, CLI, Adeo migration or V2-003 implementation.
+prerequisite_audit:
+  RUNTIME-V2-A: State-declared semantic outcomes; budget_exceeded reserved.
+  RUNTIME-V2-B: Ordinary executable budget targets with conservative cycle validation.
+  RUNTIME-V2-C: Atomic run and named-scope invocation accounting.
+  RUNTIME-V2-D: Independent run, visit and exact scope routes with legacy fallback.
+  RUNTIME-V2-E: State visits committed before invocation admission; refusal closes visit.
+  remaining_required_runtime_prerequisites: []
+  prior_blockers: |
+    Cause routing and combined admission findings are documented in the D/E MicroSpecs.
+    The compiled two-phase test replays entry invocation refusal followed by an alternate
+    state; two logical entries are counted and the third is refused by the visit cap.
 budget_capability_mapping:
-  - field: state.max_invocations
-    classification: SUPPORTED EXACTLY
-    reason: Attach the same InvocationBudgetScope(name, limit) to every compiled state belonging to that logical state.
-  - field: state.max_state_visits
-    classification: SUPPORTED EXACTLY
-    reason: |
-      Entry runtime state max_state_visits_per_run plus state_visit_budget_exceeded.
-      RUNTIME-V2-E commits each accepted entry before run/scope invocation checks.
-      Local-scope refusal therefore retains the entry visit before routing to an
-      alternate state. Apply the logical visit cap only to the entry state.
-  - field: rung.max_invocations
-    classification: SUPPORTED EXACTLY
-    reason: Unique InvocationBudgetScope per logical state/rung, alongside any shared logical-state scope.
-  - field: run.max_invocations
-    classification: SUPPORTED EXACTLY
-    reason: Flow.max_invocations_per_run admits only that many executable invocations; terminals consume none.
-remaining_required_budget_prerequisites: []
-required_execution_primitives:
-  state_declared_outcomes: SUPPORTED EXACTLY (RUNTIME-V2-A)
-  cause_aware_routing: SUPPORTED EXACTLY (RUNTIME-V2-D)
-  state_visit_accounting: SUPPORTED EXACTLY (RUNTIME-V2-E)
-  state_invocation_accounting: SUPPORTED EXACTLY (shared named scope)
-  rung_invocation_accounting: SUPPORTED EXACTLY (unique named scope)
-  run_invocation_accounting: SUPPORTED EXACTLY (Flow invocation cap)
-  vertical_horizontal_routing: SUPPORTED EXACTLY (ordinary explicit states and transitions; context remains resolver metadata)
-explicit_budget_ownership:
-  run_invocations: Flow invocation cause selects run_budget.on_exceeded, required terminal.
-  state_visits: Entry state visit cause selects state.budget.on_exceeded.
-  state_invocations: Shared named invocation scope cause selects state.budget.on_exceeded.
-  rung_invocations: |
-    Unique named invocation scope cause selects immediately next rung if it accepts
-    budget_exceeded, else explicit normal on.budget_exceeded, else escalation_exhausted
-    for ladder-bearing states. Non-ladder unhandled refusal remains an error.
-  precedence: |
-    State visits, run invocation cap, then compiler-declared scopes in order:
-    enclosing state invocation scope before individual rung invocation scope.
-  runtime_v2_d_direction: |
-    Implemented: State.state_visit_budget_exceeded, InvocationBudgetScope.on_exceeded,
-    Flow.max_invocations_exceeded. Specific cause route then legacy budget_exceeded
-    fallback. Run-specific target must be terminal. No V2 concepts in runtime.
-    All four mandatory budget ROUTING capabilities are SUPPORTED EXACTLY.
-    Never compile all four causes into one target.
-compiler_constraints: |
-  All identified mandatory runtime primitives are available. No remaining mandatory
-  runtime prerequisite is identified. Compiler still must validate its generated
-  graphs under existing conservative cycle rules; this is not a relaxation of which
-  arbitrary cyclic graphs the runtime accepts. No compiler implemented in this slice.
-logical_entry_accounting_probe:
-  configuration: |
-    A has visit cap=2, visit route=STOP, primary scope limit=1 with route=B;
-    A ready -> RETURN. B has scope limit=2 with route=STOP; B ready -> RETURN.
-    RETURN has visit cap=3 with route=STOP; RETURN ready -> A.
-    Run cap=10, run route=STOP; STOP terminal. All executors return ready.
-    The existing runtime accepts this visit-bounded graph.
-  historical_observation_before_e: |
-    Actual invocations: A, RETURN, B, RETURN, B, RETURN.
-    Only one A state_entered event. Every later A attempt is refused on its primary
-    scope and routes to B. Thus three work-bearing logical entries can occur despite
-    A's intended V2 logical visit cap of two. The runtime counters are behaving as
-    specified: invocation refusal does not admit a state visit.
-  verified_after_e: |
-    YES: the exact same graph now emits invocation states A, RETURN, B, RETURN.
-    A has two state_entered events. Its second entry gets a scope refusal with a
-    visit ID and matching exit. Its third entry gets a state-visit refusal with no
-    visit ID and routes to STOP. B executes only once, not twice.
-    tests/test_two_phase_admission.py asserts the exact probe. The original D routing
-    probe is also rerun in tests/test_cause_budget_routing.py.
-execution_contract_blocker:
-  requirement: |
-    Put logical max_state_visits on entry only, route budget_exceeded to the adjacent
-    rung when configured, and never let a refused logical admission authorize work.
-  historical_runtime_before_d: |
-    run checks state visits first, then run invocations and scopes. All failures select
-    state.on[budget_exceeded], regardless of the failing metric. Downstream rungs do
-    not share the entry's visit allowance. No non-invoking admission node or metric-
-    specific refusal target exists in the current runtime.
-  original_reproducible_probe: |
-    Existing runtime, fake executors only, no compiler or source changes:
-    A-entry: visits=1, shared invocation scope=3, primary invocation scope=1;
-      ready -> RETURN; budget_exceeded -> A-next.
-    RETURN: ready -> A-entry; invocation scope=1.
-    A-next: shared invocation scope=3, own invocation scope=1;
-      ready -> DONE; budget_exceeded -> DONE.
-    DONE: terminal. Run invocation cap=10.
-    Runtime validation accepts this bounded graph.
-    Observed invocations: A-entry, RETURN, A-next.
-    On the return to A-entry, budget_exceeded reports metric=max_state_visits_per_run,
-    limit=1, observed=1, then transition_selected targets A-next, which is admitted
-    and invoked. The second logical entry was refused, yet its next rung executes.
-  why_no_compiler_only_fix: |
-    Routing all budget refusals to exhaustion breaks required rung-budget escalation.
-    Routing all to the next rung bypasses logical-entry admission. Inferring the cause
-    in an executor or compiler-maintained counter duplicates runtime control/accounting.
-    Adding independent visit limits to later rungs does not represent logical entries.
-  decision_resolved_by_v2_001c: |
-    Required run/state on_exceeded fields now express the owning exhaustion route.
-    Rung exhaustion alone follows adjacent matching and escalation exhaustion.
-    RUNTIME-V2-D now implements generic cause-aware routing. Regression tests show
-    entry refusal stops and local-scope refusal alone reaches the alternate state.
-  work_status: |
-    Compiler/resolver implementation, execution proof suite and commit are deferred.
-    V2-001C changes only the loader contract, canonical bundle, docs and tests. Runtime,
-    Event, executors, observability, existing delivery presets and Adeo are untouched.
-removed_requirements:
-  - V2-001B intentionally removes run max_state_visits; no whole-run visit counter required.
-  - No shared role invocation/escalation accounting.
-  - No rung, role or run duration/deadline enforcement.
-  - No provider-specific budget semantics.
-prerequisites:
-  RUNTIME-V2-A: |
-    Implemented: current-state-declared outcomes replace the global runtime whitelist.
-    Exact nonempty strings without NUL are accepted only when declared by the state;
-    budget_exceeded remains reserved. Existing technical adapters/v1 YAML retain their
-    behavior. Event fields unchanged; historical reader accepts valid semantic strings.
-    Undeclared results fail before invocation_finished. No compiler is implemented.
-  RUNTIME-V2-B: |
-    Implemented: explicit budget refusal may target an executable state. Targets
-    undergo ordinary admission and use their own refusal routes. Validation rejects
-    cycles that bypass bounded admission, including pure refusal and mixed cycles.
-    No executor may synthesize refusal. Event order/schema and accounting unchanged.
-  RUNTIME-V2-C: |
-    Implemented: Flow.max_invocations_per_run and immutable InvocationBudgetScope
-    declarations in State.invocation_budgets. Invocation checks are atomic; precedence
-    is existing state visits, then run invocations, then named scopes in declaration
-    order. Invocation counters remain atomic; E now retains admitted visits on
-    invocation refusal. Metrics retain already-consumed observed semantics.
-    No role/provider semantics, new Event fields, duration enforcement or whole-run
-    visit cap. V2-001B removes the latter from the required DSL. Existing static cycle
-    rules are not relaxed. Compiler implementation remains deferred to its own slice.
-  RUNTIME-V2-D: |
-    Implemented and verified: cause-specific state visit, named-scope and terminal
-    flow invocation routes, preserving legacy fallback, precedence and accounting.
-    Event fields unchanged; specific refusal target recorded, legacy shape retained.
-  RUNTIME-V2-E: |
-    Implemented: visit commitment precedes invocation admission. Invocation refusal
-    keeps the visit ID/count, closes the visit and consumes no invocation counters.
-    State-visit refusal stays pre-entry. Existing Event fields represent both phases;
-    historical and new histories remain readable. Both blocking probes now pass.
-proposed_public_api: |
-  Not implemented: compile_workflow(bundle, flow_name, executor_resolver) -> CompiledWorkflow.
-  Resolver is Callable[[ResolvedInvocation], Executor]. Frozen binding carries
-  flow_name, logical_state, role_name, profile_name, provider, model, effort,
-  rung_index, escalation_kind and context_mode (None for primary, continue/fresh for later rungs).
-  Frozen CompiledWorkflow contains Flow, read-only executors and read-only steps
-  mapping runtime-state IDs to logical identity/binding and consumes/produces tuples.
-  Terminal metadata has no invocation binding. Event schema need not change for
-  logical identity: consumers use this external mapping. Deterministic IDs use a
-  reserved namespace forbidden by logical identifiers, not parsed business semantics.
-  Vertical continue and horizontal fresh are policy only until V2-003; no fabricated
-  history sharing or artifact transport. Compiler errors use WorkflowCompileError;
-  loader schema errors continue using FlowConfigError.
+  state_max_invocations: SUPPORTED EXACTLY (shared scope and state budget route)
+  state_max_state_visits: SUPPORTED EXACTLY (entry-only visit cap and state budget route)
+  rung_max_invocations: SUPPORTED EXACTLY (unique scope and adjacent/normal/exhaustion route)
+  run_max_invocations: SUPPORTED EXACTLY (Flow cap and terminal flow route)
+  removed: Whole-run visits, shared-role counters and duration budgets are not in the DSL.
+final_implementation_design:
+  compiler_api: |
+    switchyard.workflow_compiler.compile_workflow(bundle, flow_name, executor_resolver)
+    returns frozen CompiledWorkflow(flow, executors, plan, entry_states).
+    Executors, plan and logical-entry mapping are defensive read-only mappings.
+  resolver_api: |
+    Callable[[ExecutionBinding], Executor], called once per executable compiled state
+    during compilation, in sorted logical-state order then ascending rung order.
+    No provider branches or real adapter construction. Resolution failures and invalid
+    runtime representation raise WorkflowCompileError; unknown flow retains bundle.flow's
+    existing FlowConfigError. No execution occurs during compilation.
+  binding: |
+    Frozen ExecutionBinding(flow_name, logical_state, role_name, rung_index,
+    profile_name, provider, model, effort, escalation_kind, context_mode).
+    Primary kind/context are None; later values copy the declared step exactly.
+  inspection: |
+    plan maps runtime state ID to frozen CompiledStatePlan(logical_state, binding,
+    declaration, state). binding is None for terminals. declaration is the immutable
+    source WorkflowStateSpec, preserving artifacts, local budgets and logical targets.
+    state is the exact compiled runtime State, exposing transitions and budget routes.
+    entry_states maps each logical name to its entry runtime ID. Terminal IDs retain
+    original names. Consumers use mappings, never parse generated names.
+  identifiers: |
+    Executable IDs use @v2:<flow>:<logical>:<index>; executor IDs use the same unique
+    key in their separate namespace. Scope names use @v2-scope:<flow>:<logical>:state
+    and @v2-scope:<flow>:<logical>:rung:<index>. V2 names exclude @ and colon, making
+    this deterministic encoding collision-safe. Check collisions explicitly; formatting
+    is private and not a semantic API. All logical states are compiled independently.
+  routing: |
+    Next adjacent incoming trigger wins, then normal logical on, then recognized
+    trigger exhaustion for ladder-bearing states. No forward search. Non-ladder
+    unhandled trigger remains undeclared. budget_exceeded is excluded from semantic
+    transitions and used only for the rung scope route by the same precedence.
+    An unhandled non-ladder rung refusal leaves route None (existing runtime error).
+  budgets: |
+    Run cap/route -> Flow fields. Entry-only visit cap/route -> State fields.
+    State invocation cap/route -> shared named scope attached first to every rung.
+    Declared/default rung cap -> unique scope attached second, with local exhaustion
+    route. Terminal targets preserve names; executable logical targets map to entry.
+    Use E two-phase admission; never implement counters, routing loops or synthetic work.
+  compatibility: |
+    All identified mandatory primitives are available. Existing runtime graph validation
+    remains authoritative; unrepresentable graphs produce explicit compilation errors,
+    not invented caps or relaxed validation. Canonical YAML actually uses ready for
+    IMPLEMENT/REPAIR_ONCE/FIX; tests follow YAML rather than illustrative done labels.
 acceptance:
-  - Future fake executions prove explicit rungs, adjacent matching, effort/context and exact caps.
-  - Existing v1, runtime, recording, observability and presets retain behavior.
+  - Canonical feature and bugfix execute through runtime.run with fake executors only.
+  - Resolver receives exact provider/model/effort and primary/continue/fresh metadata.
+  - Each rung executes as a separate invocation; role reuse creates independent identities.
+  - Adjacent escalation wins, normal transitions next, recognized exhaustion last; no skipping.
+  - Run/state/local budget causes use distinct routes; shared scope precedes local scope.
+  - Compiled entry cap retains invocation-refused visits and stops further logical entries.
+  - Immutable deterministic plans expose source artifacts and actual runtime targets/budgets.
+  - Explicit errors for resolver, collision and runtime representation failures.
 verification:
-  - V2-001A loader regression tests validate the corrected declarative contract.
-  - Existing full offline suite; compiler tests belong to the later compiler implementation slice.
+  - Focused fake-only compiler tests for paths, budgets, identity, errors and observability.
+  - V2 loader, runtime A/B/C/D/E, V1, observability and delivery via full offline suite.
 non_goals:
-  - Compiler or prerequisite implementation, duration budgets, role counters, artifacts or Adeo migration.
-historical_audit_evidence_before_runtime_v2_a:
-  - "Nonterminal budget target -> FlowValidationError: budget target must be terminal: a"
-  - "inconclusive transition -> FlowValidationError: invalid outcome: inconclusive"
-  - "inconclusive executor response -> ExecutionError: executor returned a malformed result"
+  - Real adapters, provider flags, context construction, durable handoffs, dashboards or CLI.
+verification_results:
+  focused: "19 compiler tests passed, with parameterized canonical feature/bugfix and budget scenarios."
+  full_offline: "347 tests run: 346 passed, one existing platform skip (22.793 seconds)."
+  command: ".venv/bin/python -m unittest discover -s tests -v"
+  regressions: "V2 loader, runtime A/B/C/D/E, V1 loader, observability, diagnostics, timing, recorder, CLI and delivery included."
+  execution_proof: "Canonical feature straight/vertical/exhaustion paths and bugfix straight/vertical/horizontal/rediagnosis paths pass. Real budget refusal and logical entry counting verified through compilation."
+  protected_scope: "Runtime, Event, loaders, executors, recorder, observability and existing presets untouched. No artifact transport, real provider calls or Adeo changes."
