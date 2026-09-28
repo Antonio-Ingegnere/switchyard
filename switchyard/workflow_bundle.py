@@ -19,6 +19,13 @@ ESCALATION_TRIGGERS = frozenset({'inconclusive', 'budget_exceeded', 'diagnosis_d
 
 
 @dataclass(frozen=True, slots=True)
+class ArtifactSpec:
+    format: Literal['markdown', 'text', 'yaml', 'json']
+    schema: Literal['microspec'] | None = None
+    source: Literal['request'] | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class BudgetSpec:
     max_invocations: int | None = None
     max_state_visits: int | None = None
@@ -90,9 +97,10 @@ class WorkflowBundle:
     profiles: Mapping[str, ExecutionProfile]
     roles: Mapping[str, RoleBinding]
     flows: Mapping[str, WorkflowSpec]
+    artifacts: Mapping[str, ArtifactSpec] = field(default_factory=dict)
 
     def __post_init__(self):
-        for name in ('profiles', 'roles', 'flows'):
+        for name in ('profiles', 'roles', 'flows', 'artifacts'):
             object.__setattr__(self, name, MappingProxyType(dict(getattr(self, name))))
 
     def flow(self, name: str) -> WorkflowSpec:
@@ -204,7 +212,29 @@ def _role(data, profiles, path):
     return RoleBinding(primary, tuple(steps))
 
 
-def _workflow(data, roles, path):
+def _artifact_catalog(data, path='artifacts'):
+    _mapping(data, path)
+    result = {}
+    for name, definition in data.items():
+        here = _at(path, name) if type(name) is str else path
+        _name(name, here)
+        _fields(definition, {'format'}, {'schema', 'source'}, here)
+        fmt = _enum(definition['format'], {'markdown', 'text', 'yaml', 'json'}, here + '.format')
+        schema = _enum(definition['schema'], {'microspec'}, here + '.schema') if 'schema' in definition else None
+        source = _enum(definition['source'], {'request'}, here + '.source') if 'source' in definition else None
+        if schema is not None and fmt not in ('yaml', 'json'):
+            raise _error(here + '.schema', 'microspec requires yaml or json')
+        if source == 'request' and (name != 'request' or fmt not in ('markdown', 'text') or schema is not None):
+            raise _error(here + '.source', 'request source requires name request and markdown/text without schema')
+        if name == 'request' and source != 'request':
+            raise _error(here + '.source', 'request must be the immutable request source')
+        result[name] = ArtifactSpec(fmt, schema, source)
+    if result and ('request' not in result or result['request'].source != 'request'):
+        raise _error(path, 'nonempty catalog requires the immutable request artifact')
+    return result
+
+
+def _workflow(data, roles, artifacts, path):
     _fields(data, {'entry', 'run_budget', 'states'}, set(), path)
     entry = _name(data['entry'], path + '.entry')
     budget = _budget(data['run_budget'], 'run', path + '.run_budget')
@@ -236,6 +266,12 @@ def _workflow(data, roles, path):
             raise _error(here + '.escalation_exhausted', 'only allowed for a role with an escalation ladder')
         consumes = _names(state.get('consumes', []), here + '.consumes')
         produces = _names(state.get('produces', []), here + '.produces')
+        for field_name, references in (('consumes', consumes), ('produces', produces)):
+            for reference in references:
+                if reference not in artifacts:
+                    raise _error(here + '.' + field_name, f'undeclared artifact {reference!r}')
+                if field_name == 'produces' and artifacts[reference].source == 'request':
+                    raise _error(here + '.produces', 'cannot produce immutable request')
         _nonempty_mapping(state['on'], here + '.on')
         for outcome, target in state['on'].items():
             location = _at(here + '.on', outcome)
@@ -278,13 +314,14 @@ def load_workflow_bundle(path: str | os.PathLike[str]) -> WorkflowBundle:
     except (OSError, UnicodeError, TypeError, ValueError) as exc:
         raise _error('$', 'cannot read UTF-8 workflow bundle') from exc
     data = _yaml_data(text)
-    _fields(data, {'version', 'profiles', 'roles', 'flows'}, set(), '')
+    _fields(data, {'version', 'profiles', 'roles', 'flows'}, {'artifacts'}, '')
     if type(data['version']) is not int or data['version'] != 2:
         raise _error('version', 'expected workflow bundle version 2 (integer, excluding bool)')
     for collection in ('profiles', 'roles', 'flows'):
         _nonempty_mapping(data[collection], collection)
         for name in data[collection]:
             _name(name, _at(collection, name))
+    artifacts = _artifact_catalog(data.get('artifacts', {}))
     profiles = {}
     for name, definition in data['profiles'].items():
         here = _at('profiles', name)
@@ -299,5 +336,5 @@ def load_workflow_bundle(path: str | os.PathLike[str]) -> WorkflowBundle:
             model = _name(definition['model'], here + '.model')
         profiles[name] = ExecutionProfile(provider, model)
     roles = {name: _role(definition, profiles, _at('roles', name)) for name, definition in data['roles'].items()}
-    flows = {name: _workflow(definition, roles, _at('flows', name)) for name, definition in data['flows'].items()}
-    return WorkflowBundle(2, profiles, roles, flows)
+    flows = {name: _workflow(definition, roles, artifacts, _at('flows', name)) for name, definition in data['flows'].items()}
+    return WorkflowBundle(2, profiles, roles, flows, artifacts)

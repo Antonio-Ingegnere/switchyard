@@ -41,6 +41,7 @@ class FakeResolver:
 def fixture():
     return {
         'version': 2,
+        'artifacts': {'request': {'format': 'markdown', 'source': 'request'}, 'evidence': {'format': 'markdown'}},
         'profiles': {'small': {'provider': 'claude', 'model': 'haiku'},
                      'large': {'provider': 'claude', 'model': 'sonnet'},
                      'other': {'provider': 'codex', 'model': 'codex'},

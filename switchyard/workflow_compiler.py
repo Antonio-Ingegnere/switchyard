@@ -1,10 +1,10 @@
 """Opt-in compilation of validated V2 bundles to ordinary runtime graphs."""
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Callable, Mapping
 
 from runtime import Executor, Flow, FlowValidationError, InvocationBudgetScope, State, validate
-from .workflow_bundle import (ESCALATION_TRIGGERS, Effort, Provider, WorkflowBundle,
+from .workflow_bundle import (ESCALATION_TRIGGERS, ArtifactSpec, Effort, Provider, WorkflowBundle,
                               WorkflowStateSpec)
 
 
@@ -43,9 +43,10 @@ class CompiledWorkflow:
     executors: Mapping[str, Executor]
     plan: Mapping[str, CompiledStatePlan]
     entry_states: Mapping[str, str]
+    artifacts: Mapping[str, ArtifactSpec] = field(default_factory=dict)
 
     def __post_init__(self):
-        for name in ('executors', 'plan', 'entry_states'):
+        for name in ('executors', 'plan', 'entry_states', 'artifacts'):
             object.__setattr__(self, name, MappingProxyType(dict(getattr(self, name))))
 
 
@@ -144,4 +145,4 @@ def compile_workflow(bundle: WorkflowBundle, flow_name: str,
         validate(flow, executors)
     except FlowValidationError as exc:
         raise WorkflowCompileError(f'cannot represent flow {flow_name!r}: {exc}') from exc
-    return CompiledWorkflow(flow, executors, plan, entries)
+    return CompiledWorkflow(flow, executors, plan, entries, bundle.artifacts)

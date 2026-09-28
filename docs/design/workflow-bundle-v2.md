@@ -29,7 +29,8 @@ Unknown fields are errors at every level; no metadata escape hatch exists.
 
 | Location | Fields |
 |---|---|
-| Root | **version: 2**, **profiles**, **roles**, **flows** |
+| Root | **version: 2**, **profiles**, **roles**, **flows**, `artifacts` |
+| `artifacts.<name>` | **format**, `schema`, `source` |
 | `profiles.<name>` | **provider**, **model** for agent providers |
 | `roles.<name>` | **primary**, `escalation` |
 | `primary` | **profile**, `effort`, `budget` |
@@ -58,9 +59,11 @@ but still fully validated. Declaration order is retained in immutable mappings.
 
 `consumes` and `produces` are lists, defaulting to empty tuples. Every item is a
 logical identifier; duplicates within either list are rejected. The same artifact
-may appear in both lists or across multiple states. External inputs need not have a
-producer in the bundle. Availability, physical storage, lineage, freshness and content
-validation are deferred. No filesystem probes occur for artifact declarations.
+may appear in both lists or across multiple states, except immutable request cannot
+be produced. Every reference must exist in the artifact catalog. External inputs need
+not have a producer in the bundle. Loader validation performs no filesystem probes;
+storage/content validation is supplied separately by V2-003A, while consumption-time
+availability, lineage and freshness selection remain deferred.
 
 ## Escalation
 
@@ -208,15 +211,16 @@ and schema validation never coerces the result.
 
 ## Public values and boundaries
 
-Frozen dataclasses: `WorkflowBundle`, `ExecutionProfile`, `RoleBinding`,
+Frozen dataclasses: `WorkflowBundle`, `ArtifactSpec`, `ExecutionProfile`, `RoleBinding`,
 `InvocationBinding`, `EscalationStep`, `BudgetSpec`, `WorkflowSpec`, `WorkflowStateSpec`.
 Mappings are defensively copied into read-only mappings. Artifact lists, triggers and
 ladders become tuples. Missing state budgets/effort/models use `None` where allowed; missing rung budgets default to one invocation.
 Direct constructors provide immutable data containers; `load_workflow_bundle` is the
 configuration validation boundary. There is no mutable builder, registry or plugin API.
 
-V2-002 compilation/routing and V2-003 artifact/context behavior are outside this slice.
-Do not pass these specifications directly to `runtime.run()` or the v1 CLI.
+The loader does not execute workflows. Use V2-002 compilation before `runtime.run()`;
+the v1 CLI does not accept V2 bundles. V2-003A storage and future context transport
+remain separate from loader validation.
 
 ## Compilation API (V2-002)
 
@@ -267,3 +271,17 @@ cyclic graph that lacks the visit bounds required by runtime fails compilation e
 the compiler neither invents additional limits nor relaxes cycle safety. This is a
 representation constraint, not silent approximation. Real provider resolution and
 artifact/context transport remain future slices.
+
+## Artifact catalog (V2-003A)
+
+The optional root `artifacts` mapping defines frozen `ArtifactSpec` values with required
+`format` (markdown/text/yaml/json), optional `schema: microspec` (YAML/JSON only), and
+optional `source: request`. A nonempty catalog requires the immutable source named
+`request`, with markdown/text format and no schema. Consumes/produces references must
+be declared; producing the request is forbidden. Empty/absent catalogs remain valid
+for artifact-free callers. Declared produces do not force publication on every outcome.
+
+`CompiledWorkflow.artifacts` preserves these definitions without altering execution.
+The caller-owned workspace, strict manifest, MicroSpec validator and immutable handoffs
+are documented in [the durable work contract](work-contract.md). No executor/context
+transport is implemented in this slice.

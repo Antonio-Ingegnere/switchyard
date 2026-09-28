@@ -1052,3 +1052,28 @@ no provider-specific logic or real adapter wiring; required tests use fake execu
 Artifact declarations and `continue`/`fresh` policies remain metadata until V2-003.
 See [the compilation contract](docs/design/workflow-bundle-v2.md#compilation-api-v2-002),
 including explicit rejection of graphs incompatible with existing runtime cycle rules.
+
+## Durable work contracts (V2-003A)
+
+V2 bundles can declare an `artifacts` catalog with markdown/text/YAML/JSON formats
+and optional `schema: microspec`. Every consumes/produces reference must be declared;
+the request is an immutable source and cannot be produced by a state.
+
+```python
+from switchyard.work_contract import WorkWorkspace
+
+workspace = WorkWorkspace.open(work_root, bundle.artifacts)
+workspace.initialize_request(original_request)  # Exact UTF-8 text, never rewritten.
+record = workspace.write_artifact("diagnosis", "Observed behavior and diagnosis.\n")
+assert workspace.read_artifact("diagnosis", record.version).startswith("Observed")
+```
+
+The caller chooses `work_root`. Versioned files, structured handoffs and an append-only
+manifest preserve durable knowledge; verified reads check SHA-256 and byte size.
+Handoffs contain bounded prior reasoning, not authoritative repository truth. Crash
+leftovers fail explicitly rather than being silently repaired. See [the complete work
+contract and API](docs/design/work-contract.md).
+
+Compiler inspection exposes `compiled.artifacts`. Runtime and executor payloads remain
+unchanged. No prompt construction, fresh/continue context selection, artifact transport
+or real provider integration is included; those remain V2-003B work.

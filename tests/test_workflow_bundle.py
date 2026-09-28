@@ -457,7 +457,9 @@ class WorkflowBundleTests(unittest.TestCase):
                     self.invalid(data, 'states.VERIFY.' + field)
         data = minimal(); state = data['flows']['check']['states']['VERIFY']
         state.update(consumes=['external_input'], produces=['external_input'])
-        self.load(data)  # No artifact availability or lineage analysis in this slice.
+        data['artifacts'] = {'request': {'format': 'markdown', 'source': 'request'},
+                             'external_input': {'format': 'text'}}
+        self.load(data)  # Declaration validation, not availability or lineage analysis.
 
     def test_wrong_shapes_and_required_role_binding(self):
         for value in ([], None, 'x', {}):

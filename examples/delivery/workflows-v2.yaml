@@ -1,5 +1,18 @@
-# Descriptive only: V2-001A does not compile or execute this bundle.
+# Opt-in V2 workflow and durable artifact declarations.
 version: 2
+artifacts:
+  request: {format: markdown, source: request}
+  microspec: {format: yaml, schema: microspec}
+  implementation_handoff: {format: markdown}
+  verifier_evidence: {format: markdown}
+  failure_diagnosis: {format: markdown}
+  triage: {format: markdown}
+  bug_spec: {format: yaml, schema: microspec}
+  reproduction_evidence: {format: markdown}
+  diagnosis: {format: markdown}
+  fix_microspec: {format: yaml, schema: microspec}
+  revised_diagnosis: {format: markdown}
+  revised_fix_microspec: {format: yaml, schema: microspec}
 profiles:
   claude-haiku:
     provider: claude

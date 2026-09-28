@@ -1,0 +1,89 @@
+id: V2-003A
+goal: |
+  Preserve exact user intent and versioned structured knowledge in a caller-owned
+  durable workspace, without injecting context or depending on provider memory.
+scope:
+  - switchyard/workflow_bundle.py
+  - switchyard/workflow_compiler.py (artifact metadata only)
+  - switchyard/work_contract.py
+  - examples/delivery/workflows-v2.yaml (catalog only)
+  - tests
+  - README.md
+  - docs/design/work-contract.md
+constraints:
+  - No runtime, Event, executors, observability, V1, DELIVERY-001 or Adeo changes.
+  - No context selection, prompts, provider calls, session transcripts or hidden reasoning.
+catalog: |
+  Optional top-level artifacts mapping preserves artifact-free bundles. Empty/omitted
+  catalog permits only empty consumes/produces. Nonempty catalog requires one request
+  named request, source=request, format markdown/text, no schema. Other artifacts have
+  format markdown/text/yaml/json, optional schema=microspec only with yaml/json, and no
+  source. Unknown keys, bad identifiers, undeclared references and producing request fail.
+  Catalog names use existing V2 lexical identifiers. CompiledWorkflow.artifacts exposes
+  the read-only definitions; execution graph and requests to executors are unchanged.
+workspace_api: |
+  WorkWorkspace.open(path, artifacts=None): new store requires catalog; reopen reads
+  catalog from manifest, optional supplied catalog must match. initialize_request(text),
+  write_artifact(name, content, producer=None), latest_artifact(name), versions(name),
+  read_artifact(name, version=None), write_handoff(record), handoffs(logical_state=None),
+  latest_handoff(). Return immutable records and tuples. WorkContractError is the single
+  store/content boundary. ArtifactProducer has flow_name, logical_state, rung_index,
+  profile_name; optional means provenance unknown, never invented.
+layout: |
+  request.md (also for text request); artifacts/<name>/<six-digit-version>.<extension>;
+  handoffs/<six-digit-sequence>.json; manifest.jsonl. Temporary .pending and exclusive
+  .write.lock are internal. No timestamps, random IDs or absolute paths in records.
+request: |
+  Encode supplied str as UTF-8 exactly, no newline rewriting; first version only.
+  Same text initializes idempotently after integrity verification; changed text errors.
+  Generic artifact writing cannot produce request. Direct edits are detected, not trusted.
+manifest: |
+  Strict JSONL record_version=1. First record declares catalog. Subsequent artifact
+  records carry name/version/path/format/schema/sha256/size/optional producer; handoff
+  records carry sequence/path/sha256/size. Contiguous per-artifact versions and handoff
+  sequence, exact canonical paths, strict keys/types, no duplicates, no truncated lines.
+  Manifest indexes committed files only; no scanning filesystem to invent history.
+microspec: |
+  Protocol exists only in docs/protocols/micro-spec.md. Reuse strict YAML parsing and
+  add validate_microspec returning frozen required fields: id/goal strings and scope,
+  constraints, acceptance, verification, non_goals tuples of strings. No coercion.
+  Protocol does not forbid empty lists or extensions, so accept empty lists and preserve
+  optional/extension content in stored original bytes without inventing a closed schema.
+  Format-only yaml/json artifacts are otherwise opaque; duplicate keys and malformed
+  structure/encoding fail. Structured schemas are limited to microspec.
+handoffs: |
+  Frozen HandoffRecord: flow, logical_state, role, rung_index, outcome, summary required;
+  profile_name optional; findings/evidence/changed_assumptions/blockers/produced_artifacts
+  tuples default empty; version=1, sequence=0 before commit (assigned by store).
+  Evidence/produced names must be declared; request cannot be produced. Availability
+  and immutable version selection belong to B, not A. Summary/items bounded at 8192
+  characters and each collection at 64 entries. No arbitrary fields/transcripts.
+  Handoff is prior agent reasoning/provenance, never authoritative repository truth.
+  Keep it separate from original request and durable evidence; fresh/continue selection
+  is deliberately not implemented.
+atomicity_and_integrity: |
+  Serialize writers with an exclusive lock; stale locks fail explicitly. Validate before
+  publication; write/fsync temporary bytes, publish via no-overwrite hard link in the
+  same filesystem, then append/fsync manifest. Never overwrite existing final files.
+  Crash may leave lock, temporary or orphan file; do not repair/adopt/delete automatically.
+  Not a transactional database or power-loss durability guarantee (directory fsync is
+  not promised). Partial manifest append fails parsing on reopen. SHA-256/size verify
+  selected files on reads; no tamper-proof signing of manifest is claimed. Managed
+  symlinks/non-regular files and unsafe paths are rejected; hostile concurrent external
+  filesystem mutation is outside the single-writer trust boundary.
+acceptance:
+  - Natural request bytes persist unchanged through progressive MicroSpec/evidence/diagnosis writes.
+  - Old versions remain accessible; mutated content and malformed manifests fail explicitly.
+  - Typed ordered handoffs remain independent of artifact streams and provider memory.
+  - Catalog/compiler inspection and canonical bundle retain unchanged execution behavior.
+verification:
+  - Focused catalog, workspace, MicroSpec, handoff, integrity and failure-injection tests.
+  - V2 loader/compiler and full offline regressions.
+non_goals:
+  - V2-003B transport/selection, database, binary media, generic schema plugins or Adeo integration.
+verification_results:
+  focused: "23 work-contract/catalog tests passed."
+  v2_regressions: "55 V2 loader/compiler tests passed."
+  full_offline: "370 tests run: 369 passed, one existing platform skip (21.952 seconds)."
+  command: ".venv/bin/python -m unittest discover -s tests -v"
+  protected_scope: "Runtime, Event, executors, V1, observability and DELIVERY-001 unchanged. Compiler graph unchanged; only catalog inspection added. No context transport, provider calls or Adeo changes."
