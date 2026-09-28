@@ -1,0 +1,78 @@
+id: V2-001
+goal: |
+  Load one version-2 YAML bundle into immutable typed profiles, roles, escalation
+  ladders and independent workflows. Validate configuration without executing it.
+scope:
+  - switchyard/workflow_bundle.py
+  - tests/test_workflow_bundle.py
+  - examples/delivery/workflows-v2.yaml
+  - docs/design/workflow-bundle-v2.md
+  - README.md
+  - docs/plans/v2-001-workflow-bundle.yaml
+constraints:
+  - No changes to runtime, FLOW-001 loader behavior, existing presets or Adeo.
+  - No compilation, provider calls, executable resolution, artifacts implementation or new dependencies.
+  - Reuse existing strict YAML parsing and FlowConfigError; no automatic version dispatch.
+public_api: |
+  switchyard.workflow_bundle.load_workflow_bundle(path) -> WorkflowBundle.
+  Frozen dataclasses: WorkflowBundle, ExecutionProfile, RoleBinding,
+  InvocationBinding, EscalationStep, BudgetSpec, WorkflowSpec, WorkflowStateSpec.
+  Mapping collections are copied into read-only mappings; ordered collections
+  become tuples. bundle.flow(name) returns a WorkflowSpec or raises FlowConfigError.
+schema: |
+  Root requires exactly version: 2, nonempty profiles, roles and flows mappings.
+  Names/references/models/artifacts/outcome labels use [A-Za-z][A-Za-z0-9_.-]*.
+  Profiles have provider (claude|codex|command); model required for claude/codex,
+  forbidden for command. No machine configuration, effort or budgets in profiles.
+  Role requires primary; escalation and budget optional. Primary requires profile;
+  effort (low|medium|high) and budget optional. Omitted agent effort is unspecified,
+  not inferred; command effort is forbidden even if null.
+  Each escalation step requires kind, nonempty unique on triggers, profile, context;
+  effort and budget optional. Ordered comparisons use the immediately previous rung.
+  Flow requires entry, run_budget and nonempty states. Normal states require role
+  and nonempty on mapping; consumes/produces optional lists of unique logical names.
+  Terminal states contain only terminal: true. Artifacts are not physical paths.
+budget_semantics: |
+  All supplied values are strictly positive integers (never bool, null or strings).
+  Supplied budget mappings must be nonempty; absent local budgets mean unspecified.
+  Rung: max_invocations, max_duration_seconds, scoped to that role's rung per run.
+  Role: max_total_invocations, max_escalations, max_duration_seconds, across that
+  role's uses in one run. Flow/run: required max_invocations, optional
+  max_state_visits (cap for each named state per run), max_duration_seconds.
+  These are declared limits only, with no enforcement/timing aggregation in this slice.
+  max_escalations cannot exceed ladder length or, when specified, role total minus
+  one (one primary invocation precedes escalation). Smaller escalation caps may
+  intentionally restrict an ordered ladder. Other local caps may exceed a hard
+  outer fuse; this is not a guarantee that every configured rung will execute.
+escalation_semantics: |
+  Triggers: inconclusive, budget_exceeded, diagnosis_disproved, verification_same_failure.
+  Vertical requires the same provider, context continue, and a changed profile
+  reference and/or effort. No model ranking or semantic strength claim.
+  Horizontal requires a different provider and context fresh. Human is not a profile.
+  This models structure only, including logical command bindings, not execution support.
+validation: |
+  Reject unknown keys at every location, wrong types, missing references, unknown
+  entry/targets, unreachable states, invalid budgets and malformed artifacts.
+  Validate all roles even if unused. Unused roles/profiles are allowed across bundles.
+  Cycles are allowed with the required run fuse; do not prove termination or artifact
+  availability. Transition labels are project-defined identifiers, unlike the closed
+  escalation trigger vocabulary. No translation to runtime outcomes yet.
+  Duplicate keys, anchors, aliases, explicit tags, merge keys and multiple documents
+  are rejected by the existing strict YAML parser. Bare on remains a string key.
+acceptance:
+  - Canonical example contains independent feature and bugfix flows using only role references.
+  - All requested invalid configurations fail through path-bearing FlowConfigError.
+  - Loaded collections cannot be mutated; lookup is deterministic.
+  - Version 1 and version 2 loaders reject each other's documents without dispatch.
+verification:
+  - Focused V2-001 schema, lookup, immutability and invalid-input tests.
+  - Existing flow-config, runtime, observability and delivery tests through full offline suite.
+non_goals:
+  - V2-002 compilation/routing, V2-003 artifact/context behavior and preset migration.
+  - Real providers, model ranking, machine paths, credentials or arbitrary metadata.
+verification_results:
+  focused: "25 V2-001 tests passed."
+  flow_config: "9 existing flow-config tests passed."
+  full_offline: "256 tests run: 255 passed, one existing platform skip (21.719 seconds)."
+  coverage: "Full suite includes runtime, budgets, diagnostics, recording, observability and delivery presets/analytics."
+  compatibility: "No existing loader, runtime, executor, observability or preset files changed; Adeo untouched."

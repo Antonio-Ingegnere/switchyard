@@ -932,3 +932,22 @@ Run with `python3 -m examples.delivery --help`. The application supports event
 recording and correlated follow-up runs without changing generic runtime, YAML or
 observability contracts. See the preset documentation for the human QA/scope
 approval boundary and Git limitations. No delivery analytics are included.
+
+## Workflow bundle v2 (schema only)
+
+V2-001 adds a separate, strict project-facing YAML loader:
+
+```python
+from switchyard.workflow_bundle import load_workflow_bundle
+
+bundle = load_workflow_bundle("examples/delivery/workflows-v2.yaml")
+feature = bundle.flow("feature")
+bugfix = bundle.flow("bugfix")
+```
+
+The [canonical bundle](examples/delivery/workflows-v2.yaml) declares profiles, role
+bindings, escalation ladders, scoped budgets, logical artifacts and two independent
+workflow graphs. Results are immutable; invalid configuration raises `FlowConfigError`.
+See the [exact v2 schema and budget scopes](docs/design/workflow-bundle-v2.md).
+This loader does not execute or compile workflows. Existing version-1 loading, CLI,
+runtime and delivery presets remain unchanged; neither loader accepts the other version.
