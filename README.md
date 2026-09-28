@@ -956,3 +956,16 @@ runtime and delivery presets remain unchanged; neither loader accepts the other 
 V2-001A removes role-wide execution counters and duration limits: reusable roles route
 work, while states and their rungs own local budgets. Run limits cover the whole run.
 The corrected schema rejects the superseded fields rather than silently migrating them.
+
+## State-declared runtime outcomes (RUNTIME-V2-A)
+
+Direct `Flow`/`State` callers can declare semantic outcomes in `State.on`, for example
+`State("diagnostician", {"ready": "NEXT", "inconclusive": "STOP"})`. An executor's
+`ExecutorResult("ready")` is accepted only if the current state declares it. Keys
+are exact nonempty strings without NUL; only `budget_exceeded` is reserved for the
+control plane. Existing technical outcomes retain their adapter behavior.
+
+Undeclared results raise `ExecutionError` immediately, before `invocation_finished`;
+valid results appear unchanged in events and JSONL projections. Event fields, v1 YAML,
+budget routing and executors are unchanged. See the [executor contract](docs/protocols/agent-driver.md).
+This is a runtime capability only, not a v2 compiler or escalation implementation.

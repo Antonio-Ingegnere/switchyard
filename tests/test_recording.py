@@ -122,7 +122,7 @@ class RecordingTests(unittest.TestCase):
 
     def test_runtime_failures_remain_primary_when_run_error_recording_fails(self):
         cases = [
-            (self.flow(), FakeExecutor(ExecutorResult("failed")), "missing transition: a.failed"),
+            (self.flow(), FakeExecutor(ExecutorResult("failed")), "undeclared outcome.*failed"),
             (self.flow(), FakeExecutor(None), "malformed result"),
             (Flow("a", {"a": State("fake", max_state_visits_per_run=0), "done": State(terminal=True)}),
              FakeExecutor(), "missing transition: a.budget_exceeded"),

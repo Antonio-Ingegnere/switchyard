@@ -102,13 +102,13 @@ class TimingTests(unittest.TestCase):
         self.assertEqual(dict(summary.outcome_counts), {'timeout': 1})
         self.assertEqual((summary.invocation_duration_ns_total, summary.run_duration_ns), (10, 80))
 
-    def test_executor_exception_and_missing_transition_run_durations(self):
+    def test_executor_exception_and_undeclared_outcome_run_durations(self):
         bug = ValueError('executor failed')
         for flow, adapter, kinds, duration, invocation_total in (
             (simple_flow(), Mock(run=Mock(side_effect=bug)),
              ['run_started', 'state_entered', 'invocation_started', 'run_error'], 30, None),
             (Flow('a', {'a': State('x'), 'done': State(terminal=True)}), executor(),
-             ['run_started', 'state_entered', 'invocation_started', 'invocation_finished', 'run_error'], 40, 10),
+             ['run_started', 'state_entered', 'invocation_started', 'run_error'], 30, None),
         ):
             with self.subTest(kinds=kinds):
                 with self.assertRaises(ExecutionError) as caught:
@@ -122,7 +122,7 @@ class TimingTests(unittest.TestCase):
                 self.assertEqual(summary.invocation_duration_ns_total, invocation_total)
                 self.assertEqual(dict(summary.state_duration_ns), {'a': None})
                 self.assertFalse(summary.completed_normally)
-                self.assertIs(caught.exception.__cause__, bug if invocation_total is None else None)
+                self.assertIs(caught.exception.__cause__, bug if adapter.run.side_effect is bug else None)
 
     def test_unhandled_budget_error_has_run_duration(self):
         flow = Flow('a', {'a': State('x', max_state_visits_per_run=0), 'done': State(terminal=True)})

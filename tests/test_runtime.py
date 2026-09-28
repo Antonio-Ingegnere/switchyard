@@ -100,7 +100,7 @@ class RuntimeTests(unittest.TestCase):
             next_state = "other"
 
         for bad in (None, {"outcome": "success", "next_state": "other"},
-                    ExecutorResult("budget_exceeded"), ExecutorResult("passed"),
+                    ExecutorResult("budget_exceeded"), ExecutorResult(""),
                     ExecutorResult([]), ExtendedResult("success")):
             with self.subTest(result=bad):
                 executor = FakeExecutor(bad)
@@ -110,13 +110,13 @@ class RuntimeTests(unittest.TestCase):
                 self.assertFalse(any(e.kind == "transition_selected" for e in caught.exception.events))
                 self.assertEqual(caught.exception.events[-1].kind, "run_error")
 
-    def test_missing_transition_is_explicit_error(self):
+    def test_undeclared_outcome_is_rejected_before_finished(self):
         executor = FakeExecutor(ExecutorResult("failed"))
-        with self.assertRaisesRegex(ExecutionError, "missing transition: work.failed") as caught:
+        with self.assertRaisesRegex(ExecutionError, "undeclared outcome.*failed") as caught:
             run(WorkUnit("task"), self.simple_flow(), {"fake": executor})
         self.assertEqual(len(executor.calls), 1)
         self.assertEqual([e.kind for e in caught.exception.events], [
-            "run_started", "state_entered", "invocation_started", "invocation_finished", "run_error",
+            "run_started", "state_entered", "invocation_started", "run_error",
         ])
 
     def test_terminal_initial_never_invokes_executor(self):

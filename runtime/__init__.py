@@ -7,7 +7,18 @@ from typing import Mapping, Protocol
 from uuid import uuid4
 
 
+# Legacy adapter vocabulary; not the runtime semantic-outcome contract.
 OUTCOMES = frozenset({"success", "failed", "error", "timeout", "cancelled"})
+
+RESERVED_CONTROL_OUTCOMES = frozenset({'budget_exceeded'})
+
+
+def _valid_outcome_name(value: object) -> bool:
+    return type(value) is str and bool(value) and '\0' not in value
+
+
+def _valid_executor_outcome(value: object) -> bool:
+    return _valid_outcome_name(value) and value not in RESERVED_CONTROL_OUTCOMES
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,7 +216,7 @@ def validate(flow: Flow, executors: Mapping[str, Executor]) -> None:
               or not callable(getattr(executors[state.executor], "run", None))):
             raise FlowValidationError(f"invalid executor reference: {name}")
         for outcome, target in state.on.items():
-            if outcome not in OUTCOMES and outcome != "budget_exceeded":
+            if not _valid_outcome_name(outcome):
                 raise FlowValidationError(f"invalid outcome: {outcome}")
             if not isinstance(target, str) or target not in flow.states:
                 raise FlowValidationError(f"unknown transition target: {target}")
@@ -223,7 +234,7 @@ def validate(flow: Flow, executors: Mapping[str, Executor]) -> None:
     # remaining graph, including unreachable components, with Kahn's algorithm.
     remaining = {
         name: [target for outcome, target in state.on.items()
-               if outcome in OUTCOMES
+               if outcome not in RESERVED_CONTROL_OUTCOMES
                and flow.states[target].max_state_visits_per_run is None]
         for name, state in flow.states.items()
         if state.max_state_visits_per_run is None
@@ -338,8 +349,15 @@ def run(work_unit: WorkUnit, flow: Flow, executors: Mapping[str, Executor],
                  Event("run_error", run_id, current, visit_id, invocation_id), exc)
         del request
         result = getattr(response, "result", None) if type(response) is InvocationResponse else None
-        if type(result) is not ExecutorResult or type(getattr(result, "outcome", None)) is not str or result.outcome not in OUTCOMES:
+        if type(result) is not ExecutorResult or not _valid_outcome_name(getattr(result, "outcome", None)):
             fail("executor returned a malformed result",
+                 Event("run_error", run_id, current, visit_id, invocation_id))
+        if result.outcome in RESERVED_CONTROL_OUTCOMES:
+            fail(f"executor returned a malformed result: reserved control-plane outcome {result.outcome!r}",
+                 Event("run_error", run_id, current, visit_id, invocation_id))
+        if result.outcome not in state.on:
+            declared = sorted(key for key in state.on if key not in RESERVED_CONTROL_OUTCOMES)
+            fail(f"state {current!r} returned undeclared outcome {result.outcome!r}; declared outcomes: {declared!r}",
                  Event("run_error", run_id, current, visit_id, invocation_id))
         output = getattr(response, "diagnostics", False)
         if output is not None and not _valid_payload(output):
@@ -348,9 +366,6 @@ def run(work_unit: WorkUnit, flow: Flow, executors: Mapping[str, Executor],
             pending = DiagnosticInput(output, DiagnosticOrigin(run_id, current, visit_id, invocation_id))
         del response, output
         emit(Event("invocation_finished", run_id, current, visit_id, invocation_id, result.outcome))
-        if result.outcome not in state.on:
-            fail(f"missing transition: {current}.{result.outcome}",
-                 Event("run_error", run_id, current, visit_id, invocation_id, result.outcome))
         target = state.on[result.outcome]
         emit(Event("transition_selected", run_id, current, visit_id, invocation_id, result.outcome, target))
         emit(Event("state_exited", run_id, current, visit_id))

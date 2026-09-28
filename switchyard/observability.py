@@ -7,7 +7,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Callable, Iterable, Iterator, Mapping, TypeVar
 
-from runtime import Event, OUTCOMES, RunContext
+from runtime import Event, RunContext, _valid_executor_outcome
 
 
 class ObservabilityError(ValueError):
@@ -63,7 +63,7 @@ def _validate(event: Event) -> None:
     _check(present in _SHAPES[event.kind], 'invalid fields for event kind')
     _check(event.duration_ns is None or event.kind in _DURATION_KINDS,
            'duration on event without an elapsed interval')
-    _check(event.outcome is None or event.outcome in OUTCOMES, 'unknown outcome')
+    _check(event.outcome is None or _valid_executor_outcome(event.outcome), 'invalid or reserved executor outcome')
     _check(event.trigger_event is None or event.trigger_event == 'budget_exceeded', 'unknown trigger event')
     if event.kind == 'budget_exceeded':
         _check(event.metric == 'max_state_visits_per_run', 'unknown budget metric')

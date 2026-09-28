@@ -180,7 +180,7 @@ class ObservabilityTests(unittest.TestCase):
             Event('run_started', 'r', state='extra'), Event('run_started', 'r', limit=True),
             Event('run_started', 42), Event('state_entered', 'r', state='a'),
             Event('invocation_started', 'r', 'a', 'v'),
-            Event('invocation_finished', 'r', 'a', 'v', 'i', 'invented'),
+            Event('invocation_finished', 'r', 'a', 'v', 'i', 'budget_exceeded'),
             Event('transition_selected', 'r', 'a', target='b', trigger_event='unknown'),
             Event('budget_exceeded', 'r', 'a', metric='unknown', limit=0, observed=0),
             Event('budget_exceeded', 'r', 'a', metric='max_state_visits_per_run', limit=2, observed=1),

@@ -141,5 +141,5 @@ class CliProcessTests(unittest.TestCase):
         self.assertEqual((result.returncode, result.stdout, result.stderr),
                          (3, '', 'switchyard: runtime execution failed\n'))
         self.assertEqual([json.loads(line)['kind'] for line in path.read_text().splitlines()],
-                         ['run_started', 'state_entered', 'invocation_started', 'invocation_finished', 'run_error'])
+                         ['run_started', 'state_entered', 'invocation_started', 'run_error'])
         self.assertNotIn('PRIVATE', path.read_text())

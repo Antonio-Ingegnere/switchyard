@@ -1,0 +1,68 @@
+id: RUNTIME-V2-A
+goal: |
+  Accept executor semantic outcomes exactly when declared by the current state's
+  transitions, retaining reserved control-plane budget refusal and truthful events.
+scope:
+  - runtime/__init__.py
+  - switchyard/observability.py
+  - tests/test_state_outcomes.py
+  - tests/test_runtime.py
+  - tests/test_recording.py
+  - tests/test_timing.py
+  - tests/test_observability.py
+  - tests/test_cli_process.py
+  - docs/protocols/agent-driver.md
+  - docs/plans/v2-002-workflow-compiler.yaml
+  - README.md
+constraints:
+  - No Event fields, executor signatures, v1 loader, provider adapters, budget routing or Adeo changes.
+  - No compiler, escalation implementation, new counters or duration budgets.
+current_contract: |
+  validate restricts transition keys to OUTCOMES plus budget_exceeded. run rejects
+  results outside OUTCOMES, then emits invocation_finished before checking for a
+  transition. Cycle validation also filters edges through OUTCOMES.
+  success/failed/error/timeout/cancelled are all executor-produced, not synthesized
+  by runtime. Command maps zero exit to success, nonzero to failed, spawn OSError
+  to error and subprocess deadline expiry to timeout. Codex/Claude normalize command
+  failed to error. cancelled is permitted but these adapters have no cancellation
+  producer. Escaped executor exceptions abort with ExecutionError/run_error; runtime
+  does not turn them into error, timeout or cancelled. These semantics remain intact.
+proposed_contract: |
+  Transition keys are exact nonempty str values without NUL; no trimming, coercion,
+  case folding or semantic naming restriction. Reserve only budget_exceeded for
+  control-plane transitions. OUTCOMES remains as a legacy adapter vocabulary constant
+  for import compatibility, but no longer controls runtime semantic validation.
+  Validate result/response types, lexical validity, reservation and current-state
+  membership immediately after executor return and before accepting diagnostics or
+  emitting invocation_finished. Undeclared outcomes produce explicit ExecutionError
+  identifying state/outcome and declared semantic keys; emit invocation-scoped run_error
+  without outcome, matching existing malformed-result abort structure. No transition,
+  retry or invocation_finished is emitted for a rejected result. This intentionally
+  replaces the old later missing-transition failure for undeclared legacy outcomes.
+  All semantic edges participate in existing cycle safety analysis. Nonterminal budget
+  refusal targets remain forbidden. Terminal states still execute nothing.
+event_compatibility: |
+  Event schema and JsonlRecorder are unchanged. Valid semantic strings are recorded
+  verbatim. Observability currently imports OUTCOMES and rejects other strings; replace
+  only that whitelist with the same lexical/reservation check. Historical finished
+  outcomes and old run_error-with-outcome records remain readable. Stream validation
+  remains strict, but cannot check state membership without the original flow.
+  V1 YAML intentionally retains its existing accepted vocabulary; direct runtime
+  construction gains semantic outcomes without silently expanding FLOW-001 syntax.
+acceptance:
+  - Arbitrary declared outcomes work and remain local to the executing state.
+  - Undeclared, malformed and reserved executor outcomes fail before transition selection.
+  - Existing technical outcomes work when declared; escaped exceptions still abort.
+  - Semantic outcome events round-trip and project with no Event schema migration.
+  - Semantic cycles cannot bypass existing state-visit budget validation.
+verification:
+  - Focused fake-only state semantic outcome, control-plane spoofing and recording tests.
+  - Existing runtime, v1/v2, observability and delivery tests in complete offline suite.
+non_goals:
+  - RUNTIME-V2-B/C, V2 compiler, provider work or artifact handoff.
+verification_results:
+  focused: "11 state-outcome tests passed."
+  full_offline: "272 tests run: 271 passed, one existing platform skip (21.990 seconds)."
+  regressions: "Includes complete runtime, v1/v2 loaders, observability, recording, diagnostics, timing, CLI and delivery tests."
+  error_boundary: "Updated legacy missing-transition expectations to immediate rejection; historical persisted error records remain readable."
+  protected_scope: "Event fields, recorder, executors, v1 loader, v2 compiler absence and terminal-only budget routing preserved; Adeo untouched."

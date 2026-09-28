@@ -1,6 +1,6 @@
 id: V2-002
 status: blocked_pending_runtime_prerequisites
-updated_by: V2-001A
+updated_by: RUNTIME-V2-A
 goal: |
   Compile corrected v2 bundles to existing runtime plans after generic outcome,
   budget-routing and exact local/run accounting prerequisites are implemented.
@@ -60,10 +60,11 @@ removed_requirements:
   - No provider-specific budget semantics.
 prerequisites:
   RUNTIME-V2-A: |
-    State-declared outcomes: validate executor results against the current state's
-    declared outcomes, retaining success/failed/error/timeout/cancelled compatibility.
-    Current OUTCOMES rejects ready and inconclusive both as transition labels and
-    returned results. budget_exceeded must remain reserved for the control plane.
+    Implemented: current-state-declared outcomes replace the global runtime whitelist.
+    Exact nonempty strings without NUL are accepted only when declared by the state;
+    budget_exceeded remains reserved. Existing technical adapters/v1 YAML retain their
+    behavior. Event fields unchanged; historical reader accepts valid semantic strings.
+    Undeclared results fail before invocation_finished. No compiler is implemented.
   RUNTIME-V2-B: |
     Permit explicitly configured nonterminal budget-refusal targets with generic
     cycle safety. Current validate rejects them with 'budget target must be terminal'.
@@ -97,7 +98,7 @@ verification:
   - Existing full offline suite; compiler tests wait for prerequisites A/B/C.
 non_goals:
   - Compiler or prerequisite implementation, duration budgets, role counters, artifacts or Adeo migration.
-historical_audit_evidence:
+historical_audit_evidence_before_runtime_v2_a:
   - "Nonterminal budget target -> FlowValidationError: budget target must be terminal: a"
   - "inconclusive transition -> FlowValidationError: invalid outcome: inconclusive"
   - "inconclusive executor response -> ExecutionError: executor returned a malformed result"
