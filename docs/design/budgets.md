@@ -60,16 +60,24 @@ state: fix
 
 The state machine decides what happens next.
 
-Current supported semantics (RUNTIME-002): `budget_exceeded` may transition
-only to a terminal state. The target name does not determine whether it is terminal.
+Current supported semantics (RUNTIME-V2-B): `budget_exceeded` may target a
+terminal or executable state. The source must have `max_state_visits_per_run`;
+all ordinary target and executor validation still applies.
 
-```text
-budget_exceeded -> human   # human must be terminal
-budget_exceeded -> failed  # failed must be terminal
-```
+Admission is checked before allocating a visit or invocation ID. A refused visit
+emits `budget_exceeded` (metric, limit, observed), then `transition_selected`
+(target, trigger_event). Neither has a visit/invocation ID or duration. The target
+then undergoes ordinary admission; an executable target emits normal state and
+invocation events. If it also refuses, its own handler applies. A missing handler
+retains the existing `ExecutionError`/`run_error` behavior. Refusal clears pending
+diagnostics, and recorder failures retain their observed-before-persisted boundary.
 
-`fallback_agent` and all other nonterminal budget transitions are future extensions
-and are not currently supported. Flow validation rejects them.
+Cycle validation checks paths that do not consume finite admission allowances:
+bounded states contribute refusal edges, unlimited states contribute semantic
+edges. This graph must be acyclic, including unreachable components. Thus pure
+refusal loops and mixed refusal/unlimited-execution loops are rejected, while
+cycles requiring bounded admissions remain valid. No new counters are introduced.
+Executors still cannot return `budget_exceeded`.
 
 ## No hidden retry
 

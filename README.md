@@ -969,3 +969,13 @@ Undeclared results raise `ExecutionError` immediately, before `invocation_finish
 valid results appear unchanged in events and JSONL projections. Event fields, v1 YAML,
 budget routing and executors are unchanged. See the [executor contract](docs/protocols/agent-driver.md).
 This is a runtime capability only, not a v2 compiler or escalation implementation.
+
+## Executable budget fallbacks (RUNTIME-V2-B)
+
+A bounded runtime state may route `budget_exceeded` to a terminal or executable
+state. Refusal emits budget evidence and a control-plane transition without entering
+or invoking the refused state. The target receives ordinary admission checks and,
+if refused, uses its own budget route. Validation rejects cycles that can continue
+without consuming bounded admissions, including pure refusal loops. Existing
+terminal routes retain their behavior; no new counters or compiler are introduced.
+See [budget semantics](docs/design/budgets.md).

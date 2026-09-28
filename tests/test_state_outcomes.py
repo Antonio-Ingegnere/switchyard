@@ -95,11 +95,10 @@ class StateOutcomeTests(unittest.TestCase):
         self.assertEqual(result.terminal_state, 'DONE')
         self.assertEqual(sum(e.kind == 'budget_exceeded' for e in result.events), 1)
 
-    def test_nonterminal_budget_routing_still_rejected(self):
+    def test_nonterminal_budget_target_with_semantic_outcomes_validates(self):
         flow = Flow('A', {'A': State('x', {'budget_exceeded': 'B'}, max_state_visits_per_run=1),
                           'B': State('x', {'ready': 'DONE'}), 'DONE': State(terminal=True)})
-        with self.assertRaisesRegex(FlowValidationError, 'budget target must be terminal'):
-            validate(flow, {'x': Fake('ready')})
+        validate(flow, {'x': Fake('ready')})
 
     def test_v2_semantic_chain_recording_and_projection(self):
         flow = Flow('TRIAGE', {

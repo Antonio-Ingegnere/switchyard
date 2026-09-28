@@ -116,7 +116,6 @@ class StateVisitBudgetTests(unittest.TestCase):
         cases.extend([
             Flow("done", {"done": State(terminal=True, max_state_visits_per_run=0)}),
             Flow("a", {"a": State("fake", {"budget_exceeded": "done"}), "done": done}),
-            Flow("a", {"a": State("fake", {"budget_exceeded": "b"}, max_state_visits_per_run=1), "b": State("fake"), "done": done}),
             Flow("a", {"a": State("fake", {"budget_exceeded": "absent"}, max_state_visits_per_run=1), "done": done}),
             Flow("a", {"a": State("fake", {"budget_exceeded": "a"}, max_state_visits_per_run=1), "done": done}),
             # Even unreachable malformed state definitions must be rejected.

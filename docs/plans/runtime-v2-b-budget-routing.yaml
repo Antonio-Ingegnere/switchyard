@@ -1,0 +1,68 @@
+id: RUNTIME-V2-B
+goal: |
+  Allow explicit control-plane budget refusal to route to an executable state,
+  preserving ordinary admission and preventing unbounded refusal paths.
+scope:
+  - runtime/__init__.py (flow validation only)
+  - tests/test_budget_routing.py
+  - tests/test_state_outcomes.py
+  - tests/test_state_visit_budget.py
+  - docs/design/budgets.md
+  - docs/plans/v2-002-workflow-compiler.yaml
+  - README.md
+constraints:
+  - No Event, Executor, WorkUnit, RunContext, recorder, observability or loader changes.
+  - No accounting additions, compiler, provider concepts, deadlines or Adeo changes.
+current_behavior: |
+  Inspected runtime.validate and runtime.run directly. Each loop checks the selected
+  state's admitted count against max_state_visits_per_run before diagnostics, visit
+  allocation or invocation. Refusal clears pending diagnostics, emits budget_exceeded
+  with state, metric, limit and observed, then transition_selected with target and
+  trigger_event=budget_exceeded. Neither event has visit/invocation IDs or outcome.
+  The refused state receives no state_entered or state_exited, no visit ID, no
+  invocation, and no duration interval. Missing handler emits run_error and raises
+  ExecutionError. With a handler, current becomes its target and the same loop repeats.
+  Existing validation requires a bounded source and a terminal target; terminals
+  cannot have limits, so target refusal was previously impossible in a valid flow.
+  Terminal routing emits state_entered, state_exited, run_finished normally.
+  Existing cycle checking removes bounded states and ignores budget edges.
+proposed_contract: |
+  Remove only the terminal-target restriction; preserve all ordinary target, state,
+  executor and handler validation. The existing run loop already admits any selected
+  target normally. If B refuses, emit B's evidence and use B's own handler; if absent,
+  retain the existing missing-transition failure. No fallback reset or privileged
+  admission, diagnostic handoff, timing or recording path is introduced.
+cycle_safety: |
+  Check the entire graph, including unreachable components, for cycles that can
+  continue without bounded admission. For bounded states retain only their budget
+  refusal edge; for unlimited states retain semantic edges. Remove bounded states'
+  semantic outgoing edges because traversing them consumes a finite admission.
+  Kahn's algorithm must find this residual graph acyclic. This rejects both pure
+  refusal cycles and mixed refusal/unlimited-execution cycles. Every remaining
+  original cycle must consume a finite state allowance, so no internal iteration
+  counter or new runtime accounting is necessary. Bounded semantic loops remain valid.
+event_compatibility: |
+  For executable fallback the sequence is budget_exceeded, transition_selected,
+  state_entered, invocation_started, invocation_finished, transition_selected,
+  state_exited, then the selected next state's events. Consecutive refusals each
+  emit their own first two events without IDs. Existing Event fields already express
+  these facts; no schema change. Refusal has no duration; fallback has ordinary timing.
+  Observed-before-persisted behavior and recorder failure propagation remain intact.
+acceptance:
+  - Real zero-limit admission refusal enters and invokes executable fallback normally.
+  - Chained refusals use each state's own handler without calls or fabricated visit IDs.
+  - Previously consumed fallback allowance remains consumed; missing handler fails explicitly.
+  - Pure and mixed refusal cycles are rejected before executor calls.
+  - Terminal behavior, semantic outcomes, diagnostics, timing and recorder boundaries remain intact.
+  - Executor budget_exceeded spoofing remains rejected.
+verification:
+  - Focused deterministic budget-routing tests with fake executors and clocks.
+  - Full offline suite including runtime, RUNTIME-V2-A, v1/v2, observability and delivery.
+non_goals:
+  - RUNTIME-V2-C, V2 compiler, escalation policy, counters, deadlines or Adeo work.
+verification_results:
+  focused: "11 budget-routing tests passed; 11 state-outcome and 10 existing state-budget tests passed."
+  full_offline: "283 tests run: 282 passed, one existing platform skip (23.320 seconds)."
+  command: ".venv/bin/python -m unittest discover -s tests -v"
+  regressions: "Includes runtime, RUNTIME-V2-A, V1/V2 loaders, observability, diagnostics, timing, CLI and delivery."
+  protected_scope: "Only runtime validation changed; run loop, Event, APIs, recorder and accounting unchanged. No compiler or Adeo changes."

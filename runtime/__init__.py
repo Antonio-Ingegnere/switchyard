@@ -227,17 +227,14 @@ def validate(flow: Flow, executors: Mapping[str, Executor]) -> None:
         if "budget_exceeded" in state.on:
             if state.max_state_visits_per_run is None:
                 raise FlowValidationError(f"budget handler on unlimited state: {name}")
-            if not flow.states[state.on["budget_exceeded"]].terminal:
-                raise FlowValidationError(f"budget target must be terminal: {name}")
 
-    # Remove bounded states and incident outcome edges, then check the entire
-    # remaining graph, including unreachable components, with Kahn's algorithm.
+    # A cycle must consume a finite admission allowance. Bounded semantic edges
+    # consume one; refusal edges do not. Check the residual graph (including
+    # unreachable components) for pure refusal and mixed unlimited-work cycles.
     remaining = {
-        name: [target for outcome, target in state.on.items()
-               if outcome not in RESERVED_CONTROL_OUTCOMES
-               and flow.states[target].max_state_visits_per_run is None]
+        name: ([state.on["budget_exceeded"]] if "budget_exceeded" in state.on else [])
+        if state.max_state_visits_per_run is not None else list(state.on.values())
         for name, state in flow.states.items()
-        if state.max_state_visits_per_run is None
     }
     incoming = dict.fromkeys(remaining, 0)
     for targets in remaining.values():
@@ -253,7 +250,7 @@ def validate(flow: Flow, executors: Mapping[str, Executor]) -> None:
             if incoming[target] == 0:
                 ready.append(target)
     if visited != len(remaining):
-        raise FlowValidationError("cycle without a bounded state")
+        raise FlowValidationError("cycle without a bounded state admission (including budget refusal routes)")
 
 
 def run(work_unit: WorkUnit, flow: Flow, executors: Mapping[str, Executor],

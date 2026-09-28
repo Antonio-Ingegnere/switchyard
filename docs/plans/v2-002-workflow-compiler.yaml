@@ -1,6 +1,6 @@
 id: V2-002
 status: blocked_pending_runtime_prerequisites
-updated_by: RUNTIME-V2-A
+updated_by: RUNTIME-V2-B
 goal: |
   Compile corrected v2 bundles to existing runtime plans after generic outcome,
   budget-routing and exact local/run accounting prerequisites are implemented.
@@ -38,14 +38,14 @@ budget_capability_mapping:
     reason: |
       Capping each logical entry rung with State.max_state_visits_per_run counts
       logical entries if every normal transition targets rung zero. Escalation
-      hops must not increment this logical counter. Refusal routing still needs B.
+      hops must not increment this logical counter. B now supplies refusal routing.
   - field: rung.max_invocations
     classification: DERIVABLE THROUGH COMPILED GRAPH
     reason: |
       A dedicated runtime state per logical state/rung invokes exactly once per
       admitted visit. Its visit cap can represent the rung count; reuse of a role
-      must produce separate rung states/counters. B is needed for refusal-to-rung
-      routing and C for combining independent logical-state and rung limits.
+      must produce separate rung states/counters. B supplies refusal-to-rung routing;
+      C is still needed to combine independent logical-state and rung limits.
   - field: run.max_invocations
     classification: NOT CURRENTLY SUPPORTED
     reason: Runtime invocation counter allocates IDs, but does not enforce run admission caps.
@@ -66,9 +66,10 @@ prerequisites:
     behavior. Event fields unchanged; historical reader accepts valid semantic strings.
     Undeclared results fail before invocation_finished. No compiler is implemented.
   RUNTIME-V2-B: |
-    Permit explicitly configured nonterminal budget-refusal targets with generic
-    cycle safety. Current validate rejects them with 'budget target must be terminal'.
-    No executor may synthesize refusal as an outcome; preserve truthful event order.
+    Implemented: explicit budget refusal may target an executable state. Targets
+    undergo ordinary admission and use their own refusal routes. Validation rejects
+    cycles that bypass bounded admission, including pure refusal and mixed cycles.
+    No executor may synthesize refusal. Event order/schema and accounting unchanged.
   RUNTIME-V2-C: |
     Exact run/local invocation and visit accounting for state max_invocations,
     state max_state_visits, rung max_invocations, run max_invocations and optional
