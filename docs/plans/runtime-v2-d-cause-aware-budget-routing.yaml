@@ -1,0 +1,72 @@
+id: RUNTIME-V2-D
+goal: |
+  Route a budget refusal by its exact source while preserving legacy routes and
+  all accounting/admission boundaries.
+scope:
+  - runtime/__init__.py
+  - switchyard/observability.py
+  - tests/test_cause_budget_routing.py
+  - docs/design/budgets.md
+  - docs/plans/v2-002-workflow-compiler.yaml
+  - README.md
+constraints:
+  - No new counters, Event fields/kinds, executor contracts, loaders, compiler or Adeo changes.
+existing_behavior: |
+  Legacy route is State.on['budget_exceeded']. All budget checks precede state_entered;
+  contrary to the request's conditional admitted-visit example, invocation refusal in
+  RUNTIME-V2-C admits no visit and allocates no IDs. Preserve that exact boundary.
+  budget_exceeded has metric/limit/consumed observed and target=None; the following
+  transition_selected carries the target. No route emits run_error/ExecutionError.
+api: |
+  InvocationBudgetScope(name, limit, on_exceeded=None).
+  State.state_visit_budget_exceeded: str | None = None.
+  Flow.max_invocations_exceeded: str | None = None.
+  Add fields at the end to preserve positional compatibility. Validate target types
+  and existence with the whole Flow. Run route requires run cap and terminal target;
+  visit route requires visit cap and nonterminal source. Scope declarations must agree
+  on both limit and route, including None, even in unreachable states.
+internal_representation: |
+  Frozen internal _BudgetRefusal(metric, limit, observed, on_exceeded) captures the
+  first failed check and the optional specific route directly from its typed budget
+  configuration. No metric parsing determines control flow; scope identity selects
+  its counter/configuration directly. Metric is only serialized evidence.
+precedence: |
+  Preserve visit, run, then declared scope check order. For the selected cause use
+  its specific route, otherwise the state's legacy route; otherwise retain failure.
+  Checks consume nothing on refusal. Target always undergoes normal admission.
+  Run-specific routes are terminal; absent run-specific route preserves legacy behavior.
+cycle_safety: |
+  Include all cause-specific and legacy refusal edges in the existing residual graph,
+  including unreachable components and conservatively shadowed routes. Remove only
+  semantic edges from visit-bounded sources as before. No cycle rule is relaxed.
+events: |
+  Keep Event fields/kinds and metric identities unchanged. Specific-route refusal sets
+  existing budget_exceeded.target to the chosen target; transition_selected agrees.
+  Legacy fallback retains target=None on budget event for exact historical compatibility.
+  Reader accepts both shapes and rejects conflicting recorded budget/transition targets.
+  Refused work receives no IDs, entry, invocation or duration; ordering and persistence
+  failure boundaries remain budget_exceeded then transition_selected then target admission.
+acceptance:
+  - One state independently routes visit, run and two distinct scope refusals.
+  - Entry refusal stops work while local scope refusal can enter executable fallback.
+  - Shared scope route consistency and terminal-only run targets validated statically.
+  - First-refusal precedence, atomic accounting, legacy behavior and spoof rejection preserved.
+  - Refusal cycles remain invalid and new evidence round-trips through historical reader.
+verification:
+  - Focused deterministic direct-runtime tests with fake executors.
+  - Full offline runtime A/B/C, V1/V2, observability and delivery regressions.
+non_goals:
+  - Compiler, context construction, provider calls or new budget dimensions.
+verification_results:
+  focused: "14 cause-routing tests passed, including exact original blocker regression."
+  full_offline: "319 tests run: 318 passed, one existing platform skip (21.599 seconds)."
+  command: ".venv/bin/python -m unittest discover -s tests -v"
+  regressions: "Complete runtime A/B/C, V1/V2 loaders, observability, recorder, timing, diagnostics, CLI and delivery."
+  routing_status: "All required cause-routing distinctions supported exactly; no accounting changes."
+  remaining_compiler_gap: |
+    Separate fake-runtime probe showed that repeated entry-scope refusals can execute
+    alternate states without incrementing entry visits. Three work-bearing logical
+    entries occurred with only one admitted entry visit despite intended logical cap 2.
+    Exact logical-entry accounting therefore remains unresolved. Evidence is in the
+    compiler audit; no admission changes or compiler workaround implemented here.
+  protected_scope: "No Event fields, executor contracts, loaders, counters, compiler or Adeo changes."

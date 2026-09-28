@@ -113,6 +113,7 @@ class InvocationBudgetScope:
 
     name: str
     limit: int
+    on_exceeded: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,6 +124,7 @@ class State:
     max_state_visits_per_run: int | None = None
     diagnostics_from_previous_max_bytes: int | None = None
     invocation_budgets: tuple[InvocationBudgetScope, ...] = ()
+    state_visit_budget_exceeded: str | None = None
 
     def __post_init__(self):
         object.__setattr__(self, "on", MappingProxyType(dict(self.on)))
@@ -134,6 +136,7 @@ class Flow:
     initial: str
     states: Mapping[str, State]
     max_invocations_per_run: int | None = None
+    max_invocations_exceeded: str | None = None
 
     def __post_init__(self):
         object.__setattr__(self, "states", MappingProxyType(dict(self.states)))
@@ -205,6 +208,19 @@ class ExecutionError(RuntimeError):
         self.recorder_error: Exception | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _BudgetRefusal:
+    metric: str
+    limit: int
+    observed: int
+    on_exceeded: str | None
+
+
+def _validate_budget_target(target: str | None, flow: Flow, label: str) -> None:
+    if target is not None and (type(target) is not str or target not in flow.states):
+        raise FlowValidationError(f"invalid {label} target: {target!r}")
+
+
 def validate(flow: Flow, executors: Mapping[str, Executor]) -> None:
     if not isinstance(flow.initial, str) or flow.initial not in flow.states:
         raise FlowValidationError("initial must reference an existing state")
@@ -213,13 +229,19 @@ def validate(flow: Flow, executors: Mapping[str, Executor]) -> None:
     run_limit = flow.max_invocations_per_run
     if run_limit is not None and (type(run_limit) is not int or run_limit < 0):
         raise FlowValidationError("invalid max_invocations_per_run")
-    scope_limits: dict[str, int] = {}
+    _validate_budget_target(flow.max_invocations_exceeded, flow, "run invocation budget")
+    if flow.max_invocations_exceeded is not None and run_limit is None:
+        raise FlowValidationError("run invocation budget route without limit")
+    scope_declarations: dict[str, InvocationBudgetScope] = {}
     for name, state in flow.states.items():
         if type(state) is not State or type(state.terminal) is not bool:
             raise FlowValidationError(f"invalid state definition: {name}")
         limit = state.max_state_visits_per_run
         if limit is not None and (type(limit) is not int or limit < 0):
             raise FlowValidationError(f"invalid max_state_visits_per_run: {name}")
+        _validate_budget_target(state.state_visit_budget_exceeded, flow, "state visit budget")
+        if state.state_visit_budget_exceeded is not None and limit is None:
+            raise FlowValidationError(f"state visit budget route without limit: {name}")
         seen_scopes: set[str] = set()
         for scope in state.invocation_budgets:
             if (type(scope) is not InvocationBudgetScope or not _valid_outcome_name(scope.name)
@@ -228,9 +250,10 @@ def validate(flow: Flow, executors: Mapping[str, Executor]) -> None:
             if scope.name in seen_scopes:
                 raise FlowValidationError(f"duplicate invocation budget scope: {name}: {scope.name!r}")
             seen_scopes.add(scope.name)
-            if scope.name in scope_limits and scope_limits[scope.name] != scope.limit:
+            _validate_budget_target(scope.on_exceeded, flow, "invocation scope budget")
+            if scope.name in scope_declarations and scope_declarations[scope.name] != scope:
                 raise FlowValidationError(f"conflicting invocation budget scope: {scope.name!r}")
-            scope_limits[scope.name] = scope.limit
+            scope_declarations[scope.name] = scope
         input_limit = state.diagnostics_from_previous_max_bytes
         if input_limit is not None and (type(input_limit) is not int or not 0 <= input_limit <= MAX_DIAGNOSTIC_BYTES):
             raise FlowValidationError(f"invalid diagnostic input limit: {name}")
@@ -249,6 +272,9 @@ def validate(flow: Flow, executors: Mapping[str, Executor]) -> None:
     if not any(state.terminal for state in flow.states.values()):
         raise FlowValidationError("flow must contain a terminal state")
 
+    if flow.max_invocations_exceeded is not None and not flow.states[flow.max_invocations_exceeded].terminal:
+        raise FlowValidationError("run invocation budget target must be terminal")
+
     for name, state in flow.states.items():
         if "budget_exceeded" in state.on:
             if state.max_state_visits_per_run is None and not state.invocation_budgets and run_limit is None:
@@ -257,11 +283,20 @@ def validate(flow: Flow, executors: Mapping[str, Executor]) -> None:
     # A cycle must consume a finite admission allowance. Bounded semantic edges
     # consume one; refusal edges do not. Check the residual graph (including
     # unreachable components) for pure refusal and mixed unlimited-work cycles.
-    remaining = {
-        name: ([state.on["budget_exceeded"]] if "budget_exceeded" in state.on else [])
-        if state.max_state_visits_per_run is not None else list(state.on.values())
-        for name, state in flow.states.items()
-    }
+    remaining = {}
+    for name, state in flow.states.items():
+        targets = set()
+        if state.max_state_visits_per_run is None:
+            targets.update(state.on.values())
+        elif "budget_exceeded" in state.on:
+            targets.add(state.on["budget_exceeded"])
+        if state.state_visit_budget_exceeded is not None:
+            targets.add(state.state_visit_budget_exceeded)
+        targets.update(scope.on_exceeded for scope in state.invocation_budgets
+                       if scope.on_exceeded is not None)
+        if not state.terminal and flow.max_invocations_exceeded is not None:
+            targets.add(flow.max_invocations_exceeded)
+        remaining[name] = targets
     incoming = dict.fromkeys(remaining, 0)
     for targets in remaining.values():
         for target in targets:
@@ -328,32 +363,36 @@ def run(work_unit: WorkUnit, flow: Flow, executors: Mapping[str, Executor],
         state = flow.states[current]
         limit = state.max_state_visits_per_run
         observed = admitted_visits[current]
-        # Check every applicable allowance before admitting a visit or invocation.
-        metric = "max_state_visits_per_run"
-        refusal = limit is not None and observed >= limit
-        if not refusal and not state.terminal:
+        # Capture the first refusal and its route directly from the budget source.
+        refusal = None
+        if limit is not None and observed >= limit:
+            refusal = _BudgetRefusal("max_state_visits_per_run", limit, observed,
+                                     state.state_visit_budget_exceeded)
+        if refusal is None and not state.terminal:
             limit = flow.max_invocations_per_run
-            observed = invocation
-            metric = "max_invocations_per_run"
-            refusal = limit is not None and observed >= limit
-            if not refusal:
+            if limit is not None and invocation >= limit:
+                refusal = _BudgetRefusal("max_invocations_per_run", limit, invocation,
+                                         flow.max_invocations_exceeded)
+            else:
                 for scope in state.invocation_budgets:
-                    limit, observed = scope.limit, scope_usage[scope.name]
-                    if observed >= limit:
-                        metric = f"invocation_scope:{scope.name}"
-                        refusal = True
+                    observed = scope_usage[scope.name]
+                    if observed >= scope.limit:
+                        refusal = _BudgetRefusal(f"invocation_scope:{scope.name}",
+                                                 scope.limit, observed, scope.on_exceeded)
                         break
         # A selected target is not an entered state. Refusal allocates no IDs.
-        if refusal:
+        if refusal is not None:
             pending = None
+            target = refusal.on_exceeded
+            if target is None:
+                target = state.on.get("budget_exceeded")
             emit(Event(
-                "budget_exceeded", run_id, current,
-                metric=metric, limit=limit, observed=observed,
+                "budget_exceeded", run_id, current, target=refusal.on_exceeded,
+                metric=refusal.metric, limit=refusal.limit, observed=refusal.observed,
             ))
-            if "budget_exceeded" not in state.on:
+            if target is None:
                 fail(f"missing transition: {current}.budget_exceeded",
                      Event("run_error", run_id, current, trigger_event="budget_exceeded"))
-            target = state.on["budget_exceeded"]
             emit(Event(
                 "transition_selected", run_id, current,
                 target=target, trigger_event="budget_exceeded",

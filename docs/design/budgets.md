@@ -134,3 +134,42 @@ specific metrics while retaining strict rejection of unknown metrics.
 Invocation caps do not relax existing cycle rules. Executable cycles still require
 visit-bounded admission; all refusal edges participate in cycle safety checking.
 Whole-run state-visit caps are not implemented. The V2 compiler remains deferred.
+
+## Cause-aware refusal routes (RUNTIME-V2-D)
+
+Three optional fields select routes independently:
+
+- `Flow.max_invocations_exceeded`: target for the run invocation cap; requires a
+  configured cap and an existing terminal target.
+- `State.state_visit_budget_exceeded`: target for that state's visit cap; requires
+  a configured cap and an existing terminal or executable target.
+- `InvocationBudgetScope.on_exceeded`: target for that named scope; may be executable
+  or terminal. Every declaration of the same scope must agree on both limit and route,
+  including the absence of a route.
+
+The first failed check still wins: visits, run invocations, then scopes in declaration
+order. Its specific route takes precedence; absent one, `State.on['budget_exceeded']`
+remains the fallback. If neither exists, the existing missing-transition error applies.
+Internal immutable refusal values capture the selected configuration directly. Metric
+strings are serialized evidence, never parsed to select a route.
+
+All checks still precede state admission. In particular, an invocation-scope refusal
+allocates no visit ID and consumes no visit or invocation allowance. This preserves
+RUNTIME-V2-C; it does not create a partially admitted visit. Targets undergo normal
+independent admission. No new counters or accounting rules are introduced.
+
+Specific-route `budget_exceeded` events populate the existing `target` field; the
+following `transition_selected.target` agrees. Legacy fallback retains its historical
+budget event with `target=None`, followed by the target-bearing transition. Event
+fields/kinds, metrics, consumed `observed` values and recorder failure boundaries are
+unchanged. The reader accepts both shapes and rejects disagreement between recorded
+refusal and transition targets. Older reader versions may reject the new populated
+field; historical logs remain readable with the updated reader.
+
+Cycle validation includes all specific and legacy refusal edges, even conservatively
+shadowed routes, while retaining existing visit-bound semantic-cycle rules. Run-specific
+routes are terminal. Scope and visit routes cannot introduce unbounded refusal cycles.
+
+This closes the distinction between an entry refusal's route and a local invocation
+scope's route. It does not make runtime state visits independent of invocation admission:
+a future compiler must still account for that distinction when modeling logical entries.

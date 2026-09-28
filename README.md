@@ -1002,3 +1002,15 @@ Admission checks all applicable counters before consuming any. Failures after ad
 still consume capacity, while refusals invoke nothing and use ordinary budget routing.
 See [exact admission and metric semantics](docs/design/budgets.md). Existing callers
 need no changes. Whole-run visit caps and the V2 compiler remain unimplemented.
+
+## Cause-aware budget routes (RUNTIME-V2-D)
+
+Use `Flow.max_invocations_exceeded` for a terminal run-cap route,
+`State.state_visit_budget_exceeded` for a state-visit route, and
+`InvocationBudgetScope(name, limit, on_exceeded=...)` for a named-scope route.
+Specific routes override the existing `State.on["budget_exceeded"]` fallback only
+for their own cause. Shared scopes must agree on limit and route. Check ordering,
+atomic admission and legacy fallback behavior are unchanged.
+
+See [budget routing and event compatibility](docs/design/budgets.md). No V2 compiler
+or independent logical-entry accounting is implemented by this capability.

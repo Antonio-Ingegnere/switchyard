@@ -30,7 +30,8 @@ _SHAPES = {
     'invocation_finished': [_INVOCATION | {'outcome'}],
     'transition_selected': [_INVOCATION | {'outcome', 'target'},
                             {'state', 'target', 'trigger_event'}],
-    'budget_exceeded': [{'state', 'metric', 'limit', 'observed'}],
+    'budget_exceeded': [{'state', 'metric', 'limit', 'observed'},
+                        {'state', 'metric', 'limit', 'observed', 'target'}],
     'run_finished': [{'state'}],
     'run_error': [{'state'}, {'state', 'trigger_event'}, _INVOCATION,
                   _INVOCATION | {'outcome'}],
@@ -145,6 +146,7 @@ class _RunShape:
         self.outcome = None
         self.transitioned = False
         self.budget = None
+        self.budget_target = None
         self.closed_terminal = None
         self.context = (None, None)
 
@@ -192,10 +194,13 @@ class _RunShape:
         elif kind == 'budget_exceeded':
             _check(self.active is None and self.budget is None, 'budget event during active visit or pending budget')
             self.budget = event.state
+            self.budget_target = event.target
             self.closed_terminal = None
         elif kind == 'transition_selected':
             _check(self.budget == event.state, 'budget transition without budget event')
-            self.budget = None
+            _check(self.budget_target is None or self.budget_target == event.target,
+                   'budget transition target disagrees with refusal')
+            self.budget = self.budget_target = None
         elif kind == 'run_finished':
             _check(self.active is None and self.budget is None
                    and self.closed_terminal == event.state, 'completion without closed terminal visit')
