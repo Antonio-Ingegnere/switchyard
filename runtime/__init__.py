@@ -352,6 +352,26 @@ def run(work_unit: WorkUnit, flow: Flow, executors: Mapping[str, Executor],
         emit(event, failure)
         raise failure from cause
 
+    def route_refusal(refusal: _BudgetRefusal, visit_id: str | None = None) -> str:
+        nonlocal pending
+        pending = None
+        target = refusal.on_exceeded
+        if target is None:
+            target = state.on.get("budget_exceeded")
+        emit(Event("budget_exceeded", run_id, current, visit_id,
+                   target=refusal.on_exceeded, metric=refusal.metric,
+                   limit=refusal.limit, observed=refusal.observed))
+        if target is None:
+            if visit_id is not None:
+                emit(Event("state_exited", run_id, current, visit_id))
+            fail(f"missing transition: {current}.budget_exceeded",
+                 Event("run_error", run_id, current, trigger_event="budget_exceeded"))
+        emit(Event("transition_selected", run_id, current, visit_id,
+                   target=target, trigger_event="budget_exceeded"))
+        if visit_id is not None:
+            emit(Event("state_exited", run_id, current, visit_id))
+        return target
+
     emit(Event("run_started", run_id))
     current = flow.initial
     visit = 0
@@ -363,41 +383,9 @@ def run(work_unit: WorkUnit, flow: Flow, executors: Mapping[str, Executor],
         state = flow.states[current]
         limit = state.max_state_visits_per_run
         observed = admitted_visits[current]
-        # Capture the first refusal and its route directly from the budget source.
-        refusal = None
         if limit is not None and observed >= limit:
-            refusal = _BudgetRefusal("max_state_visits_per_run", limit, observed,
-                                     state.state_visit_budget_exceeded)
-        if refusal is None and not state.terminal:
-            limit = flow.max_invocations_per_run
-            if limit is not None and invocation >= limit:
-                refusal = _BudgetRefusal("max_invocations_per_run", limit, invocation,
-                                         flow.max_invocations_exceeded)
-            else:
-                for scope in state.invocation_budgets:
-                    observed = scope_usage[scope.name]
-                    if observed >= scope.limit:
-                        refusal = _BudgetRefusal(f"invocation_scope:{scope.name}",
-                                                 scope.limit, observed, scope.on_exceeded)
-                        break
-        # A selected target is not an entered state. Refusal allocates no IDs.
-        if refusal is not None:
-            pending = None
-            target = refusal.on_exceeded
-            if target is None:
-                target = state.on.get("budget_exceeded")
-            emit(Event(
-                "budget_exceeded", run_id, current, target=refusal.on_exceeded,
-                metric=refusal.metric, limit=refusal.limit, observed=refusal.observed,
-            ))
-            if target is None:
-                fail(f"missing transition: {current}.budget_exceeded",
-                     Event("run_error", run_id, current, trigger_event="budget_exceeded"))
-            emit(Event(
-                "transition_selected", run_id, current,
-                target=target, trigger_event="budget_exceeded",
-            ))
-            current = target
+            current = route_refusal(_BudgetRefusal("max_state_visits_per_run", limit, observed,
+                                                   state.state_visit_budget_exceeded))
             continue
         input_limit = state.diagnostics_from_previous_max_bytes
         if input_limit is None or state.terminal:
@@ -405,7 +393,7 @@ def run(work_unit: WorkUnit, flow: Flow, executors: Mapping[str, Executor],
         elif pending is not None and len(pending.payload.utf8) > input_limit:
             pending = None
             fail("diagnostic input exceeds target byte limit", Event("run_error", run_id, current))
-        # Commit only after both budget and diagnostic checks pass.
+        # Commit the visit after visit-limit and diagnostic admission checks.
         admitted_visits[current] += 1
         visit += 1
         visit_id = f"{run_id}:visit:{visit}"
@@ -415,8 +403,25 @@ def run(work_unit: WorkUnit, flow: Flow, executors: Mapping[str, Executor],
             emit(Event("run_finished", run_id, current))
             return RunResult(current, tuple(events))
 
+        # Invocation admission is independent of the already committed visit.
+        refusal = None
+        limit = flow.max_invocations_per_run
+        if limit is not None and invocation >= limit:
+            refusal = _BudgetRefusal("max_invocations_per_run", limit, invocation,
+                                     flow.max_invocations_exceeded)
+        else:
+            for scope in state.invocation_budgets:
+                observed = scope_usage[scope.name]
+                if observed >= scope.limit:
+                    refusal = _BudgetRefusal(f"invocation_scope:{scope.name}",
+                                             scope.limit, observed, scope.on_exceeded)
+                    break
+        if refusal is not None:
+            current = route_refusal(refusal, visit_id)
+            continue
+
         # Invocation capacity is committed before invocation_started, never rolled
-        # back for executor or recorder failure. All checks preceded visit admission.
+        # back for executor or recorder failure. The visit is already committed.
         invocation += 1
         for scope in state.invocation_budgets:
             scope_usage[scope.name] += 1

@@ -48,7 +48,7 @@ class InvocationAccountingTests(unittest.TestCase):
         self.assertEqual(len(fake.requests), 2)
         self.assertEqual(refusals(result.events), [('C', 'max_invocations_per_run', 2, 2),
                                                    ('D', 'max_invocations_per_run', 2, 2)])
-        self.assertEqual([e.state for e in result.events if e.kind == 'state_entered'], ['A', 'B', 'DONE'])
+        self.assertEqual([e.state for e in result.events if e.kind == 'state_entered'], ['A', 'B', 'C', 'D', 'DONE'])
         self.assertEqual(result.terminal_state, 'DONE')
 
     def test_shared_scope_across_states_and_run_reset(self):
@@ -127,8 +127,9 @@ class InvocationAccountingTests(unittest.TestCase):
     def test_missing_route_retains_existing_failure_boundary(self):
         with self.assertRaisesRegex(ExecutionError, 'missing transition: A.budget_exceeded') as caught:
             execute({'A': state(fallback=None)}, cap=0)
-        self.assertEqual([e.kind for e in caught.exception.events], ['run_started', 'budget_exceeded', 'run_error'])
-        self.assertTrue(all(e.state_visit_id is None for e in caught.exception.events))
+        self.assertEqual([e.kind for e in caught.exception.events], ['run_started', 'state_entered', 'budget_exceeded', 'state_exited', 'run_error'])
+        self.assertIsNotNone(caught.exception.events[2].state_visit_id)
+        self.assertTrue(all(e.invocation_id is None for e in caught.exception.events))
 
     def test_existing_visit_limit_remains_independent(self):
         result, fake = execute({'A': state('A', (Scope('many', 10),), visits=1)}, cap=10)
@@ -181,14 +182,14 @@ class InvocationAccountingTests(unittest.TestCase):
                 result, _ = execute({'A': state(scopes=scopes)}, cap=cap, recorder=JsonlRecorder(path))
                 events = tuple(read_events(path))
                 self.assertEqual(events, result.events)
-                self.assertEqual(events[1].metric, expected)
-                self.assertIsNone(events[1].target)
-                self.assertEqual(events[2].target, 'DONE')
+                self.assertEqual(events[2].metric, expected)
+                self.assertIsNone(events[2].target)
+                self.assertEqual(events[3].target, 'DONE')
                 self.assertEqual(summarize_runs(events)[0].budget_exceeded_count, 1)
                 self.assertEqual(summarize_budgets(events)[0].budget_exceeded_count, 1)
                 for bad in ('unknown', 'invocation_scope:', 'invocation_scope:x\0'):
                     with self.subTest(bad=bad), self.assertRaises(ObservabilityError):
-                        summarize_runs((events[0], replace(events[1], metric=bad), *events[2:]))
+                        summarize_runs((*events[:2], replace(events[2], metric=bad), *events[3:]))
 
     def test_recorder_failure_keeps_observed_admission_without_compensation(self):
         for kind in ('state_entered', 'invocation_started', 'budget_exceeded'):

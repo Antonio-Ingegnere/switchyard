@@ -1014,3 +1014,16 @@ atomic admission and legacy fallback behavior are unchanged.
 
 See [budget routing and event compatibility](docs/design/budgets.md). No V2 compiler
 or independent logical-entry accounting is implemented by this capability.
+
+## Separate visit and invocation admission (RUNTIME-V2-E)
+
+State entry now commits before run/scope invocation admission. An invocation refusal
+therefore records `state_entered → budget_exceeded → transition_selected → state_exited`,
+with a visit ID and state duration but no invocation ID or invocation work. This is an
+intentional correction to C/D event sequences and visit accounting. Visit-limit refusal
+still prevents entry entirely. Invocation counters remain atomic; cause routes and
+legacy fallback are unchanged. Historical logs remain readable with the updated reader.
+
+The repeated-entry/alternate-execution probe now respects the entry visit cap exactly.
+See [admission and compatibility details](docs/design/budgets.md). Compiler work remains
+a separate slice; no V2 compiler is included here.

@@ -64,7 +64,7 @@ Current supported semantics (RUNTIME-V2-B): `budget_exceeded` may target a
 terminal or executable state. The source must have an applicable visit or invocation limit;
 all ordinary target and executor validation still applies.
 
-Admission is checked before allocating a visit or invocation ID. A refused visit
+State-visit admission is checked before allocating a visit or invocation ID. A refused visit
 emits `budget_exceeded` (metric, limit, observed), then `transition_selected`
 (target, trigger_event). Neither has a visit/invocation ID or duration. The target
 then undergoes ordinary admission; an executable target emits normal state and
@@ -111,13 +111,13 @@ Names are nonempty strings without NUL, with no normalization. Limits are exact
 nonnegative integers (not bool); zero refuses the first invocation. A state-local
 invocation allowance is simply a uniquely named scope, not a second counter system.
 
-Admission first checks the existing state-visit limit, then the run invocation cap,
-then scopes in declaration order. All checks precede admission; one refusal cause
-is selected. Refused work consumes neither visits nor invocations. Existing diagnostic
-admission follows successful budget checks. After `state_entered`, all invocation
-counters increment together immediately before `invocation_started`. Executor errors,
-timeouts, semantic failures and exceptions consume capacity. Recorder failures do not
-roll it back: an observed invocation start may fail persistence before executor entry.
+RUNTIME-V2-E separates two phases. Check the state-visit limit and existing diagnostic
+admission, then commit the visit and emit `state_entered`. Only then check the run
+invocation cap and scopes in declaration order. One refusal cause is selected.
+Invocation refusal keeps the visit but consumes no invocation capacity. Successful
+checks increment all invocation counters together immediately before `invocation_started`.
+Executor errors, timeouts, semantic failures and exceptions consume that capacity.
+Recorder failures never roll counters back.
 
 Refusal reuses the existing path: clear pending diagnostics, emit `budget_exceeded`,
 then select the state's own budget route (or fail with `run_error` when absent).
@@ -126,8 +126,8 @@ executable fallbacks; terminals remain admissible without invocation capacity.
 
 Metrics are `max_state_visits_per_run`, `max_invocations_per_run`, and
 `invocation_scope:<exact name>`. The scope suffix is opaque. `observed` means already
-consumed usage, so a refusal at limit 3 reports 3, not 4. The budget event has no
-visit/invocation IDs or target; its following `transition_selected` carries the target.
+consumed usage, so a refusal at limit 3 reports 3, not 4. A state-visit refusal has no visit/invocation IDs. Invocation refusal has the admitted
+visit ID and no invocation ID. Target behavior is described below.
 Event fields and recorder format are unchanged. The historical reader accepts these
 specific metrics while retaining strict rejection of unknown metrics.
 
@@ -153,10 +153,10 @@ remains the fallback. If neither exists, the existing missing-transition error a
 Internal immutable refusal values capture the selected configuration directly. Metric
 strings are serialized evidence, never parsed to select a route.
 
-All checks still precede state admission. In particular, an invocation-scope refusal
-allocates no visit ID and consumes no visit or invocation allowance. This preserves
-RUNTIME-V2-C; it does not create a partially admitted visit. Targets undergo normal
-independent admission. No new counters or accounting rules are introduced.
+Invocation checks now follow state admission (RUNTIME-V2-E). Their refusal consumes
+the already admitted visit and no invocation allowance. Visit-limit refusal still
+prevents entry entirely. Targets undergo normal independent admission. Existing
+counters are reused; no new accounting scopes are introduced.
 
 Specific-route `budget_exceeded` events populate the existing `target` field; the
 following `transition_selected.target` agrees. Legacy fallback retains its historical
@@ -170,6 +170,37 @@ Cycle validation includes all specific and legacy refusal edges, even conservati
 shadowed routes, while retaining existing visit-bound semantic-cycle rules. Run-specific
 routes are terminal. Scope and visit routes cannot introduce unbounded refusal cycles.
 
-This closes the distinction between an entry refusal's route and a local invocation
-scope's route. It does not make runtime state visits independent of invocation admission:
-a future compiler must still account for that distinction when modeling logical entries.
+## Two-phase admission (RUNTIME-V2-E)
+
+This intentionally corrects C/D's combined admission boundary. Previously invocation
+refusal erased a permitted entry from visit accounting. Now its normal routed sequence is:
+
+```text
+state_entered
+budget_exceeded      # state_visit_id present, invocation_id absent
+transition_selected  # same visit ID, budget trigger, selected target
+state_exited         # ordinary monotonic state duration
+<target state processing>
+```
+
+This contributes one state visit, zero executor invocations, and one refusal to
+RunSummary. It creates no invocation duration. Visit-limit refusal retains the old
+pre-entry sequence with no IDs. Successful work, executor failure, terminals and
+cause routing are unchanged. Invocation counters still commit atomically only after
+all invocation checks succeed.
+
+Without a configured refusal route, the admitted visit exits after `budget_exceeded`,
+then `run_error` reports the missing route. Recorder failures instead abort immediately,
+possibly leaving an incomplete visit; no compensating exits or persistence rollback.
+Diagnostic validation remains a pre-entry admission check, now before invocation
+capacity checks. Rejected diagnostics do not create a visit.
+
+The updated reader accepts both historical pre-entry and current admitted invocation
+refusals, validates visit/target consistency, and distinguishes refusal exits from
+terminal exits. Older readers may reject these newly populated existing fields; no
+Event field or kind is added. Existing direct callers without invocation refusal keep
+their event sequences. Cycles retain the same conservative validation.
+
+A repeated entry whose invocation scope is exhausted now increments the entry-state
+visit count before its alternate target runs. This permits an independent entry visit
+cap to stop subsequent entries using its own cause route, without new counters.

@@ -1,0 +1,71 @@
+id: RUNTIME-V2-E
+goal: |
+  Count admitted state visits independently of later executor-capacity refusal,
+  preserving atomic invocation admission and cause-aware routing.
+scope:
+  - runtime/__init__.py
+  - switchyard/observability.py
+  - tests/test_two_phase_admission.py
+  - tests/test_invocation_accounting.py
+  - tests/test_cause_budget_routing.py
+  - docs/design/budgets.md
+  - docs/plans/v2-002-workflow-compiler.yaml
+  - README.md
+constraints:
+  - No Event fields/kinds, new counters, cycle changes, executor API, loaders or Adeo changes.
+  - No compiler or V2 concepts in runtime.
+current_behavior: |
+  All visit/run/scope checks currently precede diagnostics and state_entered. Refusal
+  therefore consumes no visit even if a local scope routes to an alternate executable
+  state. This undercounts repeated logical entries. RUNTIME-V2-C/D tests explicitly
+  expect no state_entered, no visit ID and no state duration on invocation refusal.
+  Those assertions are intentionally corrected; historical logs remain readable.
+algorithm: |
+  Check visit limit first. Refusal uses existing cause routing without IDs or entry.
+  Otherwise retain diagnostic admission validation before committing entry (malformed
+  or oversized handoff remains a pre-entry error). Commit visit count/ID, state_entered.
+  Handle terminal normally. For executable states check run capacity then scopes in
+  declaration order. On refusal keep the committed visit; emit budget_exceeded with
+  visit ID, no invocation ID; emit transition_selected with the same visit ID; emit
+  state_exited; admit target normally. Clear pending diagnostics on refusal.
+  If no refusal route exists, close the admitted visit after budget_exceeded, then
+  emit existing budget-triggered run_error without visit ID and raise ExecutionError.
+  Successful checks atomically commit all invocation counters and allocate invocation
+  ID before invocation_started; execute and process response exactly as before.
+routing: |
+  Extract the existing D refusal branch into one helper used by both admission phases.
+  Specific cause routes, legacy fallback, metric encoding and consumed observed stay
+  unchanged. Specific budget targets remain populated; legacy budget target stays None.
+events_and_failures: |
+  Invocation refusal adds state_entered before budget_exceeded, visit IDs on budget
+  and control transition, and a matching state_exited with monotonic state duration.
+  No invocation_started, invocation ID or invocation duration is synthesized.
+  Reader accepts historical pre-entry refusals and new in-visit refusal shapes, checks
+  ID/target agreement and distinguishes refusal exits from terminal exits. No new API.
+  Recorder failures still abort immediately with observed-but-not-persisted event;
+  they may leave an incomplete visit. No compensating events, retries or rollback.
+compatibility: |
+  Visit refusal, successful work, executor errors/exceptions, terminal processing,
+  counters and cycle validation retain behavior. Invocation-refusal histories change
+  deliberately in C/D regression assertions. Diagnostic rejection still precedes entry;
+  it now necessarily precedes invocation checks. Older readers may reject new populated
+  IDs; the updated reader preserves old-history support.
+acceptance:
+  - Run/scope refusal keeps an entered visit and closes it without an invocation.
+  - Invocation counters remain atomic and refused work consumes none.
+  - Entry cap 2 counts the second entry whose invocation scope refuses; third entry
+    routes by visit cause and never invokes alternate state again.
+  - RunSummary counts visits, zero refused invocations and real state duration.
+verification:
+  - Focused deterministic admission, malformed-history, recording and timing tests.
+  - Updated C/D semantic assertions and full offline suite including A/B, loaders and delivery.
+non_goals:
+  - Compiler, new counters, provider work or artifact transport.
+verification_results:
+  focused: "9 two-phase admission tests passed."
+  budget_regressions: "35 budget-routing/visit tests and 16 invocation-accounting tests passed with intentional C/D event assertions updated."
+  full_offline: "328 tests run: 327 passed, one existing platform skip (22.190 seconds)."
+  command: ".venv/bin/python -m unittest discover -s tests -v"
+  blocker_probe: "A enters twice; second visit survives scope refusal; B executes once; third A entry refuses by visit cap with no visit ID."
+  audit: "All identified mandatory runtime primitives representable exactly; no remaining mandatory prerequisite identified. Existing cycle rules remain unchanged."
+  protected_scope: "No Event fields, public API fields, counters, loader, executor, compiler or Adeo changes."

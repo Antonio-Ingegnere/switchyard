@@ -1,6 +1,6 @@
 id: V2-002
-status: blocked_logical_entry_accounting
-updated_by: RUNTIME-V2-D
+status: runtime_prerequisites_satisfied_compiler_deferred
+updated_by: RUNTIME-V2-E
 goal: |
   Compile corrected v2 bundles to existing runtime plans after generic outcome,
   budget-routing and exact local/run accounting prerequisites are implemented.
@@ -35,21 +35,27 @@ budget_capability_mapping:
     classification: SUPPORTED EXACTLY
     reason: Attach the same InvocationBudgetScope(name, limit) to every compiled state belonging to that logical state.
   - field: state.max_state_visits
-    classification: ROUTING SUPPORTED EXACTLY; LOGICAL ENTRY ACCOUNTING GAP
+    classification: SUPPORTED EXACTLY
     reason: |
-      State.max_state_visits_per_run plus state_visit_budget_exceeded now routes
-      visit refusal independently. However invocation refusal occurs before entry
-      admission. If an exhausted entry invocation scope routes to a later executable
-      state, no entry visit is counted. Repeated such logical entries undercount the
-      V2 visit allowance. Cause-aware routing intentionally does not change accounting.
+      Entry runtime state max_state_visits_per_run plus state_visit_budget_exceeded.
+      RUNTIME-V2-E commits each accepted entry before run/scope invocation checks.
+      Local-scope refusal therefore retains the entry visit before routing to an
+      alternate state. Apply the logical visit cap only to the entry state.
   - field: rung.max_invocations
     classification: SUPPORTED EXACTLY
     reason: Unique InvocationBudgetScope per logical state/rung, alongside any shared logical-state scope.
   - field: run.max_invocations
     classification: SUPPORTED EXACTLY
     reason: Flow.max_invocations_per_run admits only that many executable invocations; terminals consume none.
-remaining_required_budget_prerequisites:
-  - Exact logical-entry accounting when entry invocation is refused but a later state executes.
+remaining_required_budget_prerequisites: []
+required_execution_primitives:
+  state_declared_outcomes: SUPPORTED EXACTLY (RUNTIME-V2-A)
+  cause_aware_routing: SUPPORTED EXACTLY (RUNTIME-V2-D)
+  state_visit_accounting: SUPPORTED EXACTLY (RUNTIME-V2-E)
+  state_invocation_accounting: SUPPORTED EXACTLY (shared named scope)
+  rung_invocation_accounting: SUPPORTED EXACTLY (unique named scope)
+  run_invocation_accounting: SUPPORTED EXACTLY (Flow invocation cap)
+  vertical_horizontal_routing: SUPPORTED EXACTLY (ordinary explicit states and transitions; context remains resolver metadata)
 explicit_budget_ownership:
   run_invocations: Flow invocation cause selects run_budget.on_exceeded, required terminal.
   state_visits: Entry state visit cause selects state.budget.on_exceeded.
@@ -68,11 +74,10 @@ explicit_budget_ownership:
     All four mandatory budget ROUTING capabilities are SUPPORTED EXACTLY.
     Never compile all four causes into one target.
 compiler_constraints: |
-  V2-001C and RUNTIME-V2-D resolve the original cause-routing conflict. Do not conflate
-  route support with logical-entry accounting: the separate admission probe below
-  exposes a remaining semantic gap. No compiler-owned counters, synthetic invocations,
-  new runtime accounting or DSL changes are introduced here. Existing cycle validation
-  also still constrains compiled graphs.
+  All identified mandatory runtime primitives are available. No remaining mandatory
+  runtime prerequisite is identified. Compiler still must validate its generated
+  graphs under existing conservative cycle rules; this is not a relaxation of which
+  arbitrary cyclic graphs the runtime accepts. No compiler implemented in this slice.
 logical_entry_accounting_probe:
   configuration: |
     A has visit cap=2, visit route=STOP, primary scope limit=1 with route=B;
@@ -80,17 +85,19 @@ logical_entry_accounting_probe:
     RETURN has visit cap=3 with route=STOP; RETURN ready -> A.
     Run cap=10, run route=STOP; STOP terminal. All executors return ready.
     The existing runtime accepts this visit-bounded graph.
-  observed: |
+  historical_observation_before_e: |
     Actual invocations: A, RETURN, B, RETURN, B, RETURN.
     Only one A state_entered event. Every later A attempt is refused on its primary
     scope and routes to B. Thus three work-bearing logical entries can occur despite
     A's intended V2 logical visit cap of two. The runtime counters are behaving as
     specified: invocation refusal does not admit a state visit.
-  remaining_decision: |
-    A future separate contract must express logical admission independently of entry
-    invocation refusal, or explicitly revise V2 logical-visit semantics. Applying
-    independent visit limits to every alternate state does not fix the shared count.
-    Do not mark the compiler ready or silently add accounting to RUNTIME-V2-D.
+  verified_after_e: |
+    YES: the exact same graph now emits invocation states A, RETURN, B, RETURN.
+    A has two state_entered events. Its second entry gets a scope refusal with a
+    visit ID and matching exit. Its third entry gets a state-visit refusal with no
+    visit ID and routes to STOP. B executes only once, not twice.
+    tests/test_two_phase_admission.py asserts the exact probe. The original D routing
+    probe is also rerun in tests/test_cause_budget_routing.py.
 execution_contract_blocker:
   requirement: |
     Put logical max_state_visits on entry only, route budget_exceeded to the adjacent
@@ -148,8 +155,8 @@ prerequisites:
     Implemented: Flow.max_invocations_per_run and immutable InvocationBudgetScope
     declarations in State.invocation_budgets. Invocation checks are atomic; precedence
     is existing state visits, then run invocations, then named scopes in declaration
-    order. Budget refusal uses the state's own route without allocating IDs or
-    consuming capacity. New metrics retain already-consumed observed semantics.
+    order. Invocation counters remain atomic; E now retains admitted visits on
+    invocation refusal. Metrics retain already-consumed observed semantics.
     No role/provider semantics, new Event fields, duration enforcement or whole-run
     visit cap. V2-001B removes the latter from the required DSL. Existing static cycle
     rules are not relaxed. Compiler implementation remains deferred to its own slice.
@@ -157,6 +164,11 @@ prerequisites:
     Implemented and verified: cause-specific state visit, named-scope and terminal
     flow invocation routes, preserving legacy fallback, precedence and accounting.
     Event fields unchanged; specific refusal target recorded, legacy shape retained.
+  RUNTIME-V2-E: |
+    Implemented: visit commitment precedes invocation admission. Invocation refusal
+    keeps the visit ID/count, closes the visit and consumes no invocation counters.
+    State-visit refusal stays pre-entry. Existing Event fields represent both phases;
+    historical and new histories remain readable. Both blocking probes now pass.
 proposed_public_api: |
   Not implemented: compile_workflow(bundle, flow_name, executor_resolver) -> CompiledWorkflow.
   Resolver is Callable[[ResolvedInvocation], Executor]. Frozen binding carries

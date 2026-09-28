@@ -29,9 +29,12 @@ _SHAPES = {
     'invocation_started': [_INVOCATION],
     'invocation_finished': [_INVOCATION | {'outcome'}],
     'transition_selected': [_INVOCATION | {'outcome', 'target'},
-                            {'state', 'target', 'trigger_event'}],
+                            {'state', 'target', 'trigger_event'},
+                            _VISIT | {'target', 'trigger_event'}],
     'budget_exceeded': [{'state', 'metric', 'limit', 'observed'},
-                        {'state', 'metric', 'limit', 'observed', 'target'}],
+                        {'state', 'metric', 'limit', 'observed', 'target'},
+                        _VISIT | {'metric', 'limit', 'observed'},
+                        _VISIT | {'metric', 'limit', 'observed', 'target'}],
     'run_finished': [{'state'}],
     'run_error': [{'state'}, {'state', 'trigger_event'}, _INVOCATION,
                   _INVOCATION | {'outcome'}],
@@ -72,6 +75,8 @@ def _validate(event: Event) -> None:
                (metric.startswith('invocation_scope:') and
                 bool(metric[len('invocation_scope:'):]) and '\0' not in metric),
                'unknown budget metric')
+        _check(event.state_visit_id is None or event.metric != 'max_state_visits_per_run',
+               'visit refusal cannot have an admitted visit ID')
         _check(event.observed >= event.limit, 'budget observation below limit')
 
 
@@ -147,6 +152,7 @@ class _RunShape:
         self.transitioned = False
         self.budget = None
         self.budget_target = None
+        self.budget_visit = None
         self.closed_terminal = None
         self.context = (None, None)
 
@@ -174,7 +180,8 @@ class _RunShape:
                 kind == 'transition_selected' and event.outcome is not None):
             _check(self.active == (event.state, event.state_visit_id), 'unmatched state visit')
             if kind == 'invocation_started':
-                _check(self.invocation is None, 'multiple invocations in one visit')
+                _check(self.invocation is None and self.budget is None and not self.transitioned,
+                       'multiple or refused invocations in one visit')
                 _check(event.invocation_id not in self.invocation_ids, 'reused invocation ID')
                 self.invocation_ids.add(event.invocation_id)
                 self.invocation = event.invocation_id
@@ -188,19 +195,30 @@ class _RunShape:
                 self.transitioned = True
             else:
                 _check(self.invocation is None or self.transitioned, 'state exit before invocation transition')
-                self.closed_terminal = event.state if self.invocation is None else None
+                _check(self.budget is None or self.budget_target is None,
+                       'state exit before configured budget transition')
+                self.closed_terminal = event.state if self.invocation is None and not self.transitioned and self.budget is None else None
                 self.active = None
                 self.invocation = self.outcome = None
         elif kind == 'budget_exceeded':
-            _check(self.active is None and self.budget is None, 'budget event during active visit or pending budget')
+            _check(self.budget is None and self.invocation is None and (self.active is None or not self.transitioned),
+                   'budget event during invocation or pending budget')
+            _check((self.active is None and event.state_visit_id is None) or
+                   self.active == (event.state, event.state_visit_id), 'unmatched budget visit')
+            self.budget_visit = event.state_visit_id
             self.budget = event.state
             self.budget_target = event.target
             self.closed_terminal = None
         elif kind == 'transition_selected':
-            _check(self.budget == event.state, 'budget transition without budget event')
+            _check(self.budget == event.state and self.budget_visit == event.state_visit_id,
+                   'budget transition without matching budget event/visit')
+            _check(self.budget_visit is None or self.active == (event.state, event.state_visit_id),
+                   'budget transition after visit exit')
             _check(self.budget_target is None or self.budget_target == event.target,
                    'budget transition target disagrees with refusal')
-            self.budget = self.budget_target = None
+            if self.active is not None:
+                self.transitioned = True
+            self.budget = self.budget_target = self.budget_visit = None
         elif kind == 'run_finished':
             _check(self.active is None and self.budget is None
                    and self.closed_terminal == event.state, 'completion without closed terminal visit')

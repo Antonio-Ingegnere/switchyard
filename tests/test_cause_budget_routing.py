@@ -42,7 +42,8 @@ class CauseBudgetRoutingTests(unittest.TestCase):
             with self.subTest(metric=metric):
                 x, nxt = Fake(), Fake()
                 result = run(WorkUnit('task'), mixed(**limits), {'x': x, 'next': nxt})
-                budget, transition = result.events[1:3]
+                offset = 1 if metric == 'max_state_visits_per_run' else 2
+                budget, transition = result.events[offset:offset+2]
                 self.assertEqual((budget.kind, budget.metric, budget.limit, budget.observed, budget.target),
                                  ('budget_exceeded', metric, 0, 0, target))
                 self.assertEqual((transition.kind, transition.target, transition.trigger_event),
@@ -50,9 +51,10 @@ class CauseBudgetRoutingTests(unittest.TestCase):
                 self.assertEqual(result.terminal_state, terminal)
                 self.assertEqual(x.calls, 0)
                 self.assertEqual(nxt.calls, 1 if target == 'NEXT' else 0)
-                self.assertFalse(any(e.state == 'A' and e.kind in ('state_entered', 'invocation_started') for e in result.events))
+                self.assertFalse(any(e.state == 'A' and e.kind == 'invocation_started' for e in result.events))
+                self.assertEqual(any(e.state == 'A' and e.kind == 'state_entered' for e in result.events), offset == 2)
                 for event in (budget, transition):
-                    self.assertIsNone(event.state_visit_id)
+                    self.assertEqual(event.state_visit_id is not None, offset == 2)
                     self.assertIsNone(event.invocation_id)
                     self.assertIsNone(event.duration_ns)
                 self.assertEqual(summarize_runs(result.events)[0].budget_exceeded_count, 1)
@@ -64,10 +66,15 @@ class CauseBudgetRoutingTests(unittest.TestCase):
                     max_state_visits_per_run=visits, invocation_budgets=scopes), 'DONE': State(terminal=True)}, cap)
                 fake = Fake()
                 result = run(WorkUnit('t'), flow, {'x': fake})
-                self.assertEqual([e.kind for e in result.events], ['run_started', 'budget_exceeded',
-                    'transition_selected', 'state_entered', 'state_exited', 'run_finished'])
-                self.assertIsNone(result.events[1].target)
-                self.assertEqual(result.events[2].target, 'DONE')
+                middle = ['budget_exceeded', 'transition_selected']
+                if visits is None:
+                    middle = ['state_entered', *middle, 'state_exited']
+                self.assertEqual([e.kind for e in result.events], ['run_started', *middle,
+                    'state_entered', 'state_exited', 'run_finished'])
+                budget = next(e for e in result.events if e.kind == 'budget_exceeded')
+                transition = next(e for e in result.events if e.kind == 'transition_selected')
+                self.assertIsNone(budget.target)
+                self.assertEqual(transition.target, 'DONE')
                 self.assertEqual(fake.calls, 0)
 
     def test_entry_refusal_does_not_execute_local_scope_destination(self):
@@ -164,8 +171,8 @@ class CauseBudgetRoutingTests(unittest.TestCase):
         flow = Flow('A', {'A': State('x', invocation_budgets=(Scope(name, 0, 'DONE'),)),
                           'DONE': State(terminal=True)})
         result = run(WorkUnit('t'), flow, {'x': Fake()})
-        self.assertEqual(result.events[1].metric, 'invocation_scope:' + name)
-        self.assertEqual(result.events[1].target, 'DONE')
+        self.assertEqual(result.events[2].metric, 'invocation_scope:' + name)
+        self.assertEqual(result.events[2].target, 'DONE')
 
     def test_executor_cannot_spoof_refusal(self):
         with self.assertRaisesRegex(ExecutionError, 'reserved control-plane outcome') as caught:
@@ -183,7 +190,7 @@ class CauseBudgetRoutingTests(unittest.TestCase):
             'correlation_id', 'parent_run_id'))
         events = result.events
         with self.assertRaisesRegex(ObservabilityError, 'target disagrees'):
-            summarize_runs((*events[:2], replace(events[2], target='OTHER'), *events[3:]))
+            summarize_runs((*events[:3], replace(events[3], target='OTHER'), *events[4:]))
         self.assertEqual(summarize_runs(events)[0].terminal_state, 'DONE')
 
     def test_recorder_failure_retains_observed_specific_route(self):
@@ -201,9 +208,9 @@ class CauseBudgetRoutingTests(unittest.TestCase):
             self.assertEqual((x.calls, nxt.calls), (0, 0))
 
     def test_executable_fallback_has_ordinary_timing(self):
-        with patch('runtime.time.time_ns', return_value=100), patch('runtime.time.monotonic_ns', side_effect=range(11)):
+        with patch('runtime.time.time_ns', return_value=100), patch('runtime.time.monotonic_ns', side_effect=range(13)):
             result = run(WorkUnit('t'), mixed(second=0), {'x': Fake(), 'next': Fake()})
         summary, = summarize_runs(result.events)
         self.assertEqual(summary.invocation_duration_ns_total, 1)
-        self.assertEqual(summary.run_duration_ns, 10)
-        self.assertEqual(dict(summary.state_duration_ns), {'NEXT': 4, 'DONE': 1})
+        self.assertEqual(summary.run_duration_ns, 12)
+        self.assertEqual(dict(summary.state_duration_ns), {'A': 3, 'NEXT': 4, 'DONE': 1})
