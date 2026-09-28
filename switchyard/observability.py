@@ -66,7 +66,11 @@ def _validate(event: Event) -> None:
     _check(event.outcome is None or _valid_executor_outcome(event.outcome), 'invalid or reserved executor outcome')
     _check(event.trigger_event is None or event.trigger_event == 'budget_exceeded', 'unknown trigger event')
     if event.kind == 'budget_exceeded':
-        _check(event.metric == 'max_state_visits_per_run', 'unknown budget metric')
+        metric = event.metric
+        _check(metric in ('max_state_visits_per_run', 'max_invocations_per_run') or
+               (metric.startswith('invocation_scope:') and
+                bool(metric[len('invocation_scope:'):]) and '\0' not in metric),
+               'unknown budget metric')
         _check(event.observed >= event.limit, 'budget observation below limit')
 
 

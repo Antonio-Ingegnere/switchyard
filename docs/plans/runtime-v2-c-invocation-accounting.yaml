@@ -1,0 +1,86 @@
+id: RUNTIME-V2-C
+goal: |
+  Atomically admit executor invocations against a run cap and explicit shared named
+  invocation scopes, using existing budget refusal routing and canonical events.
+scope:
+  - runtime/__init__.py
+  - switchyard/observability.py (strict recognition of new generic metric strings)
+  - tests/test_invocation_accounting.py
+  - docs/design/budgets.md
+  - docs/plans/v2-002-workflow-compiler.yaml
+  - README.md
+constraints:
+  - No Event fields, executor contract, loader, provider, compiler or Adeo changes.
+  - Preserve existing cycle rules; invocation limits do not authorize new semantic cycles.
+current_accounting: |
+  State has max_state_visits_per_run and diagnostic input size, but no invocation
+  budget. Flow has no budgets. run keeps admitted_visits per state, a visit ID counter
+  and an invocation ID counter. RunResult exposes only terminal_state and events.
+  Admission checks visits before IDs and state_entered, then diagnostic input.
+  After state_entered, executable states allocate an invocation ID, emit
+  invocation_started and call the executor. No existing generic budget type exists.
+  Refusal emits budget_exceeded(metric, limit, observed) with no visit/invocation IDs,
+  then transition_selected(target, trigger_event). observed is already consumed usage,
+  NOT attempted next usage. Missing route emits run_error and raises ExecutionError.
+public_api: |
+  Frozen InvocationBudgetScope(name: str, limit: int).
+  State.invocation_budgets: tuple[InvocationBudgetScope, ...] = ().
+  Flow.max_invocations_per_run: int | None = None.
+  State defensively copies scope sequences into a tuple. validate rejects wrong scope
+  types, duplicate names within a state, conflicting limits across states (including
+  unreachable states), and scopes on terminals. Names are exact nonempty strings with
+  no NUL. Limits are exact nonnegative ints (bool rejected); zero denies first work,
+  consistent with existing runtime visit limits. No normalization or coercion.
+  No state-local convenience field: a caller assigns a unique explicit scope to a
+  state. This uses one accounting mechanism and introduces no generated identifiers.
+admission: |
+  First check existing state visit limit, then (only for executable states) run
+  invocation cap, then scopes in declared tuple order. Select exactly one refusal
+  cause. Check all before changing counters or allocating IDs. Refusals consume no
+  visit or invocation capacity and use the existing routing branch, clearing pending
+  diagnostics. Target admission always repeats its own checks. Run exhaustion therefore
+  refuses executable fallbacks too; terminal admission consumes no invocation budget.
+  After successful checks and diagnostic admission, admit the visit and emit
+  state_entered. Immediately before invocation_started, increment the existing run
+  invocation counter and all attached scope counters together. Exception, technical
+  failure or recorder failure never rolls back usage. Recorder failure on state_entered
+  precedes invocation commitment; failure on invocation_started observes committed
+  capacity but may prevent the executor call, preserving existing I/O boundaries.
+events: |
+  Keep Event unchanged. Metrics are max_state_visits_per_run (existing),
+  max_invocations_per_run (run), and invocation_scope:<exact scope name> (named scope).
+  Prefix removal unambiguously recovers the opaque name; runtime never parses names.
+  observed remains already consumed count, so refusal at limit 3 reports observed=3.
+  Budget event target remains None; target is on the following transition_selected.
+  Historical reader currently accepts only the visit metric; extend that narrow check
+  to the run metric and valid nonempty/no-NUL scope suffix. Unknown metrics still fail.
+cycle_safety: |
+  Existing visit-bounded semantic-edge removal is unchanged. New budget edges from
+  invocation-limited states must also participate in residual cycle checking. States
+  without visit bounds keep all outgoing edges, even if invocation-bounded. Thus no
+  new semantic cycles are permitted and refusal loops cannot bypass static validation.
+capability_mapping: |
+  SUPPORTED EXACTLY: state max_invocations via shared named scope across compiled states;
+  rung max_invocations via unique scope; run max_invocations via Flow cap;
+  state max_state_visits via existing entry-state visit limit, with compiler ensuring
+  normal logical entry targets that state and internal hops do not re-enter it.
+  UNSUPPORTED: whole-run logical state visits (including terminal entry); no equivalent
+  whole-run cap exists. It remains a separate compiler prerequisite, not approximated.
+acceptance:
+  - Run and shared/local scope limits refuse actual work deterministically and atomically.
+  - Failed/exceptional admitted work consumes capacity; refused work consumes none.
+  - Scope identities are exact, immutable and statically consistent.
+  - Fallback admission, semantic outcomes, diagnostics, timing and recording remain correct.
+  - Canonical new budget metrics round-trip and project without Event migration.
+verification:
+  - Direct fake-executor tests for all scopes, precedence, errors and recorder boundaries.
+  - Full offline suite including runtime A/B, V1/V2 loaders, observability and delivery.
+non_goals:
+  - Whole-run visit caps, new cycle language, V2 compilation, metrics APIs or Adeo work.
+verification_results:
+  focused: "16 direct-runtime invocation-accounting tests passed."
+  full_offline: "299 tests run: 298 passed, one existing platform skip (23.191 seconds)."
+  command: ".venv/bin/python -m unittest discover -s tests -v"
+  coverage: "Includes full runtime, RUNTIME-V2-A/B, V1/V2 loader, observability, recording, diagnostics, timing, CLI and delivery regressions."
+  remaining_gap: "Whole-run logical visits remain unsupported; existing cycle validation is intentionally not relaxed by invocation caps."
+  protected_scope: "Event fields, executor APIs, recorder, loaders and delivery unchanged. No V2 compiler or Adeo changes."

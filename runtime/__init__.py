@@ -108,21 +108,32 @@ class Executor(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
+class InvocationBudgetScope:
+    """Opaque shared invocation allowance within one run; validated with the flow."""
+
+    name: str
+    limit: int
+
+
+@dataclass(frozen=True, slots=True)
 class State:
     executor: str | None = None
     on: Mapping[str, str] = field(default_factory=dict)
     terminal: bool = False
     max_state_visits_per_run: int | None = None
     diagnostics_from_previous_max_bytes: int | None = None
+    invocation_budgets: tuple[InvocationBudgetScope, ...] = ()
 
     def __post_init__(self):
         object.__setattr__(self, "on", MappingProxyType(dict(self.on)))
+        object.__setattr__(self, "invocation_budgets", tuple(self.invocation_budgets))
 
 
 @dataclass(frozen=True, slots=True)
 class Flow:
     initial: str
     states: Mapping[str, State]
+    max_invocations_per_run: int | None = None
 
     def __post_init__(self):
         object.__setattr__(self, "states", MappingProxyType(dict(self.states)))
@@ -199,17 +210,32 @@ def validate(flow: Flow, executors: Mapping[str, Executor]) -> None:
         raise FlowValidationError("initial must reference an existing state")
     if not flow.states or any(not isinstance(name, str) or not name for name in flow.states):
         raise FlowValidationError("state names must be nonempty strings")
+    run_limit = flow.max_invocations_per_run
+    if run_limit is not None and (type(run_limit) is not int or run_limit < 0):
+        raise FlowValidationError("invalid max_invocations_per_run")
+    scope_limits: dict[str, int] = {}
     for name, state in flow.states.items():
         if type(state) is not State or type(state.terminal) is not bool:
             raise FlowValidationError(f"invalid state definition: {name}")
         limit = state.max_state_visits_per_run
         if limit is not None and (type(limit) is not int or limit < 0):
             raise FlowValidationError(f"invalid max_state_visits_per_run: {name}")
+        seen_scopes: set[str] = set()
+        for scope in state.invocation_budgets:
+            if (type(scope) is not InvocationBudgetScope or not _valid_outcome_name(scope.name)
+                    or type(scope.limit) is not int or scope.limit < 0):
+                raise FlowValidationError(f"invalid invocation budget scope: {name}")
+            if scope.name in seen_scopes:
+                raise FlowValidationError(f"duplicate invocation budget scope: {name}: {scope.name!r}")
+            seen_scopes.add(scope.name)
+            if scope.name in scope_limits and scope_limits[scope.name] != scope.limit:
+                raise FlowValidationError(f"conflicting invocation budget scope: {scope.name!r}")
+            scope_limits[scope.name] = scope.limit
         input_limit = state.diagnostics_from_previous_max_bytes
         if input_limit is not None and (type(input_limit) is not int or not 0 <= input_limit <= MAX_DIAGNOSTIC_BYTES):
             raise FlowValidationError(f"invalid diagnostic input limit: {name}")
         if state.terminal:
-            if state.executor is not None or state.on or limit is not None or input_limit is not None:
+            if state.executor is not None or state.on or limit is not None or input_limit is not None or state.invocation_budgets:
                 raise FlowValidationError(f"terminal state has executor, transitions, or limit: {name}")
         elif (not isinstance(state.executor, str)
               or state.executor not in executors
@@ -225,7 +251,7 @@ def validate(flow: Flow, executors: Mapping[str, Executor]) -> None:
 
     for name, state in flow.states.items():
         if "budget_exceeded" in state.on:
-            if state.max_state_visits_per_run is None:
+            if state.max_state_visits_per_run is None and not state.invocation_budgets and run_limit is None:
                 raise FlowValidationError(f"budget handler on unlimited state: {name}")
 
     # A cycle must consume a finite admission allowance. Bounded semantic edges
@@ -296,17 +322,33 @@ def run(work_unit: WorkUnit, flow: Flow, executors: Mapping[str, Executor],
     visit = 0
     invocation = 0
     admitted_visits = dict.fromkeys(flow.states, 0)
+    scope_usage = {scope.name: 0 for state in flow.states.values() for scope in state.invocation_budgets}
     pending: DiagnosticInput | None = None
     while True:
         state = flow.states[current]
         limit = state.max_state_visits_per_run
         observed = admitted_visits[current]
+        # Check every applicable allowance before admitting a visit or invocation.
+        metric = "max_state_visits_per_run"
+        refusal = limit is not None and observed >= limit
+        if not refusal and not state.terminal:
+            limit = flow.max_invocations_per_run
+            observed = invocation
+            metric = "max_invocations_per_run"
+            refusal = limit is not None and observed >= limit
+            if not refusal:
+                for scope in state.invocation_budgets:
+                    limit, observed = scope.limit, scope_usage[scope.name]
+                    if observed >= limit:
+                        metric = f"invocation_scope:{scope.name}"
+                        refusal = True
+                        break
         # A selected target is not an entered state. Refusal allocates no IDs.
-        if limit is not None and observed >= limit:
+        if refusal:
             pending = None
             emit(Event(
                 "budget_exceeded", run_id, current,
-                metric="max_state_visits_per_run", limit=limit, observed=observed,
+                metric=metric, limit=limit, observed=observed,
             ))
             if "budget_exceeded" not in state.on:
                 fail(f"missing transition: {current}.budget_exceeded",
@@ -334,7 +376,11 @@ def run(work_unit: WorkUnit, flow: Flow, executors: Mapping[str, Executor],
             emit(Event("run_finished", run_id, current))
             return RunResult(current, tuple(events))
 
+        # Invocation capacity is committed before invocation_started, never rolled
+        # back for executor or recorder failure. All checks preceded visit admission.
         invocation += 1
+        for scope in state.invocation_budgets:
+            scope_usage[scope.name] += 1
         invocation_id = f"{run_id}:invocation:{invocation}"
         emit(Event("invocation_started", run_id, current, visit_id, invocation_id))
         request = InvocationRequest(work_unit, pending)

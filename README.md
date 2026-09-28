@@ -979,3 +979,26 @@ if refused, uses its own budget route. Validation rejects cycles that can contin
 without consuming bounded admissions, including pure refusal loops. Existing
 terminal routes retain their behavior; no new counters or compiler are introduced.
 See [budget semantics](docs/design/budgets.md).
+
+## Scoped invocation limits (RUNTIME-V2-C)
+
+Direct runtime callers can bound invocations across several states:
+
+```python
+from runtime import Flow, InvocationBudgetScope, State
+
+shared = InvocationBudgetScope("analysis", 3)
+flow = Flow("A", {
+    "A": State("first", {"ready": "B", "budget_exceeded": "DONE"},
+               invocation_budgets=(shared, InvocationBudgetScope("first-attempt", 1))),
+    "B": State("second", {"ready": "DONE", "budget_exceeded": "DONE"},
+               invocation_budgets=(shared,)),
+    "DONE": State(terminal=True),
+}, max_invocations_per_run=4)
+```
+
+Scope names are opaque and shared within one run; conflicting limits are rejected.
+Admission checks all applicable counters before consuming any. Failures after admission
+still consume capacity, while refusals invoke nothing and use ordinary budget routing.
+See [exact admission and metric semantics](docs/design/budgets.md). Existing callers
+need no changes. Whole-run visit caps and the V2 compiler remain unimplemented.

@@ -61,7 +61,7 @@ state: fix
 The state machine decides what happens next.
 
 Current supported semantics (RUNTIME-V2-B): `budget_exceeded` may target a
-terminal or executable state. The source must have `max_state_visits_per_run`;
+terminal or executable state. The source must have an applicable visit or invocation limit;
 all ordinary target and executor validation still applies.
 
 Admission is checked before allocating a visit or invocation ID. A refused visit
@@ -99,3 +99,38 @@ run
 Budgets may eventually apply to any level, but the model must keep them distinct.
 
 `timeout` is the executor outcome for an invocation that did not finish by its deadline. RUNTIME-002 defines state-visit admission accounting in [its MicroSpec](../plans/runtime-002.yaml). Cancellation enforcement and deadline-event precedence remain deferred.
+
+## Scoped invocation admission (RUNTIME-V2-C)
+
+`Flow.max_invocations_per_run` optionally caps admitted executor invocations.
+`State.invocation_budgets` is a defensively copied tuple of frozen
+`InvocationBudgetScope(name, limit)` values. Multiple states with the same exact
+name share one run-local counter and must declare the same limit. Different names
+are independent; duplicate names within a state and scopes on terminals are invalid.
+Names are nonempty strings without NUL, with no normalization. Limits are exact
+nonnegative integers (not bool); zero refuses the first invocation. A state-local
+invocation allowance is simply a uniquely named scope, not a second counter system.
+
+Admission first checks the existing state-visit limit, then the run invocation cap,
+then scopes in declaration order. All checks precede admission; one refusal cause
+is selected. Refused work consumes neither visits nor invocations. Existing diagnostic
+admission follows successful budget checks. After `state_entered`, all invocation
+counters increment together immediately before `invocation_started`. Executor errors,
+timeouts, semantic failures and exceptions consume capacity. Recorder failures do not
+roll it back: an observed invocation start may fail persistence before executor entry.
+
+Refusal reuses the existing path: clear pending diagnostics, emit `budget_exceeded`,
+then select the state's own budget route (or fail with `run_error` when absent).
+Fallbacks check their own allowances. An exhausted run invocation cap also refuses
+executable fallbacks; terminals remain admissible without invocation capacity.
+
+Metrics are `max_state_visits_per_run`, `max_invocations_per_run`, and
+`invocation_scope:<exact name>`. The scope suffix is opaque. `observed` means already
+consumed usage, so a refusal at limit 3 reports 3, not 4. The budget event has no
+visit/invocation IDs or target; its following `transition_selected` carries the target.
+Event fields and recorder format are unchanged. The historical reader accepts these
+specific metrics while retaining strict rejection of unknown metrics.
+
+Invocation caps do not relax existing cycle rules. Executable cycles still require
+visit-bounded admission; all refusal edges participate in cycle safety checking.
+Whole-run state-visit caps are not implemented. The V2 compiler remains deferred.
