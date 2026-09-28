@@ -103,7 +103,7 @@ would require a separate explicit future contract.
 |---|---|---|
 | Primary/escalation rung `budget` | **max_invocations** | Calls to this rung of this logical state across all its visits in one run |
 | Normal state `budget` | `max_invocations`, `max_state_visits` (at least one) | Invocations across all its rungs; logical entries into this state, respectively, within one run |
-| Flow `run_budget` | **max_invocations**, optional `max_state_visits` | All executor invocations; all logical state entries across the entire run, respectively |
+| Flow `run_budget` | **max_invocations** only | All executor invocations across the entire run |
 
 All values must be positive integers, excluding bool, floats, strings, zero, negatives
 and null. Supplied mappings cannot be empty. Omitted state limits are unspecified
@@ -115,18 +115,24 @@ Limits are independent upper bounds, not reservations or guarantees of execution
 
 A logical entry occurs at the initial state or an explicit workflow transition,
 including a self-transition. Escalation into another rung does not constitute another
-logical entry. Whole-run visits include a reached terminal. A terminal has no local
-budget and ends the run. Run max_state_visits is optional: each nonterminal entry
-requires work, and the mandatory invocation fuse bounds execution; it is useful as
-an additional global admission fuse. It no longer means a cap repeated per state.
+logical entry. A terminal has no local budget and ends the run.
+
+V2-001B intentionally removes `run_budget.max_state_visits` instead of implementing
+another runtime counter. The strict loader rejects it, even alongside a valid
+`max_invocations`. The mandatory run invocation cap bounds executable work; state-local
+visit limits bound repetition where specified, and static runtime cycle validation
+prevents refusal loops. State-local `max_state_visits` remains available. No whole-run
+visit, role, duration, cost or token budget is part of this DSL.
 
 `max_duration_seconds` is rejected at every location. Timing observability remains
 unchanged; measuring durations is not deadline enforcement. Exact deadline/cancellation
 semantics need separate future work. No declared duration is silently ignored.
 
-This remains schema only. Invocation/visit admission, refusal precedence and enforcement
-are the RUNTIME-V2-C prerequisite; no runtime enforcement is claimed here. No provider
-or role semantics need to enter runtime. Existing version-1 budgets are unchanged.
+This loader remains schema only. RUNTIME-V2-A/B/C provide the required generic
+outcome, routing and invocation-accounting primitives; all remaining V2 budget
+fields have exact mappings in the compiler audit. No mandatory budget runtime
+prerequisite remains. Compilation is still deferred, and compiled graphs must satisfy
+existing runtime cycle validation. Existing version-1 budgets are unchanged.
 
 ## Exhaustion and matching
 
@@ -151,8 +157,8 @@ as ready, reproduced, not_reproduced, needs_human, pass and fail remain unchange
 
 `budget_exceeded` remains a control-plane fact, not a provider-returned result. The
 routing order does not override admission: an exhausted state/run cap cannot authorize
-additional work by escalating. RUNTIME-V2-B/C must define refusal scope, admission and
-safe nonterminal budget routing; V2-001A does not execute any of these declarations.
+additional work by escalating. RUNTIME-V2-B/C provide generic refusal routing and
+admission; the V2 loader does not execute any of these declarations.
 
 ## Graph and YAML validation
 

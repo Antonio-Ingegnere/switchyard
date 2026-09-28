@@ -1,6 +1,6 @@
 id: V2-002
-status: blocked_pending_runtime_prerequisites
-updated_by: RUNTIME-V2-C
+status: budget_prerequisites_satisfied_compiler_deferred
+updated_by: V2-001B
 goal: |
   Compile corrected v2 bundles to existing runtime plans after generic outcome,
   budget-routing and exact local/run accounting prerequisites are implemented.
@@ -15,8 +15,9 @@ contract_correction: |
   budgets. Routing reuse must not accidentally share execution allowances. No shared
   named scope is introduced. State max_invocations covers its rungs across one run;
   state max_state_visits counts logical entries. Rung max_invocations is local to
-  that logical state/rung across visits, default one. Run invocation/visit caps are
-  whole-run totals, not repeated per-state limits. All provided limits are positive ints.
+  that logical state/rung across visits, default one. V2-001B removes the optional
+  whole-run visit cap rather than implementing it. Mandatory run max_invocations is
+  the sole whole-run budget. All provided limits are positive ints.
 execution_completeness: |
   Resolved declaratively by V2-001A: ladder-bearing states require an existing
   escalation_exhausted target; executable targets are permitted and reachability
@@ -45,18 +46,16 @@ budget_capability_mapping:
   - field: run.max_invocations
     classification: SUPPORTED EXACTLY
     reason: Flow.max_invocations_per_run admits only that many executable invocations; terminals consume none.
-  - field: run.max_state_visits
-    classification: UNSUPPORTED
-    reason: |
-      Whole-run logical-entry cap, including terminal entry, has no runtime equivalent.
-      Do not approximate with sums of per-state limits or count internal rung hops.
-remaining_compiler_prerequisites:
-  - Exact whole-run logical-entry admission cap remains a separate runtime design task.
-  - |
-    Cycle validation intentionally still requires visit-bounded admission on cycles.
-    Invocation/run caps do not authorize new cyclic graphs in RUNTIME-V2-C. Supporting
-    v2 run-cap-only cyclic flows requires a separately reviewed validation extension.
+remaining_required_budget_prerequisites: []
+compiler_constraints: |
+  All required budget fields are supported exactly; no additional mandatory runtime
+  accounting primitive is required. Whole-run visit accounting was removed from the
+  DSL, not implemented. Existing cycle validation remains unchanged: invocation/run
+  caps alone do not make every cyclic graph valid. The future compiler must produce
+  graphs accepted by that validator or report an unsupported compilation; this audit
+  does not assert that arbitrary V2 cyclic graphs are already directly executable.
 removed_requirements:
+  - V2-001B intentionally removes run max_state_visits; no whole-run visit counter required.
   - No shared role invocation/escalation accounting.
   - No rung, role or run duration/deadline enforcement.
   - No provider-specific budget semantics.
@@ -79,8 +78,8 @@ prerequisites:
     order. Budget refusal uses the state's own route without allocating IDs or
     consuming capacity. New metrics retain already-consumed observed semantics.
     No role/provider semantics, new Event fields, duration enforcement or whole-run
-    visit cap. Existing static cycle rules are not relaxed. Compiler remains blocked
-    on the explicit remaining prerequisites above.
+    visit cap. V2-001B removes the latter from the required DSL. Existing static cycle
+    rules are not relaxed. Compiler implementation remains deferred to its own slice.
 proposed_public_api: |
   Not implemented: compile_workflow(bundle, flow_name, executor_resolver) -> CompiledWorkflow.
   Resolver is Callable[[ResolvedInvocation], Executor]. Frozen binding carries
@@ -99,7 +98,7 @@ acceptance:
   - Existing v1, runtime, recording, observability and presets retain behavior.
 verification:
   - V2-001A loader regression tests validate the corrected declarative contract.
-  - Existing full offline suite; compiler tests wait for the remaining prerequisites above.
+  - Existing full offline suite; compiler tests belong to the later compiler implementation slice.
 non_goals:
   - Compiler or prerequisite implementation, duration budgets, role counters, artifacts or Adeo migration.
 historical_audit_evidence_before_runtime_v2_a:

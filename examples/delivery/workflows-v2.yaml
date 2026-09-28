@@ -48,7 +48,7 @@ roles:
 flows:
   feature:
     entry: SPECIFY
-    run_budget: {max_invocations: 10, max_state_visits: 20}
+    run_budget: {max_invocations: 10}
     states:
       SPECIFY:
         role: specifier
@@ -92,7 +92,7 @@ flows:
       NEEDS_HUMAN: {terminal: true}
   bugfix:
     entry: TRIAGE
-    run_budget: {max_invocations: 14, max_state_visits: 20}
+    run_budget: {max_invocations: 14}
     states:
       TRIAGE:
         role: triager

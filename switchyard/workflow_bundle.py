@@ -138,7 +138,7 @@ def _budget(value, scope, path):
     allowed = {
         'rung': {'max_invocations'},
         'state': {'max_invocations', 'max_state_visits'},
-        'run': {'max_invocations', 'max_state_visits'},
+        'run': {'max_invocations'},
     }[scope]
     _fields(value, {'max_invocations'} if scope in ('run', 'rung') else set(), allowed, path)
     _nonempty_mapping(value, path)

@@ -1,0 +1,37 @@
+id: V2-001B
+goal: |
+  Remove run_budget.max_state_visits from the opt-in V2 DSL instead of introducing
+  a redundant runtime counter; retain mandatory run invocation safety.
+scope:
+  - switchyard/workflow_bundle.py
+  - examples/delivery/workflows-v2.yaml
+  - tests/test_workflow_bundle.py
+  - docs/design/workflow-bundle-v2.md
+  - docs/plans/v2-002-workflow-compiler.yaml
+constraints:
+  - No runtime, Event, executors, observability, V1 loader, delivery or Adeo changes.
+  - No compiler implementation or workflow graph/routing changes.
+semantics: |
+  Rung budgets allow only max_invocations. State budgets optionally specify either
+  or both max_invocations and max_state_visits. Each flow requires run_budget with
+  max_invocations only. All supplied values remain positive integers excluding bool.
+  The removed run field is rejected as unknown, never ignored or migrated.
+  BudgetSpec retains max_state_visits for state-local limits; run instances leave it
+  None. No role, duration, cost or token budgets are introduced.
+  All remaining required budget fields have exact runtime primitives. Existing
+  cycle validation still applies to future compiled graphs; removing a DSL field
+  does not itself authorize graphs the runtime rejects.
+acceptance:
+  - Valid and mandatory run invocation cap; removed run visit cap and unknown keys rejected.
+  - State/rung budgets and escalation validation unchanged.
+  - Canonical feature and bugfix differ only by removal of run visit caps.
+  - Audit removes whole-run visit accounting as a required runtime prerequisite.
+verification:
+  - Focused V2 bundle tests, V1 flow-config tests, complete offline suite.
+non_goals:
+  - Compiler, runtime counters, cycle-validation changes or Adeo migration.
+verification_results:
+  focused: "31 V2 bundle tests passed; 9 V1 flow-config tests passed."
+  full_offline: "300 tests run: 299 passed, one existing platform skip (21.430 seconds), including runtime regressions."
+  command: ".venv/bin/python -m unittest discover -s tests -v"
+  protected_scope: "Runtime, Event, executors, observability, V1 loader and delivery untouched; no compiler implementation or Adeo changes."

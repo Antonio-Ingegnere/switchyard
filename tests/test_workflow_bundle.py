@@ -194,10 +194,10 @@ class WorkflowBundleTests(unittest.TestCase):
     def test_state_rung_and_run_budget_scopes(self):
         data = ladder()
         data['flows']['check']['states']['VERIFY']['budget'] = {'max_invocations': 3, 'max_state_visits': 2}
-        data['flows']['check']['run_budget'] = {'max_invocations': 10, 'max_state_visits': 20}
+        data['flows']['check']['run_budget'] = {'max_invocations': 10}
         bundle = self.load(data)
         self.assertEqual(bundle.flow('check').states['VERIFY'].budget, BudgetSpec(3, 2))
-        self.assertEqual(bundle.flow('check').run_budget, BudgetSpec(10, 20))
+        self.assertEqual(bundle.flow('check').run_budget, BudgetSpec(10))
         self.assertEqual(bundle.roles['verify'].primary.budget, BudgetSpec(max_invocations=1))
         self.assertEqual(bundle.roles['diagnostician'].escalation[0].binding.budget, BudgetSpec(max_invocations=1))
         self.assertIsNone(self.load().flow('check').states['VERIFY'].budget)
@@ -206,6 +206,21 @@ class WorkflowBundleTests(unittest.TestCase):
             self.load(data)
         data['roles']['verify']['primary']['budget'] = {'max_invocations': 2}
         self.assertEqual(self.load(data).roles['verify'].primary.budget.max_invocations, 2)
+
+    def test_run_budget_only_accepts_mandatory_invocation_cap(self):
+        self.assertEqual(self.load().flow('check').run_budget, BudgetSpec(max_invocations=1))
+        for key in ('max_state_visits', 'unknown_limit', 'max_tokens', 'max_cost'):
+            with self.subTest(key=key):
+                data = minimal()
+                data['flows']['check']['run_budget'] = {'max_invocations': 12, key: 20}
+                self.invalid(data, 'flows.check.run_budget.' + key)
+        data = minimal()
+        data['flows']['check']['run_budget'] = {}
+        self.invalid(data, 'flows.check.run_budget.max_invocations')
+        bundle = load_workflow_bundle(EXAMPLE)
+        for flow in bundle.flows.values():
+            self.assertIsNone(flow.run_budget.max_state_visits)
+            self.assertGreater(flow.run_budget.max_invocations, 0)
 
     def test_invalid_budget_values_at_every_scope(self):
         for where in ('primary', 'step', 'state', 'run'):
@@ -248,7 +263,7 @@ class WorkflowBundleTests(unittest.TestCase):
         data = minimal(); del data['flows']['check']['run_budget']
         self.invalid(data, 'flows.check.run_budget')
         data = minimal(); data['flows']['check']['run_budget'] = {'max_state_visits': 10}
-        self.invalid(data, 'flows.check.run_budget.max_invocations')
+        self.invalid(data, 'flows.check.run_budget.max_state_visits')
 
     def test_verifier_reuse_has_independent_state_budgets(self):
         bundle = load_workflow_bundle(EXAMPLE)
