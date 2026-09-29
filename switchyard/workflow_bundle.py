@@ -33,9 +33,36 @@ class BudgetSpec:
 
 
 @dataclass(frozen=True, slots=True)
+class CommandOutcomes:
+    exit_codes: Mapping[int, str]
+    default: str
+
+    def __post_init__(self):
+        object.__setattr__(self, 'exit_codes', MappingProxyType(dict(self.exit_codes)))
+
+
+@dataclass(frozen=True, slots=True)
+class CommandCapture:
+    artifact: str
+    stream: Literal['stdout', 'stderr', 'combined']
+    max_bytes: int
+
+
+@dataclass(frozen=True, slots=True)
+class CommandSpec:
+    argv: tuple[str, ...]
+    outcomes: CommandOutcomes
+    capture: CommandCapture | None = None
+
+    def __post_init__(self):
+        object.__setattr__(self, 'argv', tuple(self.argv))
+
+
+@dataclass(frozen=True, slots=True)
 class ExecutionProfile:
     provider: Provider
     model: str | None = None
+    command: CommandSpec | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -234,6 +261,68 @@ def _artifact_catalog(data, path='artifacts'):
     return result
 
 
+def _command(data, artifacts, path):
+    _fields(data, {'argv', 'outcomes'}, {'capture'}, path)
+    argv = data['argv']
+    if type(argv) is not list or not argv:
+        raise _error(path + '.argv', 'expected nonempty list')
+    for index, arg in enumerate(argv):
+        if type(arg) is not str or not arg or '\0' in arg:
+            raise _error(f'{path}.argv[{index}]', 'expected nonempty string without NUL')
+    outcomes = data['outcomes']
+    _fields(outcomes, {'exit_codes', 'default'}, set(), path + '.outcomes')
+    _mapping(outcomes['exit_codes'], path + '.outcomes.exit_codes')
+    def outcome(value, where):
+        _name(value, where)
+        if value == 'budget_exceeded':
+            raise _error(where, 'reserved control-plane outcome')
+        return value
+    codes = {}
+    for code, value in outcomes['exit_codes'].items():
+        where = path + '.outcomes.exit_codes'
+        if type(code) is not int or code < 0:
+            raise _error(where, 'expected nonnegative integer exit code, excluding bool')
+        label = str(code) if code.bit_length() < 256 else '<large integer>'
+        codes[code] = outcome(value, f'{where}[{label}]')
+    default = outcome(outcomes['default'], path + '.outcomes.default')
+    capture = None
+    if 'capture' in data:
+        raw = data['capture']; here = path + '.capture'
+        _fields(raw, {'artifact', 'stream', 'max_bytes'}, set(), here)
+        name = _name(raw['artifact'], here + '.artifact')
+        if name not in artifacts:
+            raise _error(here + '.artifact', 'undeclared artifact')
+        spec = artifacts[name]
+        if spec.source == 'request' or spec.format not in ('text', 'markdown') or spec.schema is not None:
+            raise _error(here + '.artifact', 'capture requires non-request text/markdown without schema')
+        stream = _enum(raw['stream'], {'stdout','stderr','combined'}, here + '.stream')
+        limit = raw['max_bytes']
+        if type(limit) is not int or limit <= 0:
+            raise _error(here + '.max_bytes', 'expected positive integer, excluding bool')
+        capture = CommandCapture(name, stream, limit)
+    return CommandSpec(tuple(argv), CommandOutcomes(codes, default), capture)
+
+
+def _command_uses(flow, roles, profiles, path):
+    for name, state in flow.states.items():
+        if state.terminal:
+            continue
+        role = roles[state.role]
+        bindings = (role.primary,) + tuple(step.binding for step in role.escalation)
+        for index, binding in enumerate(bindings):
+            command = profiles[binding.profile].command
+            if command is None:
+                continue
+            here = _at(path + '.states', name)
+            next_triggers = role.escalation[index].on if index < len(role.escalation) else ()
+            for value in (*command.outcomes.exit_codes.values(), command.outcomes.default):
+                if (value not in next_triggers and value not in state.on and
+                        not (value in ESCALATION_TRIGGERS and state.escalation_exhausted is not None)):
+                    raise _error(here + '.on', f'command profile {binding.profile!r} produces unhandled outcome {value!r}')
+            if command.capture and command.capture.artifact not in state.produces:
+                raise _error(here + '.produces', f'missing command capture artifact {command.capture.artifact!r}')
+
+
 def _workflow(data, roles, artifacts, path):
     _fields(data, {'entry', 'run_budget', 'states'}, set(), path)
     entry = _name(data['entry'], path + '.entry')
@@ -307,13 +396,18 @@ def _workflow(data, roles, artifacts, path):
     return WorkflowSpec(entry, budget, states)
 
 
+def _bundle_yaml_data(text):
+    return _yaml_data(text, integer_keys_at=lambda path: re.fullmatch(
+        r'profiles(?:\.[A-Za-z_][A-Za-z0-9_-]*|\["[^"\\]+"\])\.command\.outcomes\.exit_codes', path) is not None)
+
+
 def load_workflow_bundle(path: str | os.PathLike[str]) -> WorkflowBundle:
     """Read/validate UTF-8 v2 YAML. Never execute, compile or resolve machine paths."""
     try:
         text = Path(path).read_text(encoding='utf-8')
     except (OSError, UnicodeError, TypeError, ValueError) as exc:
         raise _error('$', 'cannot read UTF-8 workflow bundle') from exc
-    data = _yaml_data(text)
+    data = _bundle_yaml_data(text)
     _fields(data, {'version', 'profiles', 'roles', 'flows'}, {'artifacts'}, '')
     if type(data['version']) is not int or data['version'] != 2:
         raise _error('version', 'expected workflow bundle version 2 (integer, excluding bool)')
@@ -325,16 +419,20 @@ def load_workflow_bundle(path: str | os.PathLike[str]) -> WorkflowBundle:
     profiles = {}
     for name, definition in data['profiles'].items():
         here = _at('profiles', name)
-        _fields(definition, {'provider'}, {'model'}, here)
+        _fields(definition, {'provider'}, {'model', 'command'}, here)
         provider = _enum(definition['provider'], {'claude', 'codex', 'command'}, here + '.provider')
         if provider == 'command':
             if 'model' in definition:
                 raise _error(here + '.model', 'command profile must omit model')
+            _fields(definition, {'provider', 'command'}, set(), here)
             model = None
         else:
             _fields(definition, {'provider', 'model'}, set(), here)
             model = _name(definition['model'], here + '.model')
-        profiles[name] = ExecutionProfile(provider, model)
+        command = _command(definition['command'], artifacts, here + '.command') if provider == 'command' else None
+        profiles[name] = ExecutionProfile(provider, model, command)
     roles = {name: _role(definition, profiles, _at('roles', name)) for name, definition in data['roles'].items()}
     flows = {name: _workflow(definition, roles, artifacts, _at('flows', name)) for name, definition in data['flows'].items()}
+    for name, flow in flows.items():
+        _command_uses(flow, roles, profiles, _at('flows', name))
     return WorkflowBundle(2, profiles, roles, flows, artifacts)

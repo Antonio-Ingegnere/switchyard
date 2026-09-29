@@ -1,0 +1,37 @@
+id: V2-001D
+goal: Declare deterministic command capabilities in V2 profiles without executing them.
+scope:
+  - Frozen CommandSpec(argv, outcomes, capture), CommandOutcomes(exit_codes, default), CommandCapture(artifact, stream, max_bytes).
+  - ExecutionProfile.command and CompiledWorkflow.profiles immutable catalog; ExecutionBinding unchanged.
+  - Strict command/state outcome and capture-production consistency for each role rung.
+  - Canonical verifier uses python3 -m unittest discover -s tests with pass/fail and verifier_evidence capture.
+constraints:
+  - Command profiles require argv and outcomes; non-command profiles reject command.
+  - Exact nonempty string argv elements without NUL; static direct argv, no shell, interpolation, env, chaining or retries.
+  - Integer nonnegative exit codes excluding bool; required default covers other normal exits only.
+  - Outcomes use existing V2 lexical syntax, excluding reserved budget_exceeded.
+  - Capture requires a declared text/markdown non-request artifact produced by every using state.
+  - Positive integer capture limit; stdout/stderr/combined only; capture for every normal exit.
+  - Future capture retains UTF-8 tail with truncation indication inside byte bound, never silently truncates.
+  - State consistency follows adjacent rung, normal transition, then escalation exhaustion precedence.
+  - Shared YAML parser gains optional integer-key path support only; V1 default behavior is unchanged.
+  - No runtime, workspace, context transport, budget or provider execution changes.
+acceptance:
+  - Command capability loads immutably and is inspectable without rereading YAML.
+  - Invalid command configuration and inconsistent state uses fail before resolution/execution.
+  - Canonical feature/bugfix share the verifier profile and versioned evidence artifact.
+verification:
+  - Focused command-profile validation tests including integer-key YAML boundaries and immutable metadata.
+  - Existing V2, workspace, context, runtime, V1, observability and delivery tests through full offline suite.
+non_goals:
+  - Command execution, process capture, provider adapters or effort translation.
+  - Adeo changes or resuming V2-004.
+verification_result:
+  focused_command_profiles: 11 passed; subprocess launch mocked and asserted absent.
+  existing_v2_loader_compiler: 55 passed.
+  workspace_regressions: 23 passed.
+  full_offline_suite: 393 tests, 392 passed, 1 existing platform skip (23.403 seconds).
+  runtime_event_workspace_context_semantics: unchanged
+  provider_execution_implementation: none
+  adeo: untouched
+  command_dsl_blocker: resolved

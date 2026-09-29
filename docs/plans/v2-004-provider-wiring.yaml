@@ -1,0 +1,94 @@
+id: V2-004
+goal: Resolve V2 stage bindings to bounded provider and deterministic command backends.
+status: command_schema_resolved_implementation_pending
+scope:
+  - Audit existing adapters and declarative command execution completeness.
+  - Record the required schema prerequisite before implementing provider wiring.
+constraints:
+  - No runtime, Event, compiler, workflow graph, artifact contract or Adeo changes.
+  - No hidden command lookup by logical state or project commands in machine configuration.
+  - No provider invocation or partial implementation around a required DSL gap.
+acceptance:
+  - Every command-bound state identifies a deterministic command declaratively.
+  - Command exit status maps explicitly to declared semantic outcomes.
+  - Model and effort mappings must be verified against supported provider interfaces before implementation.
+verification:
+  - Inspected runtime/command.py, runtime/codex.py, runtime/claude.py and agent-driver protocol.
+  - Inspected V2 types, strict field whitelists, compiler binding and canonical verifier.
+  - Loader probes with repository YAML parser confirmed command fields on profile/state and root commands catalog are rejected.
+non_goals:
+  - Implementing a schema correction or provider adapters before resolving the blocker.
+  - Real provider calls, Adeo migration or V2-005.
+infrastructure_audit:
+  codex: |
+    Existing CodexExecutor wraps CommandExecutor with one codex exec invocation.
+    Uses ephemeral mode, ignores user config/rules, workspace-write sandbox and no
+    approval prompts. Renders WorkUnit and optional bounded diagnostics. Nonzero
+    command failure maps to error. No explicit model/effort selection or structured
+    StageResult extraction exists in this adapter.
+  claude: |
+    Existing ClaudeExecutor is implemented, not absent. It wraps CommandExecutor
+    with print/no-session-persistence/text output, restricted acceptEdits permissions,
+    no permission prompts, Read/Edit/Write/Glob/Grep tools and disallowed MCP tools.
+    It rejects input diagnostics and maps nonzero exit to error. It has no explicit
+    model/effort selection or structured StageResult extraction. This audit inspected
+    repository code; current external CLI support and authenticated operation were
+    not verified because the required DSL blocker stops this slice first.
+  command: |
+    Command(executable, argv, cwd, invocation_timeout_seconds,
+    diagnostic_capture_max_bytes) requires explicit absolute executable/cwd and tuple
+    argv. CommandExecutor uses shell=False, DEVNULL stdin, inherited environment,
+    one child process and optional merged stdout/stderr diagnostic capture.
+    It maps exit zero/nonzero to success/failed, spawn OSError to error and deadline
+    expiry to timeout. Timeout kills and waits for the direct child; it does not claim
+    process-tree cancellation. Escaped exceptions trigger cleanup and propagate.
+    No public cancellation mechanism or semantic retries exist.
+  reuse: |
+    Reuse Command structural validation and existing subprocess/timeout/diagnostic
+    conventions where practical. Current output is discarded or retained only as a
+    bounded diagnostic tail (at most 4096 UTF-8 bytes). That channel is not a complete
+    structured-result channel. Existing runtime adapters therefore cannot be directly
+    reused as StageExecutors producing artifacts/handoffs. Structured result capture
+    must be designed after the command schema prerequisite and provider CLI audit.
+prior_blocker:
+  status: resolved_by_V2-001D
+  missing_capability: Declarative command identity, command definition and exit-to-semantic-outcome mapping.
+  historical_evidence: |
+    Before V2-001D, ExecutionProfile contained only provider/model. InvocationBinding contains only
+    profile/effort/budget. WorkflowStateSpec has no command reference. WorkflowBundle
+    has no commands catalog. Canonical verifier selects profile command and its states
+    declare pass/fail transitions, but neither says which executable operation to run.
+    Transition labels alone cannot define the exit-code mapping generically.
+    Loader rejects profiles.command.command, flows.feature.states.VERIFY.command,
+    and a root commands catalog as unknown fields. The unmodified canonical bundle loads.
+  resolution: |
+    V2-001D requires command profiles to declare static argv, exit_codes/default
+    semantic outcomes and optional bounded textual capture. Loader checks every
+    profile use against state transitions and produces. ExecutionProfile.command
+    and CompiledWorkflow.profiles preserve immutable capabilities. ExecutionBinding
+    remains unchanged. Provider setup can receive bundle.profiles without YAML rereads.
+    Canonical verifier declares the Switchyard unittest entrypoint and captures
+    verifier_evidence on every normal exit. No command configuration prerequisite remains.
+  prohibited_workarounds:
+    - Hardcoding VERIFY or verifier role names in the provider resolver.
+    - Hiding project verifier argv or semantic pass/fail assumptions in provider runtime config.
+    - Treating an LLM output envelope as the deterministic command contract.
+pending_design:
+  provider_mechanisms: Verify documented Claude/Codex structured output channels and CLI capabilities after prerequisite.
+  structured_output: Not frozen; must strictly parse StageResult-compatible JSON without prose heuristics or retries.
+  input_rendering: Planned shared deterministic rendering of only StageInvocation with advisory prior reasoning label.
+  effort_models: Not verified or implemented; no flags or supported model mappings are claimed.
+  machine_config: Not implemented; explicit executable paths, working directory and transport timeout remain local concerns.
+  command_mapping: Implement declared exit_codes/default and capture using immutable CommandSpec; transport failures stay execution failures.
+  remaining_implementation:
+    - ClaudeStageExecutor and verified model/effort/structured-output support.
+    - CodexStageExecutor and verified model/effort/structured-output support.
+    - CommandStageExecutor with direct argv, normal-exit mapping and bounded evidence capture.
+    - Provider resolver with explicit local executable/working-directory/timeout configuration.
+    - Shared structured input rendering and strict StageResult output parsing.
+  remaining_command_configuration_prerequisites: []
+verification_result:
+  implementation_tests: Not run; no provider implementation exists for this slice.
+  full_offline_suite: Not rerun for this documentation-only blocked audit.
+  provider_calls: None.
+  changed_files: [docs/plans/v2-004-provider-wiring.yaml]

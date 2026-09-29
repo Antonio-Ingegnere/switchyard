@@ -25,6 +25,15 @@ profiles:
     model: codex
   command:
     provider: command
+    command:
+      argv: [python3, -m, unittest, discover, -s, tests]
+      outcomes:
+        exit_codes: {0: pass}
+        default: fail
+      capture:
+        artifact: verifier_evidence
+        stream: combined
+        max_bytes: 32768
 roles:
   specifier:
     primary: {profile: claude-sonnet, effort: medium}

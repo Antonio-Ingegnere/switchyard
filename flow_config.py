@@ -39,7 +39,8 @@ def _at(path, key):
     return (path + ('.' if path and not component.startswith('[') else '') + component)[:400]
 
 
-def _yaml_data(text):
+def _yaml_data(text, *, integer_keys_at=None):
+    """Strict shared syntax parser; V1 leaves integer-key opt-in disabled."""
     try:
         yaml = importlib.import_module('yaml')
     except ModuleNotFoundError as exc:
@@ -74,10 +75,17 @@ def _yaml_data(text):
                 location = f' (line {mark.line+1}, column {mark.column+1})'
                 if isinstance(key_node, yaml.ScalarNode) and key_node.value == '<<':
                     raise _error(_at(path, '<<'), 'merge keys are forbidden' + location)
-                if not isinstance(key_node, yaml.ScalarNode) or key_node.tag != 'tag:yaml.org,2002:str':
+                integer_map = integer_keys_at is not None and integer_keys_at(path)
+                allowed_tags = {'tag:yaml.org,2002:str'}
+                if integer_map:
+                    allowed_tags.add('tag:yaml.org,2002:int')
+                if not isinstance(key_node, yaml.ScalarNode) or key_node.tag not in allowed_tags:
                     raise _error(path or '$', 'expected scalar string mapping key' + location)
-                key = loader.construct_object(key_node)
-                child_path = _at(path, key)
+                try:
+                    key = loader.construct_object(key_node)
+                except (ValueError, OverflowError) as exc:
+                    raise _error(path or '$', 'invalid YAML mapping key' + location) from exc
+                child_path = f'{path}[{key_node.value[:64]}]' if type(key) is int else _at(path, key)
                 if key in seen:
                     raise _error(child_path, 'duplicate mapping key' + location)
                 seen.add(key)

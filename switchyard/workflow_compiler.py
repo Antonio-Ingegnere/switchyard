@@ -4,7 +4,7 @@ from types import MappingProxyType
 from typing import Callable, Mapping
 
 from runtime import Executor, Flow, FlowValidationError, InvocationBudgetScope, State, validate
-from .workflow_bundle import (ESCALATION_TRIGGERS, ArtifactSpec, Effort, Provider, WorkflowBundle,
+from .workflow_bundle import (ESCALATION_TRIGGERS, ArtifactSpec, Effort, ExecutionProfile, Provider, WorkflowBundle,
                               WorkflowStateSpec)
 
 
@@ -44,9 +44,10 @@ class CompiledWorkflow:
     plan: Mapping[str, CompiledStatePlan]
     entry_states: Mapping[str, str]
     artifacts: Mapping[str, ArtifactSpec] = field(default_factory=dict)
+    profiles: Mapping[str, ExecutionProfile] = field(default_factory=dict)
 
     def __post_init__(self):
-        for name in ('executors', 'plan', 'entry_states', 'artifacts'):
+        for name in ('executors', 'plan', 'entry_states', 'artifacts', 'profiles'):
             object.__setattr__(self, name, MappingProxyType(dict(getattr(self, name))))
 
 
@@ -145,4 +146,4 @@ def compile_workflow(bundle: WorkflowBundle, flow_name: str,
         validate(flow, executors)
     except FlowValidationError as exc:
         raise WorkflowCompileError(f'cannot represent flow {flow_name!r}: {exc}') from exc
-    return CompiledWorkflow(flow, executors, plan, entries, bundle.artifacts)
+    return CompiledWorkflow(flow, executors, plan, entries, bundle.artifacts, bundle.profiles)

@@ -6,11 +6,11 @@ import unittest
 from unittest.mock import patch
 
 import yaml
-from flow_config import FlowConfigError, _yaml_data
+from flow_config import FlowConfigError
 from runtime import ExecutionError, ExecutorResult, InvocationResponse, WorkUnit, run
 from runtime.recording import JsonlRecorder
 from switchyard.observability import read_events, summarize_runs
-from switchyard.workflow_bundle import load_workflow_bundle
+from switchyard.workflow_bundle import _bundle_yaml_data, load_workflow_bundle
 from switchyard.workflow_compiler import compile_workflow, WorkflowCompileError
 
 EXAMPLE = Path(__file__).resolve().parents[1] / 'examples/delivery/workflows-v2.yaml'
@@ -45,7 +45,7 @@ def fixture():
         'profiles': {'small': {'provider': 'claude', 'model': 'haiku'},
                      'large': {'provider': 'claude', 'model': 'sonnet'},
                      'other': {'provider': 'codex', 'model': 'codex'},
-                     'cmd': {'provider': 'command'}},
+                     'cmd': {'provider': 'command', 'command': {'argv': ['python3', '-m', 'unittest'], 'outcomes': {'exit_codes': {0: 'ready'}, 'default': 'ready'}}}},
         'roles': {'worker': {'primary': {'profile': 'small', 'effort': 'medium'},
                             'escalation': [
                                 {'kind': 'vertical', 'profile': 'large', 'effort': 'high',
@@ -234,7 +234,7 @@ class WorkflowCompilerTests(unittest.TestCase):
             self.execute(data)
 
     def test_canonical_feature_paths(self):
-        data = _yaml_data(EXAMPLE.read_text())
+        data = _bundle_yaml_data(EXAMPLE.read_text())
         for outcomes, expected, terminal in [
             ({}, [('SPECIFY', 0), ('IMPLEMENT', 0), ('VERIFY', 0)], 'READY_FOR_MANUAL_QA'),
             ({'VERIFY': ['fail'], ('DIAGNOSE_FAILURE', 0): ['inconclusive']},
@@ -257,7 +257,7 @@ class WorkflowCompilerTests(unittest.TestCase):
                 self.assertNotEqual(first.state.invocation_budgets, second.state.invocation_budgets)
 
     def test_canonical_feature_state_and_run_refusal(self):
-        data = _yaml_data(EXAMPLE.read_text())
+        data = _bundle_yaml_data(EXAMPLE.read_text())
         data['flows']['feature']['states']['DIAGNOSE_FAILURE']['budget']['max_invocations'] = 1
         _, resolver, result = self.execute(data, 'feature', {'VERIFY': ['fail'], ('DIAGNOSE_FAILURE', 0): ['inconclusive']})
         self.assertEqual(result.terminal_state, 'NEEDS_HUMAN')
@@ -269,7 +269,7 @@ class WorkflowCompilerTests(unittest.TestCase):
         self.assertEqual(next(e.metric for e in result.events if e.kind == 'budget_exceeded'), 'max_invocations_per_run')
 
     def test_canonical_bugfix_paths_and_specific_rediagnosis_role(self):
-        data = _yaml_data(EXAMPLE.read_text())
+        data = _bundle_yaml_data(EXAMPLE.read_text())
         for outcomes, diagnosis, tail in [
             ({}, [('DIAGNOSE', 0)], [('VERIFY', 0)]),
             ({('DIAGNOSE', 0): ['inconclusive']}, [('DIAGNOSE', 0), ('DIAGNOSE', 1)], [('VERIFY', 0)]),
@@ -288,7 +288,7 @@ class WorkflowCompilerTests(unittest.TestCase):
     def test_bugfix_real_rung_refusal_and_enclosing_state_precedence(self):
         for state_cap, expected_terminal, used_alternate in [(3, 'READY_FOR_MANUAL_QA', True), (1, 'NEEDS_HUMAN', False)]:
             with self.subTest(state_cap=state_cap):
-                data = _yaml_data(EXAMPLE.read_text())
+                data = _bundle_yaml_data(EXAMPLE.read_text())
                 states = data['flows']['bugfix']['states']
                 states['DIAGNOSE']['budget'].update(max_state_visits=2, max_invocations=state_cap)
                 states['SPECIFY_FIX']['on']['recheck'] = 'DIAGNOSE'

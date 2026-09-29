@@ -17,7 +17,7 @@ EXAMPLE = Path(__file__).resolve().parents[1] / 'examples/delivery/workflows-v2.
 
 
 def minimal():
-    return {'version': 2, 'profiles': {'cmd': {'provider': 'command'}},
+    return {'version': 2, 'profiles': {'cmd': {'provider': 'command', 'command': {'argv': ['python3', '-m', 'unittest'], 'outcomes': {'exit_codes': {0: 'pass'}, 'default': 'pass'}}}},
             'roles': {'verify': {'primary': {'profile': 'cmd'}}},
             'flows': {'check': {'entry': 'VERIFY', 'run_budget': {'max_invocations': 1, 'on_exceeded': 'DONE'},
                                'states': {'VERIFY': {'role': 'verify', 'on': {'pass': 'DONE'}},
@@ -64,7 +64,7 @@ class WorkflowBundleTests(unittest.TestCase):
         self.assertEqual(bundle.version, 2)
         self.assertEqual(bundle.flow('check').run_budget.max_invocations, 1)
         self.assertEqual(bundle.roles['verify'].primary, InvocationBinding('cmd'))
-        self.assertEqual(bundle.profiles['cmd'], ExecutionProfile('command'))
+        self.assertEqual(bundle.profiles['cmd'].provider, 'command')
 
     def test_example_independent_flows(self):
         bundle = load_workflow_bundle(EXAMPLE)
@@ -404,7 +404,7 @@ class WorkflowBundleTests(unittest.TestCase):
     def test_exhaustion_edge_counts_for_reachability(self):
         data = ladder(); flow = data['flows']['check']
         flow['states']['VERIFY'].update(role='diagnostician', escalation_exhausted='RECOVER')
-        flow['states']['RECOVER'] = {'role': 'verify', 'on': {'ready': 'DONE'}}
+        flow['states']['RECOVER'] = {'role': 'verify', 'on': {'pass': 'DONE'}}
         bundle = self.load(data)
         self.assertFalse(bundle.flow('check').states['RECOVER'].terminal)
         self.assertEqual(bundle.flow('check').states['VERIFY'].escalation_exhausted, 'RECOVER')

@@ -1,4 +1,4 @@
-# Workflow bundle v2 (corrected by V2-001A)
+# Workflow bundle v2
 
 A bundle is a project-facing description, not an executable flow. The only loader is
 `switchyard.workflow_bundle.load_workflow_bundle(path) -> WorkflowBundle`.
@@ -31,7 +31,7 @@ Unknown fields are errors at every level; no metadata escape hatch exists.
 |---|---|
 | Root | **version: 2**, **profiles**, **roles**, **flows**, `artifacts` |
 | `artifacts.<name>` | **format**, `schema`, `source` |
-| `profiles.<name>` | **provider**, **model** for agent providers |
+| `profiles.<name>` | **provider**, **model** for agent providers, **command** for command provider |
 | `roles.<name>` | **primary**, `escalation` |
 | `primary` | **profile**, `effort`, `budget` |
 | Each `escalation` item | **kind**, **on**, **profile**, **context**, `effort`, `budget` |
@@ -43,11 +43,12 @@ Unknown fields are errors at every level; no metadata escape hatch exists.
 state `on` is a nonempty mapping of project-defined outcome labels to state names.
 References, mapping names, models, outcomes and artifact names match
 `[A-Za-z][A-Za-z0-9_.-]*` exactly. They are logical identifiers, not paths or prose.
-No trimming, string/number coercion, machine executable, credential or secret fields
-are supported. Model identifiers are not checked against live provider catalogs.
+No trimming, string/number coercion, credential or secret fields are supported.
+Command argv is static project configuration; executable availability is resolved locally later. Model identifiers are not checked against live provider catalogs.
 
 Providers are closed to `claude`, `codex`, and `command` for this first schema.
-Agent profiles require a model; command profiles must omit it, including null.
+Agent profiles require a model and reject command. Command profiles require command
+and must omit model, including null. See the command capability contract below.
 `human` is not a provider. Human boundaries are ordinary project terminal states.
 Profiles cannot contain effort, roles, workflow semantics or budgets.
 
@@ -285,3 +286,89 @@ for artifact-free callers. Declared produces do not force publication on every o
 The caller-owned workspace, strict manifest, MicroSpec validator and immutable handoffs
 are documented in [the durable work contract](work-contract.md). No executor/context
 transport is implemented in this slice.
+
+
+## Declarative command capabilities (V2-001D)
+
+A profile is the physical execution capability. States still choose roles, and roles
+choose profiles. The portable command definition belongs in the bundle; machine-local
+executable resolution, working directory and transport timeout remain external.
+
+```yaml
+profiles:
+  verifier:
+    provider: command
+    command:
+      argv: [python3, -m, unittest, discover, -s, tests]
+      outcomes:
+        exit_codes: {0: pass, 2: blocked}
+        default: fail
+      capture:
+        artifact: verifier_evidence
+        stream: combined
+        max_bytes: 32768
+```
+
+`command` requires exactly `argv` and `outcomes`, with optional `capture`. Unknown
+keys are rejected throughout. Command profiles reject model and profile effort;
+command invocation bindings also continue to reject effort. Agent profiles reject
+command. Existing bare command profiles must now declare this capability explicitly.
+
+`argv` is a nonempty list of exact nonempty strings without NUL, copied to a tuple.
+It specifies one direct process invocation, never a shell command string. Relative
+paths and tool names are allowed; the loader neither executes nor resolves them.
+Absolute paths are not required; portable committed bundles should avoid local paths.
+Arguments are literal: no substitution/interpolation occurs, including braces or
+shell metacharacters. No env, command chaining, retries, extraction regexes or template
+language are supported. Multiple checks belong in one project wrapper or existing
+verification entrypoint. The canonical Switchyard example reuses its documented
+`python3 -m unittest discover -s tests` entrypoint, not an Adeo command.
+
+`outcomes` requires `exit_codes` (a mapping, possibly empty) and `default`. Keys are
+nonnegative integers, excluding bool and quoted numeric strings. There is no platform
+exit-code upper bound imposed by the portable schema. Negative process return codes
+can represent signal termination and are not normal exit statuses. Values and default
+use the existing V2 outcome identifier syntax. `budget_exceeded` is forbidden.
+The strict parser accepts integer keys only at this specific V2 mapping path; V1
+and other mapping-key rules remain unchanged, including duplicate-key rejection.
+
+An explicit code mapping wins; default handles every other **normal process exit**.
+Missing executable, spawn failure, timeout, cancellation and signal/OS transport
+failures are execution failures, not default semantic outcomes. The command adapter
+must not turn them into `fail` just because that is the configured default.
+
+Every possible configured outcome is validated for every state using the profile,
+including profiles in later escalation rungs. Validation follows ordinary precedence:
+next adjacent rung trigger, normal state transition, then recognized trigger with an
+explicit escalation-exhaustion destination. No forward rung search or command-specific
+routing is introduced. Unhandled outcomes fail bundle loading.
+
+Capture, when present, requires all three fields. `artifact` must name a declared,
+non-request text/markdown artifact without a schema; each using state must list it
+in produces. YAML/JSON/MicroSpec raw captures are invalid. `stream` is exactly stdout,
+stderr or combined. `max_bytes` is a positive integer excluding bool. Combined selects
+both streams; V2-004 must define the exact combination order/format.
+
+Capture is produced on every normal exit, including pass and fail. Evidence uses the
+existing versioned stream: VERIFY and VERIFY_AGAIN both produce verifier_evidence,
+so later consumers naturally select its latest committed version.
+
+The future capture representation must retain a UTF-8 tail within max_bytes and
+include truncation status **inside** that byte bound. Reserve the first ASCII byte
+as a status marker: `=` for complete output, `!` for truncated output. The remaining
+max_bytes - 1 bytes contain complete UTF-8 characters from the tail. Thus even a
+one-byte limit can explicitly report truncation. Normalize invalid UTF-8 with
+replacement before selecting the bounded tail; do not split encoded characters.
+These are declarative requirements only; no capture code is implemented in this slice.
+
+Frozen types are `CommandSpec(argv, outcomes, capture=None)`,
+`CommandOutcomes(exit_codes, default)` and `CommandCapture(artifact, stream, max_bytes)`.
+`ExecutionProfile.command` contains this capability for command profiles and is None
+otherwise. CommandOutcomes copies its map to a read-only mapping.
+
+`CompiledWorkflow.profiles` preserves the immutable bundle profile catalog.
+`ExecutionBinding` remains unchanged: its profile_name identifies the definition.
+A future provider resolver can receive `bundle.profiles` during setup (before
+compilation calls it), while plan inspection uses `compiled.profiles`. Neither needs
+to reread YAML or infer commands from role/state names. No command fields enter runtime
+State, no process is launched by loading/compilation, and no adapter is implemented.

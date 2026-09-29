@@ -7,8 +7,8 @@ import unittest
 from unittest.mock import patch
 
 import yaml
-from flow_config import FlowConfigError, _yaml_data
-from switchyard.workflow_bundle import ArtifactSpec, load_workflow_bundle
+from flow_config import FlowConfigError
+from switchyard.workflow_bundle import _bundle_yaml_data, ArtifactSpec, load_workflow_bundle
 from switchyard.workflow_compiler import compile_workflow
 from switchyard.work_contract import (ArtifactProducer, HandoffRecord, WorkContractError,
                                      WorkWorkspace, validate_microspec)
@@ -275,26 +275,27 @@ class ArtifactCatalogTests(unittest.TestCase):
                            {'format': 'text', 'schema': 'microspec'}, {'format': 'json', 'extra': 1},
                            {'format': 1}, {'format': 'markdown', 'source': 'agent'}, None):
             with self.subTest(definition=definition):
-                data = _yaml_data(EXAMPLE.read_text()); data['artifacts']['diagnosis'] = definition
+                data = _bundle_yaml_data(EXAMPLE.read_text()); data['artifacts']['diagnosis'] = definition
                 with self.assertRaises(FlowConfigError): self.load(data)
         for definition in ({'format': 'yaml', 'source': 'request'}, {'format': 'markdown'},
                            {'format': 'text', 'source': 'request', 'schema': 'microspec'}):
-            data = _yaml_data(EXAMPLE.read_text()); data['artifacts']['request'] = definition
+            data = _bundle_yaml_data(EXAMPLE.read_text()); data['artifacts']['request'] = definition
             with self.assertRaises(FlowConfigError): self.load(data)
-        data = _yaml_data(EXAMPLE.read_text()); data['artifacts']['other'] = {'format': 'text', 'source': 'request'}
+        data = _bundle_yaml_data(EXAMPLE.read_text()); data['artifacts']['other'] = {'format': 'text', 'source': 'request'}
         with self.assertRaises(FlowConfigError): self.load(data)
-        data = _yaml_data(EXAMPLE.read_text()); del data['artifacts']['request']
+        data = _bundle_yaml_data(EXAMPLE.read_text()); del data['artifacts']['request']
         with self.assertRaises(FlowConfigError): self.load(data)
 
     def test_references_and_request_production_rejected(self):
         for key, value in [('consumes', ['typo']), ('produces', ['typo']), ('produces', ['request'])]:
-            data = _yaml_data(EXAMPLE.read_text()); data['flows']['feature']['states']['SPECIFY'][key] = value
+            data = _bundle_yaml_data(EXAMPLE.read_text()); data['flows']['feature']['states']['SPECIFY'][key] = value
             with self.subTest(key=key, value=value), self.assertRaises(FlowConfigError): self.load(data)
-        data = _yaml_data(EXAMPLE.read_text()); data['artifacts']['../bad'] = {'format': 'text'}
+        data = _bundle_yaml_data(EXAMPLE.read_text()); data['artifacts']['../bad'] = {'format': 'text'}
         with self.assertRaises(FlowConfigError): self.load(data)
 
     def test_artifact_free_bundle_still_valid(self):
-        data = _yaml_data(EXAMPLE.read_text()); del data['artifacts']
+        data = _bundle_yaml_data(EXAMPLE.read_text()); del data['artifacts']
+        del data['profiles']['command']['command']['capture']
         for flow in data['flows'].values():
             for state in flow['states'].values():
                 state.pop('consumes', None); state.pop('produces', None)
