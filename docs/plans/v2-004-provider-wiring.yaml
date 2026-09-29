@@ -1,94 +1,115 @@
 id: V2-004
 goal: Resolve V2 stage bindings to bounded provider and deterministic command backends.
-status: command_schema_resolved_implementation_pending
+status: complete
 scope:
-  - Audit existing adapters and declarative command execution completeness.
-  - Record the required schema prerequisite before implementing provider wiring.
+  - ClaudeStageExecutor, CodexStageExecutor and CommandStageExecutor below ContextualExecutor.
+  - One shared bounded process helper reusing existing process validation/read/cleanup utilities.
+  - Strict shared StageResult protocol, renderer, local config and profile resolver.
 constraints:
-  - No runtime, Event, compiler, workflow graph, artifact contract or Adeo changes.
-  - No hidden command lookup by logical state or project commands in machine configuration.
-  - No provider invocation or partial implementation around a required DSL gap.
+  - Runtime, Event, V1 adapters, compiler, workflow graphs, budgets and context selection unchanged.
+  - One process per stage; no adapter retries, escalation or artifact/handoff persistence.
+  - No real provider calls in mandatory tests; no Adeo changes.
 acceptance:
-  - Every command-bound state identifies a deterministic command declaratively.
-  - Command exit status maps explicitly to declared semantic outcomes.
-  - Model and effort mappings must be verified against supported provider interfaces before implementation.
+  - Exact requested model and explicit meaningful effort translation at provider boundary.
+  - Reliable supported structured channels, bounded logs and explicit transport failures.
+  - Declarative command exit mapping and capture on every normal exit.
+  - Canonical fake-process feature and bugfix escalation paths preserve durable artifacts and handoffs.
 verification:
-  - Inspected runtime/command.py, runtime/codex.py, runtime/claude.py and agent-driver protocol.
-  - Inspected V2 types, strict field whitelists, compiler binding and canonical verifier.
-  - Loader probes with repository YAML parser confirmed command fields on profile/state and root commands catalog are rejected.
+  - Local Claude and Codex --version/--help plus official protocol documentation audit.
+  - Focused fake-process argument, parsing, timeout, cancellation, capture and integration tests.
+  - V2 command/schema/context/workspace/compiler and complete offline regression suite.
 non_goals:
-  - Implementing a schema correction or provider adapters before resolving the blocker.
-  - Real provider calls, Adeo migration or V2-005.
-infrastructure_audit:
-  codex: |
-    Existing CodexExecutor wraps CommandExecutor with one codex exec invocation.
-    Uses ephemeral mode, ignores user config/rules, workspace-write sandbox and no
-    approval prompts. Renders WorkUnit and optional bounded diagnostics. Nonzero
-    command failure maps to error. No explicit model/effort selection or structured
-    StageResult extraction exists in this adapter.
-  claude: |
-    Existing ClaudeExecutor is implemented, not absent. It wraps CommandExecutor
-    with print/no-session-persistence/text output, restricted acceptEdits permissions,
-    no permission prompts, Read/Edit/Write/Glob/Grep tools and disallowed MCP tools.
-    It rejects input diagnostics and maps nonzero exit to error. It has no explicit
-    model/effort selection or structured StageResult extraction. This audit inspected
-    repository code; current external CLI support and authenticated operation were
-    not verified because the required DSL blocker stops this slice first.
-  command: |
-    Command(executable, argv, cwd, invocation_timeout_seconds,
-    diagnostic_capture_max_bytes) requires explicit absolute executable/cwd and tuple
-    argv. CommandExecutor uses shell=False, DEVNULL stdin, inherited environment,
-    one child process and optional merged stdout/stderr diagnostic capture.
-    It maps exit zero/nonzero to success/failed, spawn OSError to error and deadline
-    expiry to timeout. Timeout kills and waits for the direct child; it does not claim
-    process-tree cancellation. Escaped exceptions trigger cleanup and propagate.
-    No public cancellation mechanism or semantic retries exist.
-  reuse: |
-    Reuse Command structural validation and existing subprocess/timeout/diagnostic
-    conventions where practical. Current output is discarded or retained only as a
-    bounded diagnostic tail (at most 4096 UTF-8 bytes). That channel is not a complete
-    structured-result channel. Existing runtime adapters therefore cannot be directly
-    reused as StageExecutors producing artifacts/handoffs. Structured result capture
-    must be designed after the command schema prerequisite and provider CLI audit.
-prior_blocker:
+  - Provider billing, provider sessions, workflow changes, Adeo migration or V2-005.
+prior_command_blocker:
   status: resolved_by_V2-001D
-  missing_capability: Declarative command identity, command definition and exit-to-semantic-outcome mapping.
-  historical_evidence: |
-    Before V2-001D, ExecutionProfile contained only provider/model. InvocationBinding contains only
-    profile/effort/budget. WorkflowStateSpec has no command reference. WorkflowBundle
-    has no commands catalog. Canonical verifier selects profile command and its states
-    declare pass/fail transitions, but neither says which executable operation to run.
-    Transition labels alone cannot define the exit-code mapping generically.
-    Loader rejects profiles.command.command, flows.feature.states.VERIFY.command,
-    and a root commands catalog as unknown fields. The unmodified canonical bundle loads.
-  resolution: |
-    V2-001D requires command profiles to declare static argv, exit_codes/default
-    semantic outcomes and optional bounded textual capture. Loader checks every
-    profile use against state transitions and produces. ExecutionProfile.command
-    and CompiledWorkflow.profiles preserve immutable capabilities. ExecutionBinding
-    remains unchanged. Provider setup can receive bundle.profiles without YAML rereads.
-    Canonical verifier declares the Switchyard unittest entrypoint and captures
-    verifier_evidence on every normal exit. No command configuration prerequisite remains.
-  prohibited_workarounds:
-    - Hardcoding VERIFY or verifier role names in the provider resolver.
-    - Hiding project verifier argv or semantic pass/fail assumptions in provider runtime config.
-    - Treating an LLM output envelope as the deterministic command contract.
-pending_design:
-  provider_mechanisms: Verify documented Claude/Codex structured output channels and CLI capabilities after prerequisite.
-  structured_output: Not frozen; must strictly parse StageResult-compatible JSON without prose heuristics or retries.
-  input_rendering: Planned shared deterministic rendering of only StageInvocation with advisory prior reasoning label.
-  effort_models: Not verified or implemented; no flags or supported model mappings are claimed.
-  machine_config: Not implemented; explicit executable paths, working directory and transport timeout remain local concerns.
-  command_mapping: Implement declared exit_codes/default and capture using immutable CommandSpec; transport failures stay execution failures.
-  remaining_implementation:
-    - ClaudeStageExecutor and verified model/effort/structured-output support.
-    - CodexStageExecutor and verified model/effort/structured-output support.
-    - CommandStageExecutor with direct argv, normal-exit mapping and bounded evidence capture.
-    - Provider resolver with explicit local executable/working-directory/timeout configuration.
-    - Shared structured input rendering and strict StageResult output parsing.
+  mapping: Immutable ExecutionProfile.command supplies argv, exit outcomes and bounded capture.
   remaining_command_configuration_prerequisites: []
+existing_adapter_audit:
+  codex: Existing CodexExecutor wraps CommandExecutor, renders WorkUnit and bounded diagnostics, maps nonzero to error.
+  claude: Existing ClaudeExecutor wraps CommandExecutor with restricted tools and text output; rejects diagnostic input.
+  command: Existing CommandExecutor provides shell-free cwd/timeout execution and optional 4096-byte merged diagnostic tail.
+  reuse: |
+    Existing adapters consume InvocationRequest, not StageInvocation. V2 reuses their
+    generic helpers without changing them; full structured-output and separate-channel
+    retention are implemented once for all V2 adapters. Nonzero command semantic mapping
+    remains separate from provider failure normalization. No cancellation API is added.
+implementation_audit_2026_09_29:
+  local_cli: Claude Code 2.1.282 and codex-cli 0.157.0; inspected --version/--help only, no model requests.
+  sources:
+    - https://code.claude.com/docs/en/headless
+    - https://code.claude.com/docs/en/model-config
+    - https://code.claude.com/docs/en/env-vars
+    - https://developers.openai.com/codex/config-reference
+    - https://developers.openai.com/codex/noninteractive
+  claude: |
+    --print reads noninteractive stdin; --model selects exact alias/ID. --output-format
+    json plus --json-schema returns one result envelope with structured_output. Parse
+    that object only, never human result text. Nonzero exit or is_error is failure.
+    Retain restricted file tools, acceptEdits and permission-prompts none; add safe-mode
+    and strict MCP isolation. No resume/continue session flags. cwd is subprocess cwd.
+    Sonnet low/medium/high maps directly to --effort. Haiku lacks native effort; use
+    documented extended thinking MAX_THINKING_TOKENS with explicit adapter policy
+    low=1024, medium=8192, high=16384 and max output 32768 to prevent clamping.
+    This is a thinking-budget translation, not a claim Haiku supports native effort.
+    MAX_STRUCTURED_OUTPUT_RETRIES=1 permits only the first structured-output attempt.
+    CLI-managed transport retries/tool turns may occur within this one bounded process;
+    the adapter adds no retry and no escalation.
+  codex: |
+    --model passes binding.model unchanged. -c model_reasoning_effort="low|medium|high"
+    selects effort. exec '-' reads stdin; --output-schema constrains final response;
+    --output-last-message isolates it in a temporary file. stdout/stderr are operational
+    logs, never parsed as semantic output. Retain ephemeral, ignore-user-config,
+    ignore-rules, workspace-write and approval never; cwd and --cd specify project root.
+    Supported model IDs are explicitly declared in local config, not silently aliased.
+    The example model name codex is a logical sample; real deployments must use an
+    available model ID and declare that exact ID locally. Tests declare their fake ID.
+  transport: |
+    One shared V2 bounded process helper reuses existing Command validation,
+    _stop_and_wait, _read_chunk and diagnostic normalization without modifying runtime.
+    One process per stage, shell=False, file-backed bounded stdin and nonblocking
+    bounded pipe retention. Timeout/spawn/signal failure raises ProviderExecutionError;
+    no default semantic outcome applies. Cleanup kills/waits the direct child, preserving
+    existing limits (not a process-tree cancellation guarantee). Interrupts propagate.
+  command: |
+    Resolve argv[0] once using explicit environment PATH or configured cwd for relative
+    paths, preserving all arguments. Nonnegative process exit maps through declared
+    codes/default. Capture stdout, stderr or merged OS pipe for combined (observed pipe
+    order, not an invented temporal order). Every normal exit produces evidence when
+    configured. Retain UTF-8-safe normalized tail; '=' complete or '!' truncated prefix
+    counts inside max_bytes, including tiny limits. No handoff. No LLM JSON required.
+  result_protocol: |
+    Strict JSON object with exactly outcome, produced_artifacts, handoff, diagnostics.
+    Artifact items have exactly name/content. Handoff is null or StageHandoff's six
+    body fields. Diagnostics is null or UTF-8 string <=4096 bytes, converted to the
+    existing DiagnosticPayload. Reject duplicate keys/names, nonfinite numbers,
+    malformed types and unknown fields. ContextualExecutor still validates durable
+    contracts; runtime remains authoritative for transition membership.
+  rendering: |
+    One deterministic renderer includes binding, selected artifact metadata/content,
+    optional advisory previous handoff, bounded diagnostic input, and result schema.
+    No manifest/history reads or provider-native session IDs. Structured JSON sections
+    keep input content separate from output instructions.
+  api: |
+    ProviderRuntimeConfig(working_directory, claude_executable=None,
+    codex_executable=None, environment=None, timeout_seconds=600,
+    max_result_bytes=1048576, codex_models=()). Environment is snapshotted; explicit
+    mapping replaces inheritance. Codex model allowlist is local availability declaration,
+    not a model alias map. Claude supports audited haiku/sonnet aliases and pinned
+    Haiku 4.5/Sonnet 4.6 identifiers; other models fail explicitly.
+    ProviderStageExecutorResolver(profiles, runtime_config) accepts bundle.profiles,
+    resolves each binding eagerly and returns ClaudeStageExecutor, CodexStageExecutor,
+    or CommandStageExecutor. Missing executables/models fail during compilation.
+  no_remaining_dsl_gap: true
+  boundaries: No runtime/Event, context selection, artifact contracts or workflow changes.
 verification_result:
-  implementation_tests: Not run; no provider implementation exists for this slice.
-  full_offline_suite: Not rerun for this documentation-only blocked audit.
-  provider_calls: None.
-  changed_files: [docs/plans/v2-004-provider-wiring.yaml]
+  focused_provider_tests: 12 passed (fake executable processes only).
+  full_offline_suite: 405 tests, 404 passed, 1 existing platform skip; 28.316 seconds.
+  local_provider_execution: Help/version queries only; no authenticated model requests.
+  runtime_event_workflows: Unchanged.
+  adeo: Untouched.
+  remaining_dsl_prerequisites: []
+  limitations:
+    - No live authentication/model-quality smoke test; account availability is deployment-owned.
+    - Codex model IDs require explicit local declaration; the sample codex ID is not a public alias promise.
+    - Haiku effort is translated to thinking budgets, not silently passed to an unsupported native dial.
+    - Direct-child cleanup and retained-output limits do not guarantee process-tree cancellation or a disk quota.

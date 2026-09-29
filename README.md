@@ -1091,3 +1091,17 @@ one predecessor handoff. They return validated artifacts and optional structured
 handoffs before runtime advances. Fresh excludes prior handoffs. See
 [context transport](docs/design/context-transport.md) for contracts, bounds and partial
 I/O failure semantics. Real provider adapters and provider prompt formatting remain future work.
+
+## V2 provider wiring (V2-004)
+
+`ProviderStageExecutorResolver(bundle.profiles, ProviderRuntimeConfig(...))` composes
+with `workspace_resolver` and `compile_workflow`. Claude/Codex consume one structured
+invocation and produce strictly parsed StageResult output; deterministic commands use
+the profile's exit mapping and bounded evidence capture. No provider session memory,
+workflow retries or artifact persistence live in these adapters.
+
+Executable paths, environment, timeout and exact available Codex model IDs are local
+configuration. Haiku generic effort maps to documented thinking-token budgets;
+Sonnet and Codex use their native effort controls. See
+[provider APIs, audited CLI versions and execution limits](docs/design/provider-stages.md).
+Normal tests use fake executable processes only; no credentials or real-provider calls.
