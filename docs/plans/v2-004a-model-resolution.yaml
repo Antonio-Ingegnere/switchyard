@@ -1,0 +1,50 @@
+id: V2-004A
+goal: Resolve provider model selectors explicitly without pretending compilation verifies live availability.
+status: complete
+scope:
+  - Replace codex_models with immutable provider-keyed model_aliases.
+  - Preserve workflow binding selectors and expose concrete resolved_model on model executors.
+  - Offline process tests and canonical FEATURE compilation preflight.
+constraints:
+  - Compiler remains eager; runtime, Event, workflows, context and Adeo unchanged.
+  - No live provider calls, automatic substitutions or V2-005 execution.
+acceptance:
+  - Explicit aliases take precedence; absent aliases pass selectors unchanged.
+  - Invalid mappings fail before execution; no cache membership requirement.
+  - Claude effort translation uses the concrete model capability, not the selector spelling.
+verification:
+  - Fake-process passthrough, aliases, invalid configuration and eager compilation tests.
+  - Complete offline suite and compilation-only local preflight.
+non_goals:
+  - Live entitlement checks, lazy resolution, model fallback or provider retries.
+design:
+  api: 'ProviderRuntimeConfig(..., model_aliases: Mapping[str, Mapping[str, str]] = {})'
+  immutability: Copy both mapping levels into MappingProxyType; reject malformed/empty/NUL names and values.
+  resolution: Exact provider/selector lookup, else unchanged selector. No recursive alias expansion.
+  inspection: ExecutionBinding.model stays the selector; model stage executors expose resolved_model separately.
+  old_allowlist: Remove codex_models entirely; it had no purpose beyond the incorrect availability gate.
+  claude: |
+    haiku and sonnet remain directly accepted. Known concrete Haiku models use thinking
+    budgets; known concrete Sonnet models use native effort. An unknown concrete Claude
+    model passes through without effort, but a requested effort fails locally when its
+    translation is not audited. This is an effort capability check, not account validation.
+  availability: Only actual provider execution can reject an unknown/unentitled model; no alternate model retry.
+  preflight: Read local configured Codex model identifier only, map canonical codex selector locally; never persist the machine-specific mapping in repository files.
+
+preflight_result:
+  canonical_feature: Compilation succeeded; all 8 configured rungs resolved eagerly.
+  local_mapping_source: Model field in existing local Codex config.toml; concrete value not committed.
+  executable_checks: Installed Claude and Codex paths resolved without launching either.
+  process_guard: subprocess.Popen patched to raise if any process is launched.
+  cache: No model cache read or membership check.
+  live_provider_calls: 0
+  account_capability_verified: false
+  v2_005: Compilation blocker resolved; live dogfood remains pending and was not resumed.
+
+verification_result:
+  focused_model_tests: 4 passed using fake provider processes.
+  provider_suite: 16 passed.
+  full_offline_suite: 409 tests in 29.855 seconds; 408 passed, 1 existing platform skip.
+  regressions: Includes workspaces, context transport, compiler, loader, runtime, V1, observability and delivery.
+  protected_scope: Compiler remains eager; runtime, Event, budgets, artifacts, context, workflows and Adeo unchanged.
+  live_execution: None; only compilation preflight performed.

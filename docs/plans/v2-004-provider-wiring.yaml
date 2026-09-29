@@ -113,3 +113,17 @@ verification_result:
     - Codex model IDs require explicit local declaration; the sample codex ID is not a public alias promise.
     - Haiku effort is translated to thinking budgets, not silently passed to an unsupported native dial.
     - Direct-child cleanup and retained-output limits do not guarantee process-tree cancellation or a disk quota.
+
+model_resolution_correction_V2_004A:
+  supersedes: Original exact-ID and codex_models allowlist policy in the historical audit above.
+  api: 'ProviderRuntimeConfig(..., model_aliases: Mapping[str, Mapping[str, str]] = {})'
+  algorithm: Explicit provider/selector mapping first; otherwise pass the selector unchanged.
+  inspection: Binding.model remains workflow intent; model stage executors expose resolved_model.
+  allowlist: Removed codex_models; no model cache membership checks or cache reads.
+  validation: |
+    Validate mapping types and nonempty/NUL-free strings, executable availability,
+    provider support and supported effort translation. Claude effort follows the
+    concrete resolved model; unknown concrete models with requested effort fail
+    explicitly. Compilation is not an authenticated model capability check.
+  invocation: Provider rejection raises an execution failure; no substitution or alternate-model retry.
+  boundaries: Compiler remains eager; runtime, Event, canonical YAML and context unchanged.

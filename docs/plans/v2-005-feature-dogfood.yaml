@@ -1,0 +1,112 @@
+id: V2-005
+goal: Prove the canonical FEATURE workflow against a disposable project using live Claude.
+status: live_dogfood_pending_after_V2_004A
+scope:
+  - A tiny dependency-free catalog fixture with independent failing feature acceptance tests.
+  - A reusable application entrypoint composing workspace, resolvers, compiler and runtime.
+  - Offline fake-provider integration and an explicit manual live dogfood entrypoint.
+constraints:
+  - Agents modify only a disposable target, never the active Switchyard repository.
+  - Use the unchanged canonical feature flow and its real deterministic command verifier.
+  - No model substitution, skipped bindings, runner retries or manual output repair.
+  - Stop on a framework or canonical configuration blocker; do not work around it here.
+  - No Adeo changes, provider session transfer or V2-006 work.
+acceptance:
+  - Baseline fails only for the independently specified case-insensitive lookup feature.
+  - Real SPECIFY commits a valid MicroSpec and structured handoff without rewriting request.md.
+  - Real IMPLEMENT consumes durable inputs and modifies intended disposable project files.
+  - The canonical verifier passes, commits evidence and reaches READY_FOR_MANUAL_QA.
+  - Offline integration and the full existing suite pass.
+verification:
+  - Canonical compilation preflight using installed executables and local model configuration.
+  - Planned offline fake-process runner integration followed by the complete offline suite.
+  - Exactly one live workflow attempt after prerequisites pass, with no harness retries.
+non_goals:
+  - Real Codex escalation proof, framework fixes, workflow changes or target commits/pushes.
+planned_design:
+  runner: |
+    execute_v2_workflow(bundle, flow_name, request, work_root, provider_runtime_config,
+    recorder=None) would return a frozen WorkflowExecution containing RunResult,
+    WorkWorkspace and CompiledWorkflow. It would only compose existing APIs.
+    No runner or fixture code has been implemented while the preflight is blocked.
+  fixture: |
+    Copy tests/fixtures/feature_dogfood_project to a retained temporary target.
+    A catalog lookup preserves case-sensitive defaults and adds optional
+    case-insensitive exact matching. Tests use only unittest and the standard library.
+  request: |
+    I want catalog lookups to optionally ignore capitalization.
+
+    The current lookup behavior must continue working as it does now.
+    Add the new behavior cleanly and cover it with tests.
+  baseline: |
+    Check that existing case-sensitive behavior passes and the named independent
+    case-insensitive acceptance test fails for the missing behavior. Reject an
+    unexpectedly green baseline or unrelated failure before invoking any provider.
+  provider_path: |
+    Canonical SPECIFY and IMPLEMENT select claude-sonnet / sonnet / medium.
+    ProviderStageExecutorResolver is wrapped by workspace_resolver, then compiled
+    and run through the existing runtime. No provider-native session continuation.
+  verifier: python3 -m unittest discover -s tests
+  retained_evidence: |
+    Keep target and work directories, canonical event JSONL, source-file change
+    inventory and a concise report on success or failure. Do not retain/dump
+    complete provider transcripts in the work contract.
+preflight_2026_09_29:
+  installed_tools:
+    claude: Claude Code 2.1.282
+    codex: codex-cli 0.157.0
+  result: blocked before runtime or authenticated provider invocation
+  reproduction: |
+    Load examples/delivery/workflows-v2.yaml unchanged. Initialize a separate
+    WorkWorkspace with the request above and use an empty temporary working directory.
+    Configure the installed Claude and Codex executables; populate codex_models
+    with the exact identifiers in the local Codex model cache. Compose the existing
+    ProviderStageExecutorResolver and workspace_resolver, then compile feature.
+  exception_chain:
+    - "WorkflowCompileError: cannot resolve feature.DIAGNOSE_FAILURE rung 2"
+    - "ProviderResolutionError: Codex model not declared available in local config"
+  cause: |
+    compile_workflow eagerly resolves every rung, including the unused-on-straight-path
+    Codex escalation. The canonical profile declares model: codex. V2-004 explicitly
+    documents this as a sample identifier, not a public model alias. It is absent
+    from the local model cache. The resolver correctly refuses an undeclared model.
+    Merely adding the sample identifier to the availability allowlist would not
+    establish its availability and would conceal this preflight problem.
+  classification: |
+    Canonical example/provider-configuration portability blocker at the V2-004
+    resolution boundary, exposed by V2-002 eager binding resolution. This is not
+    evidence of an authentication failure or a runtime, artifact or accounting defect.
+    The local model cache is not a live account capability check.
+  required_followup: |
+    A focused decision/fix must reconcile the canonical sample Codex model with
+    eager resolution of the entire feature graph. Do not silently substitute a
+    model, lazily bypass resolution, or install a fake Codex executor in this runner.
+  observations:
+    provider_invocations: 0
+    runtime_events: 0
+    terminal: null
+    request_versions: 1
+    microspec_versions: 0
+    handoffs: 0
+    implementation_changes: 0
+  evidence_directory: /var/folders/9w/37mqyqyd5qgbkvd8l_1lqyx00000gn/T/switchyard-v2-005-preflight-cfvr29ez
+  evidence_files:
+    - preflight.json
+    - work/request.md
+    - work/manifest.jsonl
+  stop: |
+    V2-005 is not complete. No live model request, fixture implementation, generic
+    runner, manual runner or V2-005 commit was made. Preserve all protected layers.
+verification_result:
+  focused_v2_005_tests: Not implemented; stopped at canonical compilation preflight.
+  microspec: Validated through the existing validate_microspec function.
+  full_offline_suite: 405 tests in 27.731 seconds; 404 passed, 1 existing platform skip.
+  protected_scope: Runtime, Event, compiler, providers, context transport and Adeo unchanged.
+
+model_resolution_correction_V2_004A:
+  historical_preflight: The original failure above is retained as evidence, not current resolution policy.
+  blocker: Resolved by explicit local model_aliases and removal of the Codex model allowlist.
+  mapping_source: Local Codex configuration model field, not cache membership or a live entitlement check.
+  mapping_storage: Concrete machine-specific model value remains outside the repository.
+  compilation_preflight: Succeeded; all 8 canonical FEATURE rungs resolved eagerly, with subprocess creation forbidden.
+  live_execution: Not attempted; V2-005 remains incomplete and is not resumed in V2-004A.

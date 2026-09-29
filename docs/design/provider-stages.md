@@ -11,7 +11,7 @@ config = ProviderRuntimeConfig(
     working_directory=project_root,          # absolute existing directory
     claude_executable=claude_path,           # explicit path or executable name
     codex_executable=codex_path,
-    codex_models=(available_codex_model_id,), # exact locally available IDs, no alias map
+    model_aliases={"codex": {"codex": locally_configured_model_id}},
     timeout_seconds=600,
 )
 provider = ProviderStageExecutorResolver(bundle.profiles, config)
@@ -25,7 +25,7 @@ an explicit mapping replaces it and is copied read-only. It is excluded from rep
 `max_result_bytes` defaults to 1 MiB. Command argv[0] resolves through this environment's
 PATH, or relative to working_directory when it contains a path component. The rest
 of argv is unchanged. No shell, interpolation, provider substitution or command registry.
-Missing executable, unsupported effort/model or inconsistent profile fails resolution.
+Missing executable, malformed selector mapping, unsupported effort translation or inconsistent profile fails resolution.
 Credential/account access cannot be established offline; provider rejection remains
 an explicit execution failure.
 
@@ -41,10 +41,24 @@ The adapter retains restricted file tools, acceptEdits and disabled permission p
 safe-mode and strict empty MCP configuration prevent loading user/project customizations.
 It never supplies resume/continue/session flags, and disables configured model fallback.
 
-Model names pass unchanged via `--model`. The audited Claude set is `haiku`, `sonnet`,
-`claude-haiku-4-5`, `claude-haiku-4-5-20251001`, and `claude-sonnet-4-6`.
-Aliases intentionally follow the provider's alias; use a pinned ID when version stability
-is required. Other names fail explicitly pending capability verification.
+Workflow `model` is a **provider model selector**. Resolution first looks up the exact
+provider and selector in `model_aliases`; absent a mapping, the selector passes through
+unchanged. Mappings are single-step, not recursive. Both mapping levels are copied
+read-only; names/values must be nonempty strings without NUL (no coercion or trimming).
+The old `codex_models` allowlist is removed. No model cache is read or required.
+
+`ExecutionBinding.model` remains the workflow selector. `ClaudeStageExecutor.resolved_model`
+and `CodexStageExecutor.resolved_model` expose the concrete argument sent explicitly via
+`--model`. The rendered binding remains unchanged. Neither canonical Event nor compiled
+plan semantics change. Compilation still resolves every rung once, including unused
+branches; it validates local configuration and tooling, not authenticated entitlement.
+A provider rejecting a model is an execution failure, with no alternative model retry.
+
+Claude's direct `haiku`/`sonnet` selectors need no local mapping. Its audited effort
+translation set is `haiku`, `sonnet`, `claude-haiku-4-5`, `claude-haiku-4-5-20251001`,
+and `claude-sonnet-4-6`. Effort policy follows the resolved concrete model. Unknown
+Claude models pass through when no effort is requested; requested effort fails locally
+if its translation is not audited. This is not a model availability check.
 
 Sonnet generic low/medium/high maps identically to native `--effort`.
 Haiku lacks native effort. Its explicit adapter translation is an extended-thinking
@@ -64,10 +78,12 @@ It retains ephemeral execution, ignored user config/rules, workspace-write sandb
 approval never. cwd and --cd agree. Only the final-result file is parsed; stdout/stderr
 are operational logs. See [noninteractive output](https://developers.openai.com/codex/noninteractive)
 and [reasoning configuration](https://developers.openai.com/codex/config-reference).
-`codex_models` explicitly declares locally available IDs; it never renames them.
-The canonical example's `codex` name is a sample identifier, not a promised public
-model alias. An actual project must configure a model ID available to its installation.
-Fake-process tests declare `codex` as their fake model, without claiming live availability.
+The canonical `codex` selector can be mapped to a locally configured concrete ID without
+editing workflow YAML. Exact model IDs also pass through with no redundant alias entry.
+Unknown selectors are not rejected based on cache membership. Only live provider
+execution can establish account/model availability. A local configuration or cache
+may inform an explicit mapping, but is never authoritative evidence of entitlement.
+Executable paths and machine-specific mappings stay outside committed workflows.
 
 Both adapters launch exactly one process per stage. Provider-native tool turns and
 bounded transport retries inside their CLIs are distinct from Switchyard semantic

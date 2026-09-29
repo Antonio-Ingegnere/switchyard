@@ -130,7 +130,7 @@ class ProviderRuntimeConfig:
     environment: Mapping[str, str] | None = field(default=None, repr=False)
     timeout_seconds: float = 600
     max_result_bytes: int = 1048576
-    codex_models: tuple[str, ...] = ()
+    model_aliases: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
 
     def __post_init__(self):
         try:
@@ -144,10 +144,30 @@ class ProviderRuntimeConfig:
         env = dict(os.environ if self.environment is None else self.environment)
         if any(type(k) is not str or type(v) is not str or not k or '=' in k or '\0' in k+v for k,v in env.items()):
             raise ProviderResolutionError('invalid environment')
-        if type(self.codex_models) not in (tuple,list) or any(type(m) is not str or not m for m in self.codex_models):
-            raise ProviderResolutionError('codex_models must declare exact available model IDs')
+        if not isinstance(self.model_aliases, Mapping):
+            raise ProviderResolutionError('model_aliases must be a provider-keyed mapping')
+        aliases = {}
+        for provider, mappings in self.model_aliases.items():
+            _model_name(provider)
+            if not isinstance(mappings, Mapping):
+                raise ProviderResolutionError('model_aliases provider entry must be a mapping')
+            copied = {}
+            for selector, concrete in mappings.items():
+                _model_name(selector)
+                _model_name(concrete)
+                copied[selector] = concrete
+            aliases[provider] = MappingProxyType(copied)
         object.__setattr__(self,'environment',MappingProxyType(env))
-        object.__setattr__(self,'codex_models',tuple(self.codex_models))
+        object.__setattr__(self,'model_aliases',MappingProxyType(aliases))
+
+
+def _model_name(value):
+    if type(value) is not str or not value.strip() or '\0' in value:
+        raise ProviderResolutionError('model/provider/selector names must be nonempty strings without NUL')
+
+
+_HAIKU = ('haiku','claude-haiku-4-5','claude-haiku-4-5-20251001')
+_SONNET = ('sonnet','claude-sonnet-4-6')
 
 
 def _executable(value, config):
@@ -184,6 +204,7 @@ class ClaudeStageExecutor:
     binding: ExecutionBinding
     executable: str
     config: ProviderRuntimeConfig
+    resolved_model: str
 
     def run(self, invocation):
         _same_binding(self.binding,invocation)
@@ -195,13 +216,13 @@ class ClaudeStageExecutor:
             env.pop(key,None)
         env['MAX_STRUCTURED_OUTPUT_RETRIES'] = '1'
         argv = ['--print','--no-session-persistence','--output-format','json',
-                '--json-schema',_json(result_schema()),'--model',self.binding.model,
+                '--json-schema',_json(result_schema()),'--model',self.resolved_model,
                 '--safe-mode','--restricted','--strict-mcp-config','--mcp-config','{"mcpServers":{}}',
                 '--permission-mode','acceptEdits','--permission-prompts','none',
                 '--tools','Read,Edit,Write,Glob,Grep','--disallowedTools','mcp__*',
                 '--settings','{"alwaysThinkingEnabled":true,"switchModelsOnFlag":false,"fallbackModel":[]}']
         if self.binding.effort:
-            if self.binding.model in ('haiku','claude-haiku-4-5','claude-haiku-4-5-20251001'):
+            if self.resolved_model in _HAIKU:
                 env['MAX_THINKING_TOKENS'] = str({'low':1024,'medium':8192,'high':16384}[self.binding.effort])
                 env['CLAUDE_CODE_MAX_OUTPUT_TOKENS'] = '32768'
             else:
@@ -222,6 +243,7 @@ class CodexStageExecutor:
     binding: ExecutionBinding
     executable: str
     config: ProviderRuntimeConfig
+    resolved_model: str
 
     def run(self, invocation):
         _same_binding(self.binding,invocation)
@@ -230,7 +252,7 @@ class CodexStageExecutor:
             schema.write_text(_json(result_schema()),encoding='utf-8')
             argv = ['--ask-for-approval','never','exec','--ephemeral','--ignore-user-config',
                     '--ignore-rules','--sandbox','workspace-write','--skip-git-repo-check',
-                    '--cd',self.config.working_directory,'--model',self.binding.model,
+                    '--cd',self.config.working_directory,'--model',self.resolved_model,
                     '--output-schema',str(schema),'--output-last-message',str(result)]
             if self.binding.effort:
                 argv += ['-c','model_reasoning_effort='+json.dumps(self.binding.effort)]
@@ -283,14 +305,12 @@ class ProviderStageExecutorResolver:
             if binding.effort is not None or profile.command is None:
                 raise ProviderResolutionError('invalid command binding')
             return CommandStageExecutor(binding,_executable(profile.command.argv[0],config),profile.command,config)
+        if profile.provider not in ('claude','codex'):
+            raise ProviderResolutionError('unsupported provider')
+        _model_name(binding.model)
+        resolved = config.model_aliases.get(binding.provider, {}).get(binding.model, binding.model)
         if profile.provider=='claude':
-            supported=('haiku','sonnet','claude-haiku-4-5','claude-haiku-4-5-20251001',
-                       'claude-sonnet-4-6')
-            if binding.model not in supported:
-                raise ProviderResolutionError('Claude model outside audited capability set')
-            return ClaudeStageExecutor(binding,_executable(config.claude_executable,config),config)
-        if profile.provider=='codex':
-            if binding.model not in config.codex_models:
-                raise ProviderResolutionError('Codex model not declared available in local config')
-            return CodexStageExecutor(binding,_executable(config.codex_executable,config),config)
-        raise ProviderResolutionError('unsupported provider')
+            if binding.effort is not None and resolved not in _HAIKU + _SONNET:
+                raise ProviderResolutionError('Claude effort translation is not audited for resolved model')
+            return ClaudeStageExecutor(binding,_executable(config.claude_executable,config),config,resolved)
+        return CodexStageExecutor(binding,_executable(config.codex_executable,config),config,resolved)

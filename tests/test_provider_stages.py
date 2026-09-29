@@ -35,7 +35,7 @@ class ProviderStageTests(unittest.TestCase):
         self.plan.write_text(json.dumps({'artifacts':{'A':[]}}))
         self.env={'PATH':str(self.bin),'FAKE_LOG':str(self.log),'FAKE_PLAN':str(self.plan)}
         self.config=ProviderRuntimeConfig(str(self.root),str(self.bin/'claude'),str(self.bin/'codex'),
-                                           self.env, timeout_seconds=3,codex_models=('codex',))
+                                           self.env, timeout_seconds=3)
 
     def binding(self,provider='claude',model='sonnet',effort='medium'):
         return ExecutionBinding('test','A','worker',0,'profile',provider,model,effort,None,None)
@@ -67,6 +67,90 @@ class ProviderStageTests(unittest.TestCase):
                 else:
                     self.assertEqual(call['thinking'],'8192'); self.assertNotIn('--effort',call['argv'])
                 if provider=='claude': self.assertEqual(call['retries'],'1')
+
+    def test_model_passthrough_and_aliases(self):
+        cases = [
+            ('codex', 'exact-model-x', {}, 'exact-model-x'),
+            ('codex', 'unknown-selector', {}, 'unknown-selector'),
+            ('codex', 'codex', {'codex': {'codex': 'actual-model-x'}}, 'actual-model-x'),
+            ('claude', 'sonnet', {}, 'sonnet'),
+            ('claude', 'haiku', {}, 'haiku'),
+            ('claude', 'sonnet', {'claude': {'sonnet': 'claude-sonnet-4-6'}}, 'claude-sonnet-4-6'),
+            ('claude', 'local-haiku', {'claude': {'local-haiku': 'haiku'}}, 'haiku'),
+        ]
+        for provider, selector, aliases, concrete in cases:
+            with self.subTest(provider=provider, selector=selector, aliases=aliases):
+                adapter, invocation = self.adapter(provider, selector,
+                    config=replace(self.config, model_aliases=aliases))
+                self.assertEqual(adapter.binding.model, selector)
+                self.assertEqual(adapter.resolved_model, concrete)
+                adapter.run(invocation)
+                call = self.calls()[-1]
+                self.assertEqual(call['argv'][call['argv'].index('--model')+1], concrete)
+                self.assertEqual(call['binding']['model'], selector)
+                if concrete == 'haiku':
+                    self.assertEqual(call['thinking'], '8192')
+                    self.assertNotIn('--effort', call['argv'])
+        # Unknown Claude models are not an account allowlist violation. Effort still
+        # requires a known translation, evaluated against the concrete model.
+        adapter, invocation = self.adapter('claude', 'new-model', None)
+        adapter.run(invocation)
+        with self.assertRaisesRegex(ProviderResolutionError, 'effort translation'):
+            self.adapter(config=replace(self.config, model_aliases={'claude': {'sonnet': 'new-model'}}))
+
+    def test_model_alias_validation_and_immutability(self):
+        invalid = [None, [], {'codex': []}, {'': {}}, {False: {}},
+                   {'codex': {'codex': ''}}, {'codex': {'codex': '  '}},
+                   {'codex': {'codex': False}}, {'codex': {'codex': 'bad' + chr(0) + 'model'}},
+                   {'codex': {'': 'model'}}, {'codex': {1: 'model'}}]
+        for aliases in invalid:
+            with self.subTest(aliases=aliases), self.assertRaises(ProviderResolutionError):
+                replace(self.config, model_aliases=aliases)
+        source = {'codex': {'codex': 'actual-model-x'}}
+        config = replace(self.config, model_aliases=source)
+        source['codex']['codex'] = 'changed'
+        self.assertEqual(config.model_aliases['codex']['codex'], 'actual-model-x')
+        with self.assertRaises(TypeError): config.model_aliases['codex']['codex'] = 'changed'
+        with self.assertRaises(TypeError): config.model_aliases['claude'] = {}
+        self.assertFalse(self.log.exists())
+        for selector in ('', ' ', None, False, 'bad' + chr(0)):
+            with self.subTest(selector=selector), self.assertRaises(ProviderResolutionError):
+                self.adapter('codex', selector)
+
+    def test_model_alias_compile_feature_stays_eager_without_cache(self):
+        workspace = WorkWorkspace.open(self.root/'work', self.bundle.artifacts)
+        workspace.initialize_request('request')
+        for aliases in ({}, {'codex': {'codex': 'not-in-any-cache'}}):
+            calls = []
+            provider = ProviderStageExecutorResolver(self.bundle.profiles,
+                replace(self.config, model_aliases=aliases))
+            def resolve(binding):
+                stage = provider(binding)
+                calls.append((binding, stage))
+                return stage
+            # Any attempt to read a local model cache during compilation fails this probe.
+            with patch.object(Path, 'read_text', side_effect=AssertionError('unexpected file read')):
+                compiled = compile_workflow(self.bundle, 'feature',
+                    workspace_resolver(self.bundle, 'feature', workspace, resolve))
+            expected = sum(1 + len(self.bundle.roles[state.role].escalation)
+                           for state in self.bundle.flow('feature').states.values() if not state.terminal)
+            self.assertEqual(len(calls), expected)
+            self.assertEqual(len({b for b, _ in calls}), expected)
+            self.assertEqual(len(compiled.executors), expected)
+            codex = [(b, stage) for b, stage in calls if b.provider == 'codex']
+            self.assertEqual(len(codex), 1)
+            self.assertEqual(codex[0][0].model, 'codex')
+            self.assertEqual(codex[0][1].resolved_model, aliases.get('codex', {}).get('codex', 'codex'))
+        self.assertFalse(self.log.exists())
+
+    def test_model_rejection_does_not_substitute_or_retry(self):
+        config = replace(self.config, model_aliases={'codex': {'codex': 'rejected-model'}},
+                         environment={**self.env, 'FAKE_MODE': 'exit'})
+        adapter, invocation = self.adapter('codex', 'codex', config=config)
+        with self.assertRaisesRegex(ProviderExecutionError, 'status 7'):
+            adapter.run(invocation)
+        self.assertEqual(len(self.calls()), 1)
+        self.assertEqual(self.calls()[0]['argv'][self.calls()[0]['argv'].index('--model')+1], 'rejected-model')
 
     def test_all_effort_levels(self):
         for level,tokens in [('low','1024'),('medium','8192'),('high','16384')]:
@@ -115,7 +199,6 @@ class ProviderStageTests(unittest.TestCase):
     def test_resolution_and_identity(self):
         with self.assertRaises(ProviderResolutionError): self.adapter(config=replace(self.config,claude_executable='/missing'))
         with self.assertRaises(ProviderResolutionError): self.adapter(model='invented')
-        with self.assertRaises(ProviderResolutionError): self.adapter('codex','invented')
         with self.assertRaises(ProviderResolutionError): self.adapter(effort='ultra')
         adapter,inv=self.adapter()
         with self.assertRaises(ProviderExecutionError): adapter.run(replace(inv,binding=replace(inv.binding,model='haiku')))
