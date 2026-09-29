@@ -1,0 +1,81 @@
+# Artifact-aware V2 execution
+
+`switchyard.context_transport.workspace_resolver(bundle, flow_name, workspace,
+stage_executor_resolver, *, max_context_bytes=65536)` composes with
+`compile_workflow`. The catalog must equal the workspace catalog. Use the same
+bundle and selected flow for both calls. Each binding resolves once during compilation.
+No runtime or provider adapter changes are involved.
+
+The delegate is a callable receiving `ExecutionBinding` and returning a
+`StageExecutor` with `run(StageInvocation) -> StageResult`.
+
+Frozen transport values:
+
+- `StageInvocation(binding, artifacts, previous_handoff=None, diagnostics=None)`.
+- `ArtifactSnapshot(record: ArtifactRecord, content: str)`: record supplies logical
+  name, explicit version, format/schema, SHA-256, byte size and provenance.
+- `ProducedArtifact(name, content)`: format and schema are owned by the catalog.
+- `StageHandoff(summary, findings=(), evidence=(), changed_assumptions=(), blockers=())`.
+- `StageResult(outcome, produced_artifacts=(), handoff=None, diagnostics=None)`.
+
+Collections are defensively copied to tuples. Diagnostics use the existing
+`DiagnosticInput` and `DiagnosticPayload` types unchanged. `ContextualExecutor`
+implements runtime Executor and holds binding, state declaration, workspace,
+stage executor and context byte limit. `WorkContractError` reports invalid context
+or outputs, prefixed with flow/state/rung; runtime retains its normal executor-error boundary.
+
+## Input selection
+
+Before stage execution, verify the immutable request exists and exactly equals
+WorkUnit.task whenever the catalog declares a request source. Request consistency
+is checked even when request is not consumed; its text is not implicitly injected.
+
+Read exactly `consumes` in declaration order, using latest committed versions and
+verified SHA-256/size. Capture immutable content snapshots, not just file paths.
+Missing or altered inputs fail before calling the stage. Separate work roots have
+independent manifests and no shared context cache.
+
+Primary invocations receive no historical handoff. Fresh invocations also receive
+none, but keep all declared factual artifacts. Continue selects exactly the latest
+committed handoff with the same flow/state and immediately preceding rung index.
+It may originate from an earlier logical visit: run-scoped rung budgets can refuse
+a later primary invocation. A missing predecessor fails explicitly.
+
+Handoffs are prior reasoning, not authoritative facts. Continue does not mean a
+provider-native session. Fresh never promotes old handoff prose into evidence.
+Declared artifacts remain workflow-owned: declaring a reasoning artifact in
+consumes explicitly includes it, even for fresh.
+
+The entire structured input (binding, snapshots, optional handoff and diagnostics)
+has a default 65536-byte bound. Size is measured using compact sorted-key UTF-8
+JSON with decoded diagnostic bytes. This is accounting, not provider prompt
+formatting. Oversized context is rejected, never truncated. Selection is bounded;
+workspace integrity reads may still inspect historical versions.
+
+## Output validation and persistence
+
+Validate result type, nonempty string outcome (no NUL/reserved budget_exceeded),
+diagnostics type, all produced names/content/schema and the complete handoff before
+writing anything. Duplicate or undeclared production is invalid; request cannot be
+produced. MicroSpecs use the existing validator. Omitted declared outputs are legal;
+a subsequent consumer enforces availability.
+
+The wrapper assigns handoff provenance from the binding, outcome from StageResult,
+and produced_artifacts from validated production. Workspace assigns sequence.
+StageHandoff cannot supply these fields. `WorkWorkspace.validate_artifact` and
+`validate_handoff` provide the same storage validators without writes.
+
+Commit artifacts in result order, then the handoff, then return InvocationResponse.
+No runtime transition is selected by this layer. Runtime remains authoritative for
+state-declared outcome membership; an undeclared semantic outcome can consequently
+be rejected after durable outputs have committed. Storage success is not execution
+success and must be interpreted with canonical runtime events.
+
+Prevalidation prevents validation-induced partial batches. I/O failure can still
+leave a committed prefix; raise before returning an outcome and retain immutable
+versions. There is no transaction, rollback or automatic retry. Existing workspace
+crash/orphan rules apply. Cooperating execution should serialize a workspace; this
+API does not claim a multi-artifact snapshot transaction across concurrent writers.
+
+No real providers, provider prompts, chat transcripts or session state are stored
+or constructed here.

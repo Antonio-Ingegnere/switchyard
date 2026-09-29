@@ -1,0 +1,29 @@
+id: V2-003B
+goal: Transport declared durable inputs and validated stage outputs without changing runtime.
+scope:
+  - Add immutable ArtifactSnapshot(record, content) and StageInvocation(binding, artifacts, previous_handoff, diagnostics).
+  - Add ProducedArtifact(name, content), StageHandoff(summary, findings, evidence, changed_assumptions, blockers), and StageResult(outcome, produced_artifacts, handoff, diagnostics).
+  - Add ContextualExecutor implementing runtime Executor and workspace_resolver(bundle, flow_name, workspace, stage_executor_resolver).
+  - Wire canonical bugfix artifact declarations into bug_spec, diagnosis and fix_microspec without graph changes.
+constraints:
+  - Verify the workspace catalog matches the compilation bundle and immutable request exactly matches WorkUnit.task before stage execution.
+  - Include only consumes, using verified latest committed versions; snapshots preserve content and digest.
+  - Primary and fresh receive no handoff. Continue receives only latest same-flow/state immediately preceding rung handoff, including earlier logical visits.
+  - Bound serialized structured input to configurable 65536 UTF-8 bytes by default; reject rather than truncate.
+  - Preserve existing DiagnosticInput and DiagnosticPayload structures.
+  - Prevalidate result structure, all outputs and handoff before writes; commit artifacts then handoff before returning runtime response.
+  - Runtime alone validates state-declared semantic outcomes. Durable output can precede runtime rejection of an undeclared outcome.
+  - Partial I/O commits remain durable; raise without rollback or semantic response. No multi-record transaction is claimed.
+  - Handoffs are bounded prior reasoning, not repository truth or provider session history.
+acceptance:
+  - Feature and bugfix fake executions transport declared durable artifacts.
+  - Continue includes exactly one previous-rung handoff; fresh excludes reasoning while retaining declared evidence.
+  - Missing inputs, mutations, request mismatch and invalid outputs fail before inappropriate execution or commits.
+  - Repeated visits can continue from an earlier visit handoff after real budget refusal.
+verification:
+  - Focused context transport tests plus workspace, compiler and loader regressions.
+  - Full offline unittest suite.
+non_goals:
+  - Runtime, Event, compiler routing or executor contract changes.
+  - Provider adapters, prompt serialization for providers, session memory or real provider calls.
+  - Adeo changes or V2-004.

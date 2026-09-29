@@ -1075,5 +1075,19 @@ leftovers fail explicitly rather than being silently repaired. See [the complete
 contract and API](docs/design/work-contract.md).
 
 Compiler inspection exposes `compiled.artifacts`. Runtime and executor payloads remain
-unchanged. No prompt construction, fresh/continue context selection, artifact transport
-or real provider integration is included; those remain V2-003B work.
+unchanged. Opt-in structured transport is available through V2-003B:
+
+```python
+from switchyard.context_transport import workspace_resolver
+from switchyard.workflow_compiler import compile_workflow
+
+resolver = workspace_resolver(bundle, "bugfix", workspace, stage_executor_resolver)
+compiled = compile_workflow(bundle, "bugfix", resolver)
+# run(WorkUnit(original_request), compiled.flow, compiled.executors)
+```
+
+Stage executors receive verified declared artifact snapshots and, for continue only,
+one predecessor handoff. They return validated artifacts and optional structured
+handoffs before runtime advances. Fresh excludes prior handoffs. See
+[context transport](docs/design/context-transport.md) for contracts, bounds and partial
+I/O failure semantics. Real provider adapters and provider prompt formatting remain future work.

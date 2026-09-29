@@ -362,6 +362,21 @@ class WorkWorkspace:
             return self._write('request', text, None, 1)
 
     @_boundary
+    def validate_artifact(self, name: str, content: str, producer: ArtifactProducer | None = None) -> None:
+        """Validate a proposed production without writing any workspace state."""
+        spec = self._definition(name)
+        _check(spec.source != 'request', 'request may only be initialized, never produced')
+        self._validate_content(spec, content)
+        if producer is not None:
+            _producer(producer)
+
+    @_boundary
+    def validate_handoff(self, record: HandoffRecord) -> None:
+        """Validate a proposed handoff before committing a batch of outputs."""
+        _handoff(record, self.artifacts)
+        _check(record.sequence == 0, 'store assigns handoff sequence')
+
+    @_boundary
     def write_artifact(self, name: str, content: str, producer: ArtifactProducer | None = None) -> ArtifactRecord:
         _check(self._definition(name).source != 'request', 'request may only be initialized, never produced')
         with self._locked():
