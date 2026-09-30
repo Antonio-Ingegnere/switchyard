@@ -24,6 +24,10 @@ class ExecutionBinding:
     effort: Effort | None
     escalation_kind: str | None
     context_mode: str | None
+    executor_allowed_outcomes: tuple[str, ...] = ()
+
+    def __post_init__(self):
+        object.__setattr__(self, 'executor_allowed_outcomes', tuple(self.executor_allowed_outcomes))
 
 
 ExecutorResolver = Callable[[ExecutionBinding], Executor]
@@ -35,6 +39,10 @@ class CompiledStatePlan:
     binding: ExecutionBinding | None
     declaration: WorkflowStateSpec
     state: State
+
+    @property
+    def executor_allowed_outcomes(self) -> tuple[str, ...]:
+        return () if self.binding is None else self.binding.executor_allowed_outcomes
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,7 +138,8 @@ def compile_workflow(bundle: WorkflowBundle, flow_name: str,
             profile = bundle.profiles[declaration.profile]
             binding = ExecutionBinding(flow_name, name, spec.role, index, declaration.profile,
                                        profile.provider, profile.model, declaration.effort,
-                                       step.kind if step else None, step.context if step else None)
+                                       step.kind if step else None, step.context if step else None,
+                                       tuple(sorted(key for key in state.on if key != 'budget_exceeded')))
             try:
                 executor = executor_resolver(binding)
             except Exception as exc:

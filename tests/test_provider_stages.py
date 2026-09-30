@@ -9,7 +9,8 @@ import unittest
 from unittest.mock import patch
 
 from runtime import WorkUnit, run, DiagnosticPayload
-from switchyard.context_transport import StageInvocation, workspace_resolver
+from switchyard.context_transport import (StageInvocation, workspace_resolver, StageOutputContract,
+    StageOutputArtifactContract, StageHandoffContract)
 from switchyard.work_contract import WorkWorkspace, HandoffRecord
 from switchyard.workflow_bundle import (load_workflow_bundle, ExecutionProfile, CommandSpec,
                                         CommandOutcomes, CommandCapture)
@@ -43,7 +44,7 @@ class ProviderStageTests(unittest.TestCase):
     def adapter(self,provider='claude',model='sonnet',effort='medium',command=None,config=None):
         binding=self.binding(provider,model,effort)
         resolver=ProviderStageExecutorResolver({'profile':ExecutionProfile(provider,model,command)},config or self.config)
-        return resolver(binding),StageInvocation(binding,())
+        return resolver(binding),StageInvocation(binding,(), output_contract=StageOutputContract(('ready',), (), StageHandoffContract(True, ())))
 
     def calls(self):
         return [json.loads(line) for line in self.log.read_text().splitlines()]
@@ -61,7 +62,7 @@ class ProviderStageTests(unittest.TestCase):
                 self.assertEqual(call['input'],render_invocation(inv))
                 if provider=='codex':
                     self.assertIn('model_reasoning_effort="medium"',call['argv'])
-                    self.assertEqual(call['schema'],result_schema())
+                    self.assertEqual(call['schema'],result_schema(inv.output_contract))
                 elif model=='sonnet':
                     self.assertIn('--effort',call['argv']); self.assertIn('medium',call['argv'])
                 else:
@@ -302,7 +303,7 @@ class ResultProtocolTests(unittest.TestCase):
 
     def test_render_advisory_only_when_present(self):
         binding=ExecutionBinding('flow','A','role',0,'profile','claude','sonnet','high',None,None)
-        inv=StageInvocation(binding,())
+        inv=StageInvocation(binding,(), output_contract=StageOutputContract(('ready',), (), StageHandoffContract(True, ())))
         self.assertNotIn('PRIOR REASONING HANDOFF',render_invocation(inv))
         h=HandoffRecord('flow','A','role',0,'ready','hypothesis')
         rendered=render_invocation(replace(inv,previous_handoff=h))

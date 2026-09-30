@@ -1,0 +1,60 @@
+id: V2-003C
+goal: Supply exact immutable stage output requirements before provider execution.
+status: complete
+scope:
+  - Compiler-owned executor_allowed_outcomes metadata on ExecutionBinding and compiled plan inspection.
+  - StageOutputContract, artifact descriptors, handoff guidance and shared MicroSpec field descriptions.
+  - Shared Claude/Codex rendering and dynamic outcome/artifact enums; offline regressions.
+constraints:
+  - Runtime, Event, transitions, budgets, persistence and fresh/continue selection unchanged.
+  - Keep strict post-result validation; no provider retries or live V2-005 execution.
+  - Keep unfinished V2-005 harness files outside this commit; Adeo untouched.
+acceptance:
+  - SPECIFY explicitly receives microspec/yaml/microspec and its required field types.
+  - Allowed outcomes come from current generated runtime transitions, excluding budget_exceeded.
+  - spec.md still fails without committing any outputs; contract-aware output succeeds.
+verification:
+  - Focused contract, renderer, fake-process and immutable/bounded metadata tests.
+  - Provider/context/workspace/compiler/loader/runtime/V1/observability/delivery regressions and full offline suite.
+non_goals:
+  - Live dogfood, outcome-specific artifact requirements, new runtime or routing behavior.
+design:
+  dependency: |
+    Compiler constructs runtime State before resolving the executor. It copies that
+    State's sorted semantic transition keys into a new immutable tuple on ExecutionBinding.
+    workspace_resolver therefore receives exact rung outcomes without a circular plan
+    dependency, another registry, mutable callback or reconstruction of routing logic.
+  api: |
+    StageInvocation retains its existing fields and requires keyword-only output_contract.
+    StageOutputContract(allowed_outcomes, artifacts, handoff).
+    StageOutputArtifactContract(name, format, schema=None, schema_fields=()).
+    StageHandoffContract(expected, evidence_artifacts, supported=True) describes the
+    existing StageHandoff body; expected is advisory for models, false for commands.
+  microspec: |
+    Shared frozen MicroSpecField descriptors in work_contract describe required names,
+    string/list types and emptiness rules. Existing validation uses these same descriptors.
+    No persistence behavior changes and no independent schema registry.
+  semantics: |
+    Production is optional; only exact declared logical names may be produced.
+    Handoff evidence uses catalog names, never paths; provenance remains wrapper-owned.
+    Runtime remains authoritative for outcome membership after output commit.
+  bounds: |
+    Durable input accounting remains unchanged (excluding the new compiler outcome tuple).
+    Output contract has a separate 65536-byte compact JSON ceiling enforced during
+    construction. Built-in MicroSpec descriptions are small fixed tuples; no plugins.
+  current_graph: |
+    The current compiler includes every recognized escalation trigger for each ladder
+    rung because exhaustion routes handle unmatched triggers. Its canonical ladder
+    outcome sets therefore coincide today. Each contract still derives from its own
+    actual runtime State; no new rung semantics or artificial differences are introduced.
+
+verification_result:
+  focused_contract_tests: 6 passed, including both fake provider process protocols.
+  existing_context_suite: 12 passed.
+  existing_provider_suite: 16 passed.
+  full_offline_suite: 419 tests in 30.622 seconds; 418 passed, 1 existing platform skip.
+  workspace_note: Full suite includes the four existing uncommitted V2-005 offline harness tests; harness files remain outside this commit.
+  strict_validation: spec.md rejected with no artifact or handoff committed; valid contract-derived microspec passes unchanged validator.
+  protected_scope: No runtime/Event, graphs, budgets, persistence, context selection or Adeo changes.
+  live_provider_calls: 0
+  v2_005: Output guidance corrected offline; live retry remains pending.

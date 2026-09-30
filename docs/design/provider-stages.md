@@ -130,3 +130,18 @@ memory/output, not a hard filesystem quota on a provider-owned result file. Clea
 kills/waits the direct child, as the existing helper does; process-tree cancellation
 is not guaranteed. Descendant-held pipes cannot extend the configured deadline.
 Tests use POSIX fake executable scripts; Windows fixture tests are skipped.
+
+## Stage-specific output guidance (V2-003C)
+
+The shared renderer now includes `StageInvocation.output_contract` as deterministic
+STAGE OUTPUT CONTRACT JSON plus instructions: return exact logical names (not paths),
+only allowed semantic outcomes, raw declared content format, and all required MicroSpec
+fields from the shared validator descriptions. Artifact production remains optional.
+Handoff guidance explains body-only ownership and logical evidence references.
+
+`result_schema(contract=None)` retains the generic StageResult envelope. Both real
+adapters pass the invocation contract to specialize outcome and artifact-name enums;
+no allowed artifacts means maxItems=0, not an invalid empty enum. Claude's --json-schema
+and Codex's --output-schema receive equivalent schemas. The generic strict parser,
+context post-validation and runtime outcome validation remain authoritative. No retries,
+provider sessions, command semantics or context-selection changes are introduced.

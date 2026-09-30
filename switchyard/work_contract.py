@@ -80,6 +80,18 @@ class MicroSpec:
             object.__setattr__(self, key, tuple(getattr(self, key)))
 
 
+@dataclass(frozen=True, slots=True)
+class MicroSpecField:
+    name: str
+    type: str
+    empty_allowed: bool
+
+
+MICROSPEC_FIELDS = tuple(MicroSpecField(name, 'string', False) for name in ('id', 'goal')) + tuple(
+    MicroSpecField(name, 'list of nonempty strings', True)
+    for name in ('scope', 'constraints', 'acceptance', 'verification', 'non_goals'))
+
+
 @_boundary
 def validate_microspec(content: str, format: str = 'yaml') -> MicroSpec:
     """Validate required concepts from docs/protocols/micro-spec.md, not extensions."""
@@ -87,12 +99,12 @@ def validate_microspec(content: str, format: str = 'yaml') -> MicroSpec:
     _check(format in ('yaml', 'json'), 'MicroSpec requires yaml or json')
     value = _yaml_data(content) if format == 'yaml' else _json(content)
     _check(type(value) is dict, 'MicroSpec root must be a mapping')
-    required = ('id', 'goal', 'scope', 'constraints', 'acceptance', 'verification', 'non_goals')
+    required = tuple(field.name for field in MICROSPEC_FIELDS)
     _check(all(key in value for key in required), 'missing required MicroSpec field')
-    for key in ('id', 'goal'):
+    for key in (field.name for field in MICROSPEC_FIELDS if field.type == 'string'):
         _text(value[key], 'MicroSpec ' + key)
     lists = {}
-    for key in required[2:]:
+    for key in (field.name for field in MICROSPEC_FIELDS if field.type != 'string'):
         _check(type(value[key]) is list, f'MicroSpec {key} must be a list')
         for item in value[key]:
             _text(item, 'MicroSpec ' + key + ' item')

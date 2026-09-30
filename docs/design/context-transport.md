@@ -4,14 +4,14 @@
 stage_executor_resolver, *, max_context_bytes=65536)` composes with
 `compile_workflow`. The catalog must equal the workspace catalog. Use the same
 bundle and selected flow for both calls. Each binding resolves once during compilation.
-No runtime or provider adapter changes are involved.
+Runtime is unchanged; provider adapters render the same generic stage contract.
 
 The delegate is a callable receiving `ExecutionBinding` and returning a
 `StageExecutor` with `run(StageInvocation) -> StageResult`.
 
 Frozen transport values:
 
-- `StageInvocation(binding, artifacts, previous_handoff=None, diagnostics=None)`.
+- `StageInvocation(binding, artifacts, previous_handoff=None, diagnostics=None, *, output_contract)`.
 - `ArtifactSnapshot(record: ArtifactRecord, content: str)`: record supplies logical
   name, explicit version, format/schema, SHA-256, byte size and provenance.
 - `ProducedArtifact(name, content)`: format and schema are owned by the catalog.
@@ -21,7 +21,7 @@ Frozen transport values:
 Collections are defensively copied to tuples. Diagnostics use the existing
 `DiagnosticInput` and `DiagnosticPayload` types unchanged. `ContextualExecutor`
 implements runtime Executor and holds binding, state declaration, workspace,
-stage executor and context byte limit. `WorkContractError` reports invalid context
+stage executor, immutable output contract and context byte limit. `WorkContractError` reports invalid context
 or outputs, prefixed with flow/state/rung; runtime retains its normal executor-error boundary.
 
 ## Input selection
@@ -79,3 +79,41 @@ API does not claim a multi-artifact snapshot transaction across concurrent write
 
 No real providers, provider prompts, chat transcripts or session state are stored
 or constructed here.
+
+## Explicit stage output contract (V2-003C)
+
+Every StageInvocation requires an immutable `output_contract`:
+
+- `StageOutputContract(allowed_outcomes, artifacts, handoff)`.
+- `StageOutputArtifactContract(name, format, schema=None, schema_fields=())`.
+- `StageHandoffContract(expected, evidence_artifacts, supported=True)`; its immutable
+  `body_fields` derives from StageHandoff itself.
+
+The compiler copies sorted keys from each generated runtime State.on, excluding
+control-plane `budget_exceeded`, into `ExecutionBinding.executor_allowed_outcomes`.
+CompiledStatePlan exposes the same property. It does this before eager executor
+resolution; no circular dependency, registry, routing reconstruction or runtime-name
+parsing is involved. ContextualExecutor consumes that tuple without learning targets.
+Current ladder rungs happen to have equal sets because exhaustion handles every
+recognized escalation trigger; this slice does not change that routing semantics.
+
+Produced descriptors come from state.produces plus the bundle artifact catalog.
+Names are exact logical identifiers, never filenames. All production remains optional;
+only later consumers require availability. `schema_fields` for microspec uses the
+same frozen `MICROSPEC_FIELDS` descriptions as validate_microspec: id/goal are nonempty
+strings; scope/constraints/acceptance/verification/non_goals are lists of nonempty
+strings (empty lists allowed). All seven fields are required; existing extension-field
+acceptance is unchanged. YAML/JSON is raw content, without markdown fences.
+
+Handoffs are supported and advisory-expected for model stages, optional for commands.
+Body fields are summary/findings/evidence/changed_assumptions/blockers; provenance,
+sequence, outcome and produced_artifacts remain wrapper/store-owned. Evidence names
+come from the declared catalog; repository paths belong in findings or summary.
+
+Output contract JSON has a separate fixed 65536-byte ceiling. It is excluded from
+max_context_bytes, as is the newly added outcome tuple on binding, preserving previous
+durable input accounting exactly. No arbitrary schema plugins exist. Oversized output
+contracts fail during construction; they cannot create unbounded framework guidance.
+
+Post-result validation and commit ordering are unchanged. A returned spec.md still
+fails when only microspec is declared; guidance never aliases or repairs model output.

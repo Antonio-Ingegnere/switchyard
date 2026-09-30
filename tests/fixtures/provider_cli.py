@@ -41,6 +41,16 @@ outcome=plan.get('outcomes',{}).get(f'{state}:{rung}','ready')
 result={'outcome':outcome,'produced_artifacts':plan['artifacts'].get(state,[]),
         'handoff':{'summary':f'{state} reasoning {rung}','findings':[], 'evidence':[],
                    'changed_assumptions':[], 'blockers':[]}, 'diagnostics':None}
+if os.environ.get('FAKE_CONTRACT_AWARE') == '1':
+    contract=json.loads(text.split('STAGE OUTPUT CONTRACT\n')[1].split('\n\n')[0])
+    result['outcome']='ready' if 'ready' in contract['allowed_outcomes'] else contract['allowed_outcomes'][0]
+    result['produced_artifacts']=[]
+    for artifact in contract['artifacts']:
+        content='evidence'
+        if artifact['schema']=='microspec':
+            content=json.dumps({f['name']: 'bounded feature' if f['type']=='string' else ['check']
+                                for f in artifact['schema_fields']})
+        result['produced_artifacts'].append({'name':artifact['name'],'content':content})
 raw=json.dumps(result)
 if mode=='malformed': raw='not JSON'
 if mode=='oversized': raw='x'*2000000

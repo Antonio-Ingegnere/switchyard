@@ -1,5 +1,5 @@
 """Opt-in structured durable context transport; control flow stays in runtime."""
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field, fields
 import hashlib
 import json
 from typing import Callable, Protocol
@@ -8,7 +8,7 @@ from runtime import (DiagnosticInput, DiagnosticPayload, ExecutorResult,
                      InvocationRequest, InvocationResponse)
 from .workflow_compiler import ExecutionBinding
 from .work_contract import (ArtifactProducer, ArtifactRecord, HandoffRecord,
-                            WorkContractError, WorkWorkspace)
+                            WorkContractError, WorkWorkspace, MicroSpecField, MICROSPEC_FIELDS)
 from .workflow_bundle import WorkflowBundle, WorkflowStateSpec
 
 
@@ -31,17 +31,6 @@ class ArtifactSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
-class StageInvocation:
-    binding: ExecutionBinding
-    artifacts: tuple[ArtifactSnapshot, ...]
-    previous_handoff: HandoffRecord | None = None
-    diagnostics: DiagnosticInput | None = None
-
-    def __post_init__(self):
-        _tuples(self, 'artifacts')
-
-
-@dataclass(frozen=True, slots=True)
 class ProducedArtifact:
     name: str
     content: str
@@ -57,6 +46,68 @@ class StageHandoff:
 
     def __post_init__(self):
         _tuples(self, 'findings', 'evidence', 'changed_assumptions', 'blockers')
+
+
+@dataclass(frozen=True, slots=True)
+class StageOutputArtifactContract:
+    name: str
+    format: str
+    schema: str | None = None
+    schema_fields: tuple[MicroSpecField, ...] = ()
+
+    def __post_init__(self):
+        _require(type(self.name) is str and bool(self.name), 'invalid output artifact name')
+        _require(self.format in ('markdown', 'text', 'yaml', 'json'), 'invalid output artifact format')
+        _require(self.schema in (None, 'microspec'), 'invalid output artifact schema')
+        _tuples(self, 'schema_fields')
+        _require(all(type(item) is MicroSpecField for item in self.schema_fields), 'invalid schema fields')
+
+
+@dataclass(frozen=True, slots=True)
+class StageHandoffContract:
+    expected: bool
+    evidence_artifacts: tuple[str, ...]
+    supported: bool = True
+    body_fields: tuple[str, ...] = field(default_factory=lambda: tuple(f.name for f in fields(StageHandoff)), init=False)
+
+    def __post_init__(self):
+        _require(type(self.expected) is bool and type(self.supported) is bool, 'invalid handoff policy')
+        _tuples(self, 'evidence_artifacts')
+        _require(all(type(v) is str and v for v in self.evidence_artifacts), 'invalid evidence names')
+
+
+MAX_OUTPUT_CONTRACT_BYTES = 65536
+
+
+@dataclass(frozen=True, slots=True)
+class StageOutputContract:
+    allowed_outcomes: tuple[str, ...]
+    artifacts: tuple[StageOutputArtifactContract, ...]
+    handoff: StageHandoffContract
+
+    def __post_init__(self):
+        _tuples(self, 'allowed_outcomes', 'artifacts')
+        _require(bool(self.allowed_outcomes), 'allowed outcomes must not be empty')
+        _require(all(type(v) is str and v and '\0' not in v and v != 'budget_exceeded'
+                     for v in self.allowed_outcomes), 'invalid allowed semantic outcome')
+        _require(all(type(v) is StageOutputArtifactContract for v in self.artifacts), 'invalid output artifact descriptor')
+        _require(type(self.handoff) is StageHandoffContract, 'invalid handoff contract')
+        size = len(json.dumps(asdict(self), ensure_ascii=False, sort_keys=True,
+                              separators=(',', ':')).encode('utf-8'))
+        _require(size <= MAX_OUTPUT_CONTRACT_BYTES, 'output contract exceeds byte limit')
+
+
+@dataclass(frozen=True, slots=True)
+class StageInvocation:
+    binding: ExecutionBinding
+    artifacts: tuple[ArtifactSnapshot, ...]
+    previous_handoff: HandoffRecord | None = None
+    diagnostics: DiagnosticInput | None = None
+    output_contract: StageOutputContract = field(kw_only=True)
+
+    def __post_init__(self):
+        _tuples(self, 'artifacts')
+        _require(type(self.output_contract) is StageOutputContract, 'expected StageOutputContract')
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,6 +134,7 @@ class ContextualExecutor:
     declaration: WorkflowStateSpec
     workspace: WorkWorkspace
     stage_executor: StageExecutor
+    output_contract: StageOutputContract
     max_context_bytes: int = 65536
 
     def __post_init__(self):
@@ -111,9 +163,13 @@ class ContextualExecutor:
                         if h.flow == self.binding.flow_name and h.rung_index == self.binding.rung_index - 1]
             _require(bool(matching), 'missing continuation handoff for preceding rung')
             previous = matching[-1]
-        context = StageInvocation(self.binding, tuple(snapshots), previous, request.diagnostics)
+        context = StageInvocation(self.binding, tuple(snapshots), previous, request.diagnostics,
+                                  output_contract=self.output_contract)
         # Canonical size accounting only, not a provider prompt format.
-        size = len(json.dumps(asdict(context), ensure_ascii=False, sort_keys=True,
+        input_data = asdict(context)
+        del input_data['output_contract']
+        del input_data['binding']['executor_allowed_outcomes']
+        size = len(json.dumps(input_data, ensure_ascii=False, sort_keys=True,
                               separators=(',', ':'), default=lambda b: b.decode('utf-8')).encode('utf-8'))
         _require(size <= self.max_context_bytes, f'context exceeds {self.max_context_bytes} bytes')
         return context
@@ -173,5 +229,11 @@ def workspace_resolver(bundle: WorkflowBundle, flow_name: str, workspace: WorkWo
         _require(binding.role_name == declaration.role, 'binding role differs from state')
         stage = stage_executor_resolver(binding)
         _require(callable(getattr(stage, 'run', None)), 'resolver must return StageExecutor')
-        return ContextualExecutor(binding, declaration, workspace, stage, max_context_bytes)
+        contract = StageOutputContract(
+            binding.executor_allowed_outcomes,
+            tuple(StageOutputArtifactContract(name, bundle.artifacts[name].format, bundle.artifacts[name].schema,
+                  MICROSPEC_FIELDS if bundle.artifacts[name].schema == 'microspec' else ())
+                  for name in declaration.produces),
+            StageHandoffContract(binding.provider != 'command', tuple(sorted(bundle.artifacts))))
+        return ContextualExecutor(binding, declaration, workspace, stage, contract, max_context_bytes)
     return resolve

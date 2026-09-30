@@ -1,6 +1,6 @@
 id: V2-005
 goal: Prove the canonical FEATURE workflow against a disposable project using live Claude.
-status: live_dogfood_pending_after_V2_004A
+status: live_retry_pending_after_V2_003C
 scope:
   - A tiny dependency-free catalog fixture with independent failing feature acceptance tests.
   - A reusable application entrypoint composing workspace, resolvers, compiler and runtime.
@@ -26,9 +26,8 @@ non_goals:
 planned_design:
   runner: |
     execute_v2_workflow(bundle, flow_name, request, work_root, provider_runtime_config,
-    recorder=None) would return a frozen WorkflowExecution containing RunResult,
-    WorkWorkspace and CompiledWorkflow. It would only compose existing APIs.
-    No runner or fixture code has been implemented while the preflight is blocked.
+    recorder=None) returns a frozen WorkflowExecution containing RunResult,
+    WorkWorkspace and CompiledWorkflow. It only composes existing APIs.
   fixture: |
     Copy tests/fixtures/feature_dogfood_project to a retained temporary target.
     A catalog lookup preserves case-sensitive defaults and adds optional
@@ -110,3 +109,77 @@ model_resolution_correction_V2_004A:
   mapping_storage: Concrete machine-specific model value remains outside the repository.
   compilation_preflight: Succeeded; all 8 canonical FEATURE rungs resolved eagerly, with subprocess creation forbidden.
   live_execution: Not attempted; V2-005 remains incomplete and is not resumed in V2-004A.
+
+resumed_design:
+  fixture: catalog.py plus unittest acceptance; lookup(name, ignore_case=False) initially ignores the option.
+  baseline: Require exactly two passing existing-behavior tests and one named AssertionError acceptance failure.
+  observations: Record canonical JSONL and source hashes at each invocation boundary; retain baseline tests for independent acceptance integrity.
+  runner: No callbacks implement work; the live entrypoint copies the fixture and invokes the generic composition once.
+  environment: Explicit executable paths/PATH and optional local alias JSON; no machine-specific values committed.
+  failures: Retain report, target, workspace and events; raise/exit nonzero without retries or framework fixes.
+
+resumed_verification_2026_09_30:
+  focused_offline_tests: 4 passed.
+  full_offline_suite: 413 tests in 30.791 seconds; 412 passed, 1 existing platform skip.
+  offline_proof: Fake SPECIFY and IMPLEMENT processes, real command verifier, durable artifacts and READY_FOR_MANUAL_QA.
+  authentication_preflight: Claude auth status --json reports loggedIn false and authMethod none, inside and outside sandbox.
+  live_workflow_attempts: 0
+  real_model_invocations: 0
+  blocker_classification: Local provider authentication unavailable; no live framework behavior tested.
+  required_action: Authenticate Claude locally before resuming the one live workflow attempt.
+  commit: No V2-005 success commit; harness changes remain uncommitted.
+  protected_scope: Runtime, Event, compiler, providers, canonical workflows, context and Adeo unchanged.
+  preflight_evidence: /var/folders/9w/37mqyqyd5qgbkvd8l_1lqyx00000gn/T/switchyard-v2-005-auth-preflight-kc12g2j6/preflight.json
+
+live_attempt_2026_09_30:
+  authentication: Successful through the same executable and environment as ProviderRuntimeConfig; claude.ai authentication.
+  executable_version: Claude Code 2.1.282.
+  baseline: Two existing-behavior tests passed; only the independently specified missing-feature test failed.
+  workflow_attempts: 1
+  provider_invocations: 1
+  invocation:
+    logical_state: SPECIFY
+    profile: claude-sonnet
+    provider: claude
+    selector: sonnet
+    resolved_cli_model: sonnet
+    effort: medium
+  result: Failed before any semantic outcome was accepted or produced artifact committed.
+  exact_failure: 'feature.SPECIFY[0]: undeclared production: spec.md'
+  classification: Structured-output protocol / context transport defect.
+  evidence_analysis: |
+    Claude returned parseable structured StageResult content, but its artifact name
+    spec.md is not SPECIFY's declared produces name microspec. Artifact validation
+    correctly refused it before persistence. StageInvocation carries binding, consumed
+    snapshots, prior handoff and diagnostics, but no declared output contract. The
+    renderer supplies a generic JSON envelope with arbitrary artifact-name/outcome
+    strings, not allowed output names, format/schema requirements, MicroSpec required
+    fields or state outcomes. The real executor therefore lacks the contract that
+    offline fake executors were explicitly programmed to satisfy.
+  smallest_followup: |
+    A focused V2 application/context and provider-rendering correction should expose
+    immutable declared stage output contracts (outcomes and produced artifact
+    definitions, including the existing MicroSpec contract) to the stage executor.
+    Render that contract while retaining existing validation and runtime authority.
+    Do not rename model output, weaken validation or add instructions in the dogfood
+    fixture/runner as a workaround. No such fix is implemented in V2-005.
+  request: Exact original request preserved as version 1.
+  produced_artifacts: []
+  handoff_count: 0
+  changed_target_files: []
+  implement_executed: false
+  verifier_executed: false
+  terminal: null
+  event_sequence: [run_started, state_entered, invocation_started, run_error]
+  evidence_root: /var/folders/9w/37mqyqyd5qgbkvd8l_1lqyx00000gn/T/switchyard-v2-005-live-tfmwyd1f
+  retained: [target, work, events.jsonl, observations.jsonl, baseline-files.json, baseline-verification.txt, changed-files.json, report.json, failure-audit.json, preflight.json]
+  reporting_note: Failure audit supplements report.json; its successful-run provider detail list is empty on exceptions, while invocations_started and canonical events prove one invocation.
+  intervention: No harness retry, manual implementation, artifact repair, provider-output editing or configuration change.
+  completion: V2-005 remains incomplete; no success commit. Stop before any fix or V2-006.
+
+output_contract_correction_V2_003C:
+  addresses: First live SPECIFY failure from undeclared spec.md production.
+  change: Immutable compiler-derived StageOutputContract supplies exact outcomes, output names/formats/schemas and shared MicroSpec requirements before generation.
+  enforcement: Strict rejection of spec.md remains; no repair, renaming or aliasing of produced artifacts.
+  evidence: Offline contract-aware fake processes exercise both Claude and Codex structured schema/rendering paths.
+  live_retry: Pending; no provider call or V2-005 execution in V2-003C. V2-005 remains incomplete.
