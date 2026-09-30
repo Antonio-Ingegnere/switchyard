@@ -1,6 +1,6 @@
 id: V2-005
 goal: Prove the canonical FEATURE workflow against a disposable project using live Claude.
-status: live_retry_pending_after_V2_003C
+status: complete
 scope:
   - A tiny dependency-free catalog fixture with independent failing feature acceptance tests.
   - A reusable application entrypoint composing workspace, resolvers, compiler and runtime.
@@ -183,3 +183,78 @@ output_contract_correction_V2_003C:
   enforcement: Strict rejection of spec.md remains; no repair, renaming or aliasing of produced artifacts.
   evidence: Offline contract-aware fake processes exercise both Claude and Codex structured schema/rendering paths.
   live_retry: Pending; no provider call or V2-005 execution in V2-003C. V2-005 remains incomplete.
+
+second_live_attempt_2026_09_30:
+  offline_verification: 4 focused tests passed; full suite 419 tests in 30.099 seconds, 418 passed and 1 existing platform skip.
+  preflight: Claude authenticated through the same executable/environment; canonical FEATURE eagerly compiled all 8 rungs; local aliases remained outside committed YAML.
+  baseline: Exactly the expected feature failure with both existing-behavior tests passing.
+  workflow_attempts_this_resume: 1
+  provider_invocations: 1
+  invocation: {state: SPECIFY, rung: 0, provider: claude, profile: claude-sonnet, model_selector: sonnet, resolved_cli_model: sonnet, effort: medium}
+  provider_version: Claude Code 2.1.282.
+  exact_failure: 'feature.SPECIFY[0]: artifact microspec: invalid MicroSpec verification item'
+  classification: Artifact validation of provider-produced MicroSpec.
+  findings: |
+    Authentication, eager compilation, process execution and structured StageResult
+    parsing succeeded. The provider used the correct logical name microspec, resolving
+    the first attempt's naming failure. Its content parsed, but a verification list
+    element failed the existing nonempty-string check. No artifact or handoff from
+    this invocation was committed. This is not evidence that validation should loosen.
+    Rejected content is not retained by the current boundary, so the exact offending
+    element/index/type is unknown. YAML coercion, empty content or another shape error
+    must not be asserted without that evidence. No runtime/compiler defect is established.
+  smallest_followup: |
+    A focused rejected-output diagnostic improvement should preserve field index/type
+    and bounded rejected artifact evidence separately from committed artifacts. That
+    evidence can support a targeted provider-generation/protocol correction. Do not
+    repair the response, weaken validation, add runner instructions or retry here.
+  artifacts: {request: [1]}
+  request_unchanged: true
+  handoff_count: 0
+  changed_target_files: []
+  implement_executed: false
+  verifier_executed: false
+  terminal: null
+  event_sequence: [run_started, state_entered, invocation_started, run_error]
+  evidence_root: /var/folders/9w/37mqyqyd5qgbkvd8l_1lqyx00000gn/T/switchyard-v2-005-live2-oy1bs2hc
+  retained: [target, work, events.jsonl, observations.jsonl, baseline-files.json, baseline-verification.txt, changed-files.json, report.json, failure-audit.json, preflight.json]
+  intervention: No harness retry, manual implementation, artifact repair, provider response editing or workflow/configuration changes.
+  completion: V2-005 incomplete; harness remains uncommitted. No further live attempt or V2-006.
+
+successful_live_attempt_2026_10_01:
+  authorization: User explicitly authorized one new workflow attempt after the prior retained failure.
+  offline_verification: 4 focused harness tests passed; full suite 419 tests in 30.417 seconds, 418 passed and 1 existing platform skip.
+  preflight: Authentication succeeded with the same ProviderRuntimeConfig environment; all 8 canonical FEATURE bindings resolved eagerly; reused the existing external local model aliases.
+  baseline: Both existing-behavior tests passed; only the named missing-feature acceptance test failed, as expected.
+  workflow_attempts_this_resume: 1
+  runtime_state_sequence: ['@v2:feature:SPECIFY:0', '@v2:feature:IMPLEMENT:0', '@v2:feature:VERIFY:0', READY_FOR_MANUAL_QA]
+  logical_state_sequence: [SPECIFY, IMPLEMENT, VERIFY, READY_FOR_MANUAL_QA]
+  terminal: READY_FOR_MANUAL_QA
+  provider_executable: Claude Code from local PATH.
+  provider_version: 2.1.282
+  provider_invocations:
+    - {state: SPECIFY, rung: 0, provider: claude, profile: claude-sonnet, model_selector: sonnet, resolved_cli_model: sonnet, effort: medium, outcome: ready}
+    - {state: IMPLEMENT, rung: 0, provider: claude, profile: claude-sonnet, model_selector: sonnet, resolved_cli_model: sonnet, effort: medium, outcome: ready}
+  runtime_invocations: 3
+  specify_checkpoint: Exact request v1 unchanged; microspec v1 validated using the existing validator; one structured handoff committed before IMPLEMENT.
+  implementation_checkpoint: Real Claude modified catalog.py to use casefold matching only when ignore_case is enabled; default exact lookup preserved.
+  changed_target_files: [catalog.py]
+  independent_acceptance_tests: Unchanged from fixture.
+  artifacts: {request: [1], microspec: [1], implementation_handoff: [1], verifier_evidence: [1]}
+  handoff_count: 2
+  verification_command: [python3, -m, unittest, discover, -s, tests]
+  verification_invocations: 1
+  verification_outcome: pass
+  verification_evidence: All 3 fixture tests passed; bounded captured output verified through WorkWorkspace.
+  diagnosis_repair_escalation: None.
+  live_codex: Not invoked; deliberate cross-provider proof remains outside V2-005.
+  intervention: No harness retry, manual implementation, MicroSpec repair, artifact repair or provider response editing.
+  evidence_root: /var/folders/9w/37mqyqyd5qgbkvd8l_1lqyx00000gn/T/switchyard-v2-005-live3-2xtrgxyn
+  target: target/
+  workspace: work/
+  canonical_events: events.jsonl
+  report: report.json
+  retained: [baseline-files.json, baseline-verification.txt, observations.jsonl, changed-files.json, preflight.json, work/manifest.jsonl, work/artifacts, work/handoffs]
+  model_mapping: Machine-specific model alias remains only in external preflight configuration, not committed workflow YAML.
+  protected_scope: Runtime, Event, compiler, provider adapters, context transport, canonical workflow and Adeo unchanged in this slice.
+  completion: V2-005 acceptance satisfied. Stop before V2-006.
