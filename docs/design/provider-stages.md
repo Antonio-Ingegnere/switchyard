@@ -254,3 +254,44 @@ returned. Handoff body, provenance and evidence-reference rules are unchanged.
 The installed Claude 2.1.282 result-envelope permission denial carries only
 `tool_name`, `tool_use_id` and `tool_input`; it has no separate textual reason, so
 V2-004C's tool-name-only `permission_denials` diagnostic is unchanged.
+
+## Claude structured-output transport normalization (V2-004E)
+
+The contract is layered:
+
+```text
+canonical StageResult   all four keys required; handoff/diagnostics values nullable
+Claude transport        nullable StageResult keys may be omitted
+Claude adapter          omitted nullable key -> explicit null (nothing else)
+canonical parser        unchanged strict exact four-key validation
+```
+
+| Key | Canonical / Codex required | Claude transport required |
+| --- | --- | --- |
+| `outcome` | yes | yes |
+| `produced_artifacts` | yes | yes |
+| `handoff` | yes | no (declared, nullable) |
+| `diagnostics` | yes | no (declared, nullable) |
+
+Claude Code 2.1.282 implements `--json-schema` through a StructuredOutput tool: the
+model supplies tool input that is validated after generation. Strict required-field
+enforcement is an internal feature gate that Switchyard neither enables nor relies on.
+In V2-006 Part A attempts 2 and 3, Haiku's input lacked the null-valued `handoff` and
+`diagnostics` keys even with explicit V2-004D instructions. Whether the model omitted
+them or the CLI dropped nulls is not observable from retained evidence and does not
+change the adapter contract: for these two keys, missing and explicit null mean the
+same thing (no value supplied).
+
+`result_schema(contract, 'claude')` declares the same properties as the canonical
+schema and differs only in `required`, derived from `RESULT_FIELDS` as the
+non-nullable keys (`CLAUDE_TRANSPORT_REQUIRED`). Codex keeps `result_schema(contract)`
+with all four keys required. After the successful-envelope check,
+`ClaudeStageExecutor` passes `structured_output` through
+`normalize_claude_transport`, which returns a copy with absent nullable keys set to
+null. It never synthesizes `outcome` or `produced_artifacts`, never strips extra keys and
+never coerces invalid values; `parse_stage_result` then rejects those as before. Called
+directly, the generic parser still rejects an object without `handoff`/`diagnostics`.
+Nonzero Claude exits are never normalized (V2-004C path). The rendered prompt still
+describes the canonical four-key shape (V2-004D) without encouraging omission.
+`MAX_STRUCTURED_OUTPUT_RETRIES=1`, models, profiles, efforts, capabilities and runtime
+are unchanged.

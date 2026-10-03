@@ -129,11 +129,10 @@ class FakeProviderShapeTests(unittest.TestCase):
         return [json.loads(line) for line in self.log.read_text().splitlines()]
 
     def test_omitted_nullable_keys_remain_rejected(self):
-        # The live TRIAGE output shape is still illegal: strictness is not loosened.
-        for provider in ('claude','codex'):
-            with self.subTest(provider=provider):
-                with self.assertRaisesRegex(ProviderExecutionError, 'invalid structured object fields'):
-                    self.run_provider(provider, {'outcome':'ready','produced_artifacts':[]})
+        # Canonical strictness is not loosened. Claude's transport-only normalization (V2-004E)
+        # is covered in test_claude_transport_normalization; Codex has none.
+        with self.assertRaisesRegex(ProviderExecutionError, 'invalid structured object fields'):
+            self.run_provider('codex', {'outcome':'ready','produced_artifacts':[]})
 
     def test_null_and_empty_absence_forms_are_valid(self):
         for provider in ('claude','codex'):
@@ -161,8 +160,11 @@ class FakeProviderShapeTests(unittest.TestCase):
         self.assertEqual(contract(claude), contract(codex))
         self.assertEqual(claude['retries'], '1')
         schema = json.loads(claude['argv'][claude['argv'].index('--json-schema')+1])
-        self.assertEqual(schema, codex['schema'])
-        self.assertEqual(schema['required'], list(RESULT_KEYS))
+        self.assertEqual(codex['schema'], result_schema(CONTRACTS[1]))
+        self.assertEqual(codex['schema']['required'], list(RESULT_KEYS))
+        # V2-004E: identical properties; only Claude's transport required list differs.
+        self.assertEqual(schema, result_schema(CONTRACTS[1], 'claude'))
+        self.assertEqual(schema['properties'], codex['schema']['properties'])
 
     def test_provider_schema_failure_remains_execution_failure(self):
         # Live attempt #2 envelope: the CLI rejects the shape and exits 1 (V2-004C unchanged).

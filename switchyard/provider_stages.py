@@ -28,7 +28,10 @@ def _object(properties):
 
 @dataclass(frozen=True, slots=True)
 class ResultField:
-    """One top-level StageResult wire key. Every key is required; nullable means its value may be null."""
+    """One top-level canonical StageResult key. Every key is required; nullable means its value may be null.
+
+    Claude transport alone may omit a nullable key; its adapter restores the canonical null.
+    """
     name: str
     nullable: bool
     empty: str | None  # JSON value to use when not applicable.
@@ -46,6 +49,7 @@ RESULT_FIELDS = (
                 'absence value, never invent diagnostics to avoid null'),
 )
 RESULT_KEYS = tuple(field.name for field in RESULT_FIELDS)
+CLAUDE_TRANSPORT_REQUIRED = tuple(field.name for field in RESULT_FIELDS if not field.nullable)
 if RESULT_KEYS != tuple(StageResult.__dataclass_fields__):
     raise RuntimeError('provider StageResult fields drifted from StageResult')
 
@@ -60,8 +64,15 @@ def result_contract_text():
     return '\n'.join(lines)
 
 
-def result_schema(contract=None):
-    """Fresh schema per caller; no shared mutable schema state."""
+def result_schema(contract=None, transport='canonical'):
+    """Fresh schema per caller; no shared mutable schema state.
+
+    'canonical' (also Codex) requires every key. 'claude' declares the same properties
+    but requires only non-nullable keys: its StructuredOutput tool input is validated
+    non-strictly after generation, and Haiku may omit null-valued keys.
+    """
+    if transport not in ('canonical', 'claude'):
+        raise ValueError('unknown StageResult transport')
     strings = {'type':'array','items':{'type':'string'}}
     handoff = _object({'summary':{'type':'string'}, **{key:strings for key in
                       ('findings','evidence','changed_assumptions','blockers')}})
@@ -70,6 +81,8 @@ def result_schema(contract=None):
                   'handoff':{'anyOf':[handoff,{'type':'null'}]},
                   'diagnostics':{'type':['string','null']}}
     schema = _object({key: properties[key] for key in RESULT_KEYS})
+    if transport == 'claude':
+        schema['required'] = list(CLAUDE_TRANSPORT_REQUIRED)
     if contract is not None:
         schema['properties']['outcome']['enum'] = list(contract.allowed_outcomes)
         artifacts = schema['properties']['produced_artifacts']
@@ -152,6 +165,18 @@ def _text(value, nonempty=False):
         value.encode('utf-8')
     except UnicodeError as exc:
         raise ProviderExecutionError('invalid UTF-8 string field') from exc
+
+
+def normalize_claude_transport(value):
+    """Claude transport only: an omitted nullable key becomes explicit null; nothing else.
+
+    No coercion, no stripping and no synthesis of non-nullable keys; a copy is returned
+    and the canonical parser then enforces the exact four-key shape.
+    """
+    if type(value) is not dict:
+        return value
+    return {**value, **{field.name: None for field in RESULT_FIELDS
+                        if field.nullable and field.name not in value}}
 
 
 def parse_stage_result(value) -> StageResult:
@@ -382,7 +407,7 @@ class ClaudeStageExecutor:
             env.pop(key,None)
         env['MAX_STRUCTURED_OUTPUT_RETRIES'] = '1'
         argv = ['--print','--no-session-persistence','--output-format','json',
-                '--json-schema',_json(result_schema(invocation.output_contract)),'--model',self.resolved_model,
+                '--json-schema',_json(result_schema(invocation.output_contract,'claude')),'--model',self.resolved_model,
                 '--safe-mode','--restricted','--strict-mcp-config','--mcp-config','{"mcpServers":{}}',
                 '--permission-mode','acceptEdits','--permission-prompts','none',
                 '--tools',_claude_tools(self.binding.capabilities),'--disallowedTools','mcp__*',
@@ -406,7 +431,7 @@ class ClaudeStageExecutor:
                  envelope.get('subtype')=='success' and envelope.get('is_error') is False,
                  'Claude did not return a successful result envelope')
         _require('structured_output' in envelope,'Claude structured_output missing')
-        return parse_stage_result(envelope['structured_output'])
+        return parse_stage_result(normalize_claude_transport(envelope['structured_output']))
 
 
 @dataclass(frozen=True, slots=True)

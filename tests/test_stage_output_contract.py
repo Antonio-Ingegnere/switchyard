@@ -162,6 +162,7 @@ class StageOutputContractTests(unittest.TestCase):
             validate_microspec(result.produced_artifacts[0].content)
             call = json.loads(log.read_text().splitlines()[-1])
             schema = call.get('schema') or json.loads(call['argv'][call['argv'].index('--json-schema')+1])
-            self.assertEqual(schema, result_schema(invocation.output_contract))
+            # V2-004E: Claude's transport schema differs only in its required list.
+            self.assertEqual(schema, result_schema(invocation.output_contract, 'claude' if spec.provider == 'claude' else 'canonical'))
             self.assertEqual(schema['properties']['outcome']['enum'], ['needs_clarification','ready'])
             self.assertEqual(schema['properties']['produced_artifacts']['items']['properties']['name']['enum'], ['microspec'])

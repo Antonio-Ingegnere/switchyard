@@ -227,3 +227,22 @@ v2_004d_structured_output_alignment:
   live_part_a_attempts: 2
   live_part_b_attempts: 0
   next: Part A attempt 3 requires explicit authorization after V2-004D.
+
+v2_004e_claude_structured_output_transport:
+  trigger: |
+    Part A attempt 3 (2026-10-04, after V2-004D) failed at TRIAGE rung 0 (claude,
+    claude-haiku, haiku, medium, [repo_read]) with exit status 1 and the same
+    error_max_structured_output_retries / structured_output_retry_exhausted reason:
+    required handoff and diagnostics missing despite explicit instructions. No
+    permission denial. Events: run_started, state_entered, invocation_started,
+    run_error. Only request v1; no handoff; target files unchanged.
+  classification: Claude structured-output transport limitation; StructuredOutput tool input is validated after generation and null-valued keys were not delivered.
+  resolution: |
+    V2-004E (docs/plans/v2-004e-claude-structured-output-transport.yaml): Claude
+    transport schema requires only non-nullable keys; ClaudeStageExecutor normalizes
+    an omitted nullable key to null before the unchanged strict canonical parser.
+    Codex, retry policy, models and capabilities unchanged.
+  attempt_history: Attempts 1, 2 and 3 preserved.
+  live_part_a_attempts: 3
+  live_part_b_attempts: 0
+  next: Any further Part A live attempt requires separate explicit authorization after V2-004E.
