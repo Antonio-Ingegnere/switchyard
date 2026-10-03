@@ -1,0 +1,105 @@
+id: V2-004C
+goal: |
+  Preserve a bounded, sanitized, provider-specific failure reason on provider nonzero
+  exit, while the invocation still fails as an execution failure.
+status: complete
+scope:
+  - switchyard/provider_stages.py ClaudeStageExecutor and CodexStageExecutor nonzero-exit handling.
+  - switchyard/provider_process.py ProviderExecutionError optional returncode attribute.
+  - tests/fixtures/provider_cli.py scripted channel mode; tests/test_provider_failure_envelope.py.
+  - docs/design/provider-stages.md; docs/plans/v2-006-bugfix-dogfood.yaml V2-004C record.
+constraints:
+  - Nonzero provider exit remains ProviderExecutionError, never a StageResult or semantic outcome.
+  - Successful provider parsing, CommandStageExecutor semantics, runtime and Event unchanged.
+  - Shared process helper keeps returning raw bounded process facts; it does not interpret stdout.
+  - No retries, provider/model/effort/tool substitution, live provider calls, V2-006 execution or Adeo changes.
+acceptance:
+  - Live failure shape (structured stdout reason, empty stderr, exit 1) yields diagnostics containing the provider reason; old behavior was empty diagnostics.
+  - Structured reason and stderr are combined deterministically, without duplication, within 4096 bytes.
+  - Malformed stdout prefers stderr, then a bounded raw stdout fallback, then a generic status line.
+  - Diagnostics never serialize the whole envelope, structured_output, usage, session identifiers or success prose.
+  - Codex keeps stderr diagnostics and never reads its final-result file after a failed exit.
+  - Full offline suite has zero new failures beyond the known local SIGKILL failure and existing platform skip.
+verification:
+  - tests/test_provider_failure_envelope.py (14 offline fake-process tests).
+  - Groups V2-004B, V2-004/A, V2-003A/B/C, V2-002, V2-005, V2-006 offline, loader, runtime, V1, observability, DELIVERY-001 and full discovery.
+non_goals:
+  - Retry, auth refresh, structured-output repair or any recovery behavior.
+  - New exception hierarchy, Event fields, failure artifacts or report redesign.
+  - A new Codex failure protocol invented for symmetry.
+
+audit_before_change:
+  shared_helper: |
+    provider_process.execute returns ProcessOutput(returncode, stdout, evidence, diagnostics).
+    With result_stdout=True, stdout is retained in full up to max_result_bytes (overflow aborts).
+    diagnostics is the stderr tail (combined capture excepted), normalized to 4096 bytes.
+    Spawn, I/O, timeout and signal failures already raise ProviderExecutionError.
+  claude_order: |
+    execute returns -> _success(output) checks returncode -> ProviderExecutionError(
+    'provider exited with status N', stderr diagnostics) -> the retained stdout result
+    envelope is never decoded. Exit 0 alone reaches _decode and strict StageResult parsing.
+  codex_order: |
+    execute(result_file=...) without result_stdout: stdout is drained but not retained;
+    stderr tail retained. _success raises before the final-result file is read.
+  command_order: |
+    CommandStageExecutor maps every normal exit through exit_codes/default; it never
+    called _success. Spawn/timeout/signal remain ProviderExecutionError.
+  original_cause: |
+    _success forwarded only the stderr tail. The V2-006 TRIAGE failure wrote empty stderr,
+    so diagnostics were empty and the stdout envelope carrying the reason was discarded.
+  reproduction: |
+    Offline, on HEAD 9328ade, the new live-shape fixture produced
+    'provider exited with status 1' with diagnostics b'' and no returncode attribute.
+
+claude_strategy:
+  protocol: |
+    Same documented --output-format json result envelope as the success path, decoded
+    only for diagnostics. Field set audited against installed Claude Code 2.1.282 binary
+    (result constructors) and the Agent SDK SDKResultMessage reference.
+  extracted_fields:
+    facts: [subtype, terminal_reason, api_error_code, is_error, api_error_status]
+    messages: errors[] strings (or message of object items), result only when is_error is true.
+    permission_denials: Tool names only; tool inputs and ids are dropped.
+  ignored: structured_output, usage, modelUsage, session_id, uuid, cost, durations, success prose.
+  non_envelope_json: Treated as no reason; never dumped.
+  no_stage_result: A schema-valid structured_output on a failed exit is ignored.
+
+codex_strategy:
+  audit: |
+    Codex exec has no supported structured failure envelope in the existing adapter
+    protocol. stderr is its operational/error channel and was already retained.
+    stdout carries the final agent message (model output). The final-result file may
+    hold model output and is not a failure envelope.
+  implementation: Sanitized, bounded stderr; generic status fallback. No result-file read and no stdout retention on failure.
+
+diagnostics:
+  precedence: [structured provider reason, stderr, raw stdout only if not JSON and stderr empty, generic status]
+  combination: "Structured reason first, then 'stderr: ...'; stderr omitted when identical to an extracted message."
+  bounds: Field values 1024 bytes (facts 128, tool names 64); sections share the 4096-byte DiagnosticPayload limit evenly.
+  sanitization: ANSI/OSC escapes removed, other control characters except newline/tab replaced, best-effort redaction of sk- keys, bearer tokens and key/token/secret/password/authorization assignments.
+  truncation_marker: '…[truncated]'
+  error_shape: "ProviderExecutionError('provider exited with status N', diagnostics=DiagnosticPayload, returncode=N)"
+  compatibility: returncode defaults to None for every other ProviderExecutionError.
+
+unchanged:
+  - Exit 0 success decoding and strict StageResult validation, including error-envelope rejection on exit 0.
+  - CommandStageExecutor nonzero exits map to semantic outcomes.
+  - Runtime and Event; failure sequence remains run_started, state_entered, invocation_started, run_error.
+  - No StageResult, produced artifacts or handoff on provider failure; no failure artifact committed.
+  - One process per invocation; no retries.
+  - V2-006 dogfood report already copies ProviderExecutionError diagnostics; no report change.
+
+implementation_result:
+  new_tests: 14 passed.
+  focused_groups: |
+    V2-004B 6, V2-004/A 16, V2-003A/B/C 41, V2-002 19, V2-005 4, V2-006 offline 5,
+    loader 56, runtime 85, observability 71, DELIVERY-001 43: all OK. V1 93: only the
+    known SIGKILL failure plus the existing platform skip.
+  full_offline: 453 tests with uncommitted V2-006 work present; 451 passed, 1 unchanged known local SIGKILL failure, 1 existing platform skip; zero new failures.
+  environment_note: |
+    Run with TERM=dumb. In a color-capable terminal, Python 3.14 argparse probes a mocked
+    stdout in test_cli.test_output_write_and_flush_failures_propagate and errors; this
+    reproduces on unmodified HEAD and is unrelated to V2-004C.
+  provider_calls: 0
+  protected_scope: Runtime/Event, workflows, compiler, StageOutputContract, capabilities, budgets and Adeo untouched.
+  limitations: Redaction is best-effort pattern matching, not a guarantee that provider error text contains no sensitive data.

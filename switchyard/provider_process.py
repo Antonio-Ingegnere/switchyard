@@ -12,9 +12,10 @@ from runtime.command import Command, _stop_and_wait, _read_chunk, _INTERRUPTED, 
 
 
 class ProviderExecutionError(RuntimeError):
-    def __init__(self, message, diagnostics=None):
+    def __init__(self, message, diagnostics=None, returncode=None):
         super().__init__(message)
         self.diagnostics = diagnostics
+        self.returncode = returncode  # Provider nonzero exit status; None for other failures.
 
 
 @dataclass(frozen=True, slots=True)

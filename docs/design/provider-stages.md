@@ -186,3 +186,39 @@ Audit sources: installed Claude 2.1.282 help (`--tools`, `--allowedTools`,
 [official configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference).
 The unsupported independent Codex read-only tool mapping is handled by rejection,
 not an approximation. No live provider invocation was used to validate this slice.
+
+## Provider failure diagnostics (V2-004C)
+
+A provider process exiting nonzero is an **execution failure**, never a semantic
+outcome. Only a successfully decoded, valid StageResult from exit status 0 yields
+`fail`, `needs_clarification` or any other outcome. On nonzero exit the adapter
+raises `ProviderExecutionError('provider exited with status N')` with
+`diagnostics` (a `DiagnosticPayload`, at most 4096 bytes) and `returncode` N.
+Other ProviderExecutionErrors keep `returncode=None`.
+
+| Exit | Claude | Codex |
+| --- | --- | --- |
+| 0 | decode envelope → strict StageResult (unchanged) | read final-result file → strict StageResult (unchanged) |
+| nonzero | decode the same envelope for diagnostics only | stderr diagnostics only |
+
+The shared process helper still returns raw bounded facts and interprets nothing.
+Claude decodes its documented `--output-format json` result envelope and extracts
+only error fields: `subtype`, `terminal_reason`, `api_error_code`, `is_error`,
+`api_error_status`, `errors[]`, `result` **only when `is_error` is true**, and
+permission-denial tool names. `structured_output`, usage, session identifiers and
+success prose are never copied; the envelope is never serialized. Codex has no
+supported failure envelope: stderr is its error channel, and its final-result file
+(model output) is not read after a failed exit.
+
+Precedence is deterministic: structured reason, then `stderr: …`, then — only when
+stdout is not JSON and stderr is empty — a raw `stdout: …` fallback, otherwise the
+generic status line. stderr identical to an extracted message is not repeated.
+Fields are clipped (1024 bytes; `…[truncated]` marker) and present sections share
+the 4096-byte bound. Text is terminal-safe (ANSI/OSC escapes and control characters
+removed) with best-effort redaction of key/token/secret patterns; this is not a
+guarantee that provider error text is free of sensitive data.
+
+Runtime and Event are unchanged: the sequence remains `run_started`,
+`state_entered`, `invocation_started`, `run_error`, with no StageResult, artifact or
+handoff. Details stay in the exception and application reports. No retry, auth
+refresh or provider/model/effort/tool substitution is added.

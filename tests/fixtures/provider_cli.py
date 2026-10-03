@@ -24,6 +24,13 @@ if mode=='exit': sys.exit(7)
 if mode=='signal':
     import signal
     os.kill(os.getpid(),signal.SIGTERM)
+if mode=='scripted':
+    # Exact provider channel bytes from test-owned files; a Codex result file may coexist.
+    for name,fd in (('FAKE_STDOUT_FILE',1),('FAKE_STDERR_FILE',2)):
+        if os.environ.get(name): os.write(fd,Path(os.environ[name]).read_bytes())
+    if os.environ.get('FAKE_RESULT_FILE') and '--output-last-message' in argv:
+        Path(argv[argv.index('--output-last-message')+1]).write_bytes(Path(os.environ['FAKE_RESULT_FILE']).read_bytes())
+    sys.exit(int(os.environ.get('FAKE_EXIT','1')))
 if provider=='python3':
     if mode=='large':
         os.write(1,('old'*30000+'終わり').encode())

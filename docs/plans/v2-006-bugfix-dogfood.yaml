@@ -183,3 +183,25 @@ v2_004b_resolution:
   live_part_a_attempts: 0
   live_part_b_attempts: 0
   completion: V2-006 remains pending; no live attempt performed in V2-004B.
+
+v2_004c_provider_failure_diagnostics:
+  trigger: |
+    First real Part A attempt (2026-10-04) failed at TRIAGE rung 0
+    (claude, profile claude-haiku, model selector haiku, effort medium,
+    capabilities [repo_read]) with 'ProviderExecutionError: provider exited with
+    status 1' and empty stderr diagnostics. Event sequence: run_started,
+    state_entered, invocation_started, run_error. Part B was not attempted.
+  cause: |
+    ClaudeStageExecutor checked the nonzero exit status and raised with only the
+    stderr tail before decoding the retained stdout result envelope, so the
+    provider's structured failure reason was discarded.
+  resolution: |
+    V2-004C (docs/plans/v2-004c-provider-failure-envelope.yaml) decodes the same
+    documented Claude envelope on nonzero exit for bounded, sanitized diagnostics
+    only. The invocation still fails; no StageResult, retry or substitution.
+    The existing dogfood report already records ProviderExecutionError diagnostics.
+  unchanged_by_failure: Request, fixture source and acceptance tests remained unchanged.
+  attempt_history: Preserved; the first Part A attempt remains part of the audit trail.
+  live_part_a_attempts: 1
+  live_part_b_attempts: 0
+  next: Another live Part A attempt requires explicit authorization after V2-004C.

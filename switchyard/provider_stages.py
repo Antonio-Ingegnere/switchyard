@@ -3,13 +3,14 @@ from dataclasses import asdict, dataclass, field
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import sys
 from tempfile import TemporaryDirectory
 from types import MappingProxyType
 from typing import Mapping
 
-from runtime import DiagnosticPayload
+from runtime import DiagnosticPayload, MAX_DIAGNOSTIC_BYTES
 from runtime.command import Command
 from .context_transport import StageInvocation, StageResult, StageHandoff, ProducedArtifact
 from .workflow_bundle import ExecutionProfile, CommandSpec
@@ -240,9 +241,92 @@ def _same_binding(expected, invocation):
         raise ProviderExecutionError('stage invocation binding differs from resolved binding')
 
 
-def _success(result):
-    if result.returncode != 0:
-        raise ProviderExecutionError(f'provider exited with status {result.returncode}',result.diagnostics)
+# Provider nonzero exit remains an execution failure. These helpers only explain it:
+# bounded, sanitized text for the exception, never a StageResult or semantic outcome.
+_FIELD_BYTES = 1024
+_ANSI = re.compile(r'\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)?|[@-Z\\-_])')
+_CONTROL = re.compile(r'[\x00-\x08\x0b-\x1f\x7f-\x9f]')
+_SECRETS = (
+    (re.compile(r'\bsk-[A-Za-z0-9_\-]{16,}'), 'sk-[REDACTED]'),
+    (re.compile(r'(?i)\b(bearer\s+)[A-Za-z0-9._~+/\-]{16,}=*'), r'\1[REDACTED]'),
+    (re.compile(r'(?i)\b((?:api[_-]?key|(?:access[_-]?|auth[_-]?)?token|secret|password|authorization)'
+                r'["\']?\s*[:=]\s*["\']?)[^\s"\',;]{8,}'), r'\1[REDACTED]'),
+)
+
+
+def _clip(text, limit):
+    data = text.encode('utf-8')
+    if len(data) <= limit:
+        return text
+    marker = '…[truncated]'
+    return data[:max(0, limit-len(marker.encode('utf-8')))].decode('utf-8', errors='ignore')+marker
+
+
+def _clean(text, limit=_FIELD_BYTES):
+    """Terminal-safe single-field text with best-effort credential redaction."""
+    text = _CONTROL.sub(' ', _ANSI.sub('', text)).strip()
+    for pattern, replacement in _SECRETS:
+        text = pattern.sub(replacement, text)
+    return _clip(text, limit)
+
+
+def _claude_failure_reason(stdout):
+    """Extract only documented error fields from a Claude result envelope.
+
+    Returns (reason, decodable). Never serializes the envelope: structured_output,
+    usage, session identifiers and success prose are ignored.
+    """
+    try:
+        envelope = json.loads(stdout.decode('utf-8', errors='replace'))
+    except (ValueError, RecursionError):
+        return None, False
+    if type(envelope) is not dict or envelope.get('type') != 'result':
+        return None, True
+    facts = [f'{key}={_clean(value, 128)}' for key, value in
+             (('subtype', envelope.get('subtype')), ('terminal_reason', envelope.get('terminal_reason')),
+              ('api_error_code', envelope.get('api_error_code'))) if type(value) is str and value]
+    if type(envelope.get('is_error')) is bool:
+        facts.append('is_error='+str(envelope['is_error']).lower())
+    if type(envelope.get('api_error_status')) is int:
+        facts.append(f'api_error_status={envelope["api_error_status"]}')
+    lines = ['claude result: '+', '.join(facts)] if facts else []
+    messages = []
+    errors = envelope.get('errors')
+    for item in errors[:16] if type(errors) is list else ():
+        if type(item) is dict:
+            item = item.get('message')
+        text = _clean(item) if type(item) is str else ''
+        if text and text not in messages:
+            messages.append(text)
+    # result is model prose on success; it is the provider error text only when is_error is true.
+    if envelope.get('is_error') is True and type(envelope.get('result')) is str:
+        text = _clean(envelope['result'])
+        if text and text not in messages:
+            messages.append(text)
+    lines += ['error: '+message for message in messages]
+    denials = envelope.get('permission_denials')
+    names = [] if type(denials) is not list else [
+        _clean(d['tool_name'], 64) for d in denials[:16]
+        if type(d) is dict and type(d.get('tool_name')) is str and d['tool_name']]
+    if names:
+        lines.append('permission_denials: '+', '.join(dict.fromkeys(names)))
+    return ('\n'.join(lines) or None), True
+
+
+def _exit_failure(output, reason=None, raw_stdout=None):
+    """Precedence: structured reason, stderr, raw stdout fallback, generic status."""
+    status = f'provider exited with status {output.returncode}'
+    stderr = _clean(output.diagnostics.utf8.decode('utf-8'), MAX_DIAGNOSTIC_BYTES)
+    if reason and stderr and '\nerror: '+stderr+'\n' in '\n'+reason+'\n':
+        stderr = ''  # Do not repeat identical provider text.
+    sections = [text for text in (reason, stderr and 'stderr: '+stderr) if text]
+    if not sections and raw_stdout:
+        raw = _clean(raw_stdout.decode('utf-8', errors='replace'))
+        sections = ['stdout: '+raw] if raw else []
+    sections = sections or [status]
+    share = (MAX_DIAGNOSTIC_BYTES - len(sections) + 1) // len(sections)
+    text = '\n'.join(_clip(section, share) for section in sections)
+    return ProviderExecutionError(status, DiagnosticPayload(text.encode('utf-8')), output.returncode)
 
 
 @dataclass(frozen=True, slots=True)
@@ -277,7 +361,10 @@ class ClaudeStageExecutor:
                 argv += ['--effort',self.binding.effort]
         output = execute(self.executable,argv,self.config, input_bytes=render_invocation(invocation).encode('utf-8'),
                          result_stdout=True,environment=env)
-        _success(output)
+        if output.returncode != 0:
+            # Same documented envelope, decoded only for failure diagnostics, never a StageResult.
+            reason, decodable = _claude_failure_reason(output.stdout)
+            raise _exit_failure(output, reason, None if decodable else output.stdout)
         envelope = _decode(output.stdout)
         _require(type(envelope) is dict and envelope.get('type')=='result' and
                  envelope.get('subtype')=='success' and envelope.get('is_error') is False,
@@ -311,7 +398,10 @@ class CodexStageExecutor:
             argv.append('-')
             output = execute(self.executable,argv,self.config,
                              input_bytes=render_invocation(invocation).encode('utf-8'),result_file=result)
-            _success(output)
+            if output.returncode != 0:
+                # Codex has no supported failure envelope: stderr is its error channel. The
+                # final-result file is model output, so it is not read after a failed exit.
+                raise _exit_failure(output)
             try:
                 if result.is_symlink() or not result.is_file():
                     raise ProviderExecutionError('Codex final result file missing or invalid')
