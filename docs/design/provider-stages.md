@@ -145,3 +145,44 @@ no allowed artifacts means maxItems=0, not an invalid empty enum. Claude's --jso
 and Codex's --output-schema receive equivalent schemas. The generic strict parser,
 context post-validation and runtime outcome validation remain authoritative. No retries,
 provider sessions, command semantics or context-selection changes are introduced.
+
+## Exact capability support matrix (V2-004B)
+
+`ExecutionBinding.capabilities: tuple[str, ...] | None` transports the logical
+state policy to every resolved rung. `None` retains legacy behavior: Claude's
+original restricted file tools; Codex's original workspace-write execution.
+Explicit policies are checked before invocation, including eager compilation.
+Errors identify flow, state, rung, provider and requested capability combination.
+
+| Explicit capabilities | Claude tools | Codex configuration |
+| --- | --- | --- |
+| `[]` | empty `--tools` | `--sandbox read-only`, `features.shell_tool=false` |
+| `repo_read` | Read, Glob, Grep | rejected |
+| `repo_read, repo_write` | Read, Glob, Grep, Edit, Write | rejected |
+| `repo_read, command` | Read, Glob, Grep, Bash | read-only sandbox, shell enabled |
+| all three | Read, Glob, Grep, Edit, Write, Bash | workspace-write sandbox, shell enabled |
+
+Write or command without read is rejected by the loader; provider resolution also
+rejects such manually constructed bindings. There is no implicit capability expansion.
+Claude's nonempty explicit tool list is supplied to both `--tools` (availability)
+and `--allowedTools` (permission), retaining restricted mode, disabled permission
+prompts and strict empty MCP configuration. No browser or MCP tools are added.
+Codex retains `--ask-for-approval never` and uses the supported shell feature toggle;
+read-only describes its filesystem policy for commands, not absence of commands.
+No-tools Codex may reason from supplied artifacts and return the same structured
+StageResult; no alternative repository backend or MCP server is installed.
+
+The shared renderer describes explicit grants, or states that an empty policy must
+work only from supplied durable context. Legacy omission adds no capability section.
+This is tool configuration, not a universal security sandbox: in particular Claude
+Bash can run commands with side effects even when Edit/Write are absent. Switchyard
+does not promise network isolation or confinement of every child process. Provider
+sandbox/permission enforcement remains provider-owned. Existing stage timeout,
+configured cwd, workflow invocation budgets and one-process adapter behavior remain
+in force; no Switchyard-side shell tool or retry loop is added.
+
+Audit sources: installed Claude 2.1.282 help (`--tools`, `--allowedTools`,
+`--restricted`, `--permission-prompts`) and Codex 0.157.0 help/features, plus the
+[official configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference).
+The unsupported independent Codex read-only tool mapping is handled by rejection,
+not an approximation. No live provider invocation was used to validate this slice.

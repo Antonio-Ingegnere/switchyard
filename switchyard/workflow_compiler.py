@@ -4,7 +4,7 @@ from types import MappingProxyType
 from typing import Callable, Mapping
 
 from runtime import Executor, Flow, FlowValidationError, InvocationBudgetScope, State, validate
-from .workflow_bundle import (ESCALATION_TRIGGERS, ArtifactSpec, Effort, ExecutionProfile, Provider, WorkflowBundle,
+from .workflow_bundle import (CAPABILITIES, ESCALATION_TRIGGERS, ArtifactSpec, Effort, ExecutionProfile, Provider, WorkflowBundle,
                               WorkflowStateSpec)
 
 
@@ -25,9 +25,14 @@ class ExecutionBinding:
     escalation_kind: str | None
     context_mode: str | None
     executor_allowed_outcomes: tuple[str, ...] = ()
+    capabilities: tuple[str, ...] | None = None
 
     def __post_init__(self):
         object.__setattr__(self, 'executor_allowed_outcomes', tuple(self.executor_allowed_outcomes))
+        if self.capabilities is not None:
+            if any(c not in CAPABILITIES for c in self.capabilities):
+                raise ValueError('unknown execution capability')
+            object.__setattr__(self, 'capabilities', tuple(c for c in CAPABILITIES if c in self.capabilities))
 
 
 ExecutorResolver = Callable[[ExecutionBinding], Executor]
@@ -148,7 +153,8 @@ def compile_workflow(bundle: WorkflowBundle, flow_name: str,
             binding = ExecutionBinding(flow_name, name, spec.role, index, declaration.profile,
                                        profile.provider, profile.model, declaration.effort,
                                        step.kind if step else None, step.context if step else None,
-                                       tuple(sorted(key for key in state.on if key != 'budget_exceeded')))
+                                       tuple(sorted(key for key in state.on if key != 'budget_exceeded')),
+                                       spec.capabilities)
             try:
                 executor = executor_resolver(binding)
             except Exception as exc:

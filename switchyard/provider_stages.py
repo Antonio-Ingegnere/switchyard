@@ -57,6 +57,11 @@ def render_invocation(invocation: StageInvocation) -> str:
              'DURABLE INPUT ARTIFACTS\n'+_json([
                  {'name':a.record.name,'version':a.record.version,'format':a.record.format,
                   'schema':a.record.schema,'content':a.content} for a in invocation.artifacts])]
+    if invocation.binding.capabilities is not None:
+        labels = {'repo_read': 'repository read', 'repo_write': 'repository write', 'command': 'command execution'}
+        description = '\n'.join('- '+labels[c] for c in invocation.binding.capabilities)
+        parts.append('AVAILABLE EXECUTION CAPABILITIES\n'+(description or
+                     'None. Work only from the supplied durable context.'))
     if invocation.previous_handoff is not None:
         parts.append('PRIOR REASONING HANDOFF — advisory\n'+_json(asdict(invocation.previous_handoff)))
     if invocation.diagnostics is not None:
@@ -209,6 +214,27 @@ def _executable(value, config):
     return candidate
 
 
+def _claude_tools(capabilities):
+    if capabilities is None:
+        return 'Read,Edit,Write,Glob,Grep'  # Legacy V2 configuration.
+    mapping = {'repo_read': ('Read', 'Glob', 'Grep'), 'repo_write': ('Edit', 'Write'), 'command': ('Bash',)}
+    return ','.join(tool for capability in capabilities for tool in mapping[capability])
+
+
+def _validate_capabilities(binding):
+    caps = binding.capabilities
+    if caps is None:
+        return
+    common = ((), ('repo_read',), ('repo_read', 'repo_write'),
+              ('repo_read', 'command'), ('repo_read', 'repo_write', 'command'))
+    supported = common if binding.provider == 'claude' else (
+        (), ('repo_read', 'command'), ('repo_read', 'repo_write', 'command')) if binding.provider == 'codex' else ()
+    if caps not in supported:
+        raise ProviderResolutionError(
+            f'{binding.flow_name}.{binding.logical_state} rung {binding.rung_index}: '
+            f'provider {binding.provider} cannot represent capabilities {list(caps)!r}: unsupported combination')
+
+
 def _same_binding(expected, invocation):
     if invocation.binding != expected:
         raise ProviderExecutionError('stage invocation binding differs from resolved binding')
@@ -239,8 +265,10 @@ class ClaudeStageExecutor:
                 '--json-schema',_json(result_schema(invocation.output_contract)),'--model',self.resolved_model,
                 '--safe-mode','--restricted','--strict-mcp-config','--mcp-config','{"mcpServers":{}}',
                 '--permission-mode','acceptEdits','--permission-prompts','none',
-                '--tools','Read,Edit,Write,Glob,Grep','--disallowedTools','mcp__*',
+                '--tools',_claude_tools(self.binding.capabilities),'--disallowedTools','mcp__*',
                 '--settings','{"alwaysThinkingEnabled":true,"switchModelsOnFlag":false,"fallbackModel":[]}']
+        if self.binding.capabilities:
+            argv += ['--allowedTools', _claude_tools(self.binding.capabilities)]
         if self.binding.effort:
             if self.resolved_model in _HAIKU:
                 env['MAX_THINKING_TOKENS'] = str({'low':1024,'medium':8192,'high':16384}[self.binding.effort])
@@ -271,11 +299,15 @@ class CodexStageExecutor:
             schema = Path(folder)/'schema.json'; result = Path(folder)/'result.json'
             schema.write_text(_json(result_schema(invocation.output_contract)),encoding='utf-8')
             argv = ['--ask-for-approval','never','exec','--ephemeral','--ignore-user-config',
-                    '--ignore-rules','--sandbox','workspace-write','--skip-git-repo-check',
+                    '--ignore-rules','--sandbox',
+                    'workspace-write' if self.binding.capabilities is None or 'repo_write' in self.binding.capabilities else 'read-only',
+                    '--skip-git-repo-check',
                     '--cd',self.config.working_directory,'--model',self.resolved_model,
                     '--output-schema',str(schema),'--output-last-message',str(result)]
             if self.binding.effort:
                 argv += ['-c','model_reasoning_effort='+json.dumps(self.binding.effort)]
+            if self.binding.capabilities is not None:
+                argv += ['-c', 'features.shell_tool='+('true' if 'command' in self.binding.capabilities else 'false')]
             argv.append('-')
             output = execute(self.executable,argv,self.config,
                              input_bytes=render_invocation(invocation).encode('utf-8'),result_file=result)
@@ -318,6 +350,7 @@ class ProviderStageExecutorResolver:
         profile=self.profiles.get(binding.profile_name)
         if profile is None or (profile.provider,profile.model)!=(binding.provider,binding.model):
             raise ProviderResolutionError('binding/profile mismatch')
+        _validate_capabilities(binding)
         config=self.runtime_config
         if binding.effort not in (None,'low','medium','high'):
             raise ProviderResolutionError('unsupported generic effort')

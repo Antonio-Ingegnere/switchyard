@@ -12,6 +12,8 @@ from typing import Literal, Mapping
 
 from flow_config import FlowConfigError, _at, _error, _fields, _mapping, _yaml_data
 
+CAPABILITIES = ('repo_read', 'repo_write', 'command')
+
 Provider = Literal['claude', 'codex', 'command']
 Effort = Literal['low', 'medium', 'high']
 EscalationTrigger = Literal['inconclusive', 'budget_exceeded', 'diagnosis_disproved', 'verification_same_failure']
@@ -106,11 +108,16 @@ class WorkflowStateSpec:
     terminal: bool = False
     budget: BudgetSpec | None = None
     escalation_exhausted: str | None = None
+    capabilities: tuple[str, ...] | None = None
 
     def __post_init__(self):
         object.__setattr__(self, 'on', MappingProxyType(dict(self.on)))
         object.__setattr__(self, 'consumes', tuple(self.consumes))
         object.__setattr__(self, 'produces', tuple(self.produces))
+        if self.capabilities is not None:
+            if any(c not in CAPABILITIES for c in self.capabilities):
+                raise ValueError('unknown stage capability')
+            object.__setattr__(self, 'capabilities', tuple(c for c in CAPABILITIES if c in self.capabilities))
 
 
 @dataclass(frozen=True, slots=True)
@@ -331,6 +338,8 @@ def _command_uses(flow, roles, profiles, path):
             if command is None:
                 continue
             here = _at(path + '.states', name)
+            if state.capabilities is not None:
+                raise _error(here + '.capabilities', 'model capabilities forbidden on command-provider states')
             next_triggers = role.escalation[index].on if index < len(role.escalation) else ()
             for value in (*command.outcomes.exit_codes.values(), command.outcomes.default):
                 if (value not in next_triggers and value not in state.on and
@@ -356,10 +365,17 @@ def _workflow(data, roles, artifacts, path):
             _fields(state, {'terminal'}, set(), here)
             states[name] = WorkflowStateSpec(terminal=True)
             continue
-        _fields(state, {'role', 'on'}, {'consumes', 'produces', 'budget', 'escalation_exhausted'}, here)
+        _fields(state, {'role', 'on'}, {'consumes', 'produces', 'budget', 'escalation_exhausted', 'capabilities'}, here)
         role = _name(state['role'], here + '.role')
         if role not in roles:
             raise _error(here + '.role', f'unknown role {role!r}')
+        capabilities = None
+        if 'capabilities' in state:
+            capabilities = _names(state['capabilities'], here + '.capabilities')
+            for capability in capabilities:
+                _enum(capability, CAPABILITIES, here + '.capabilities')
+            if capabilities and 'repo_read' not in capabilities:
+                raise _error(here + '.capabilities', 'repo_write and command require repo_read')
         local_budget = _budget(state['budget'], 'state', here + '.budget') if 'budget' in state else None
         exhaustion = None
         if roles[role].escalation:
@@ -385,7 +401,7 @@ def _workflow(data, roles, artifacts, path):
             _name(target, location)
             if target not in data['states']:
                 raise _error(location, f'unknown target {target!r}')
-        states[name] = WorkflowStateSpec(role, state['on'], consumes, produces, budget=local_budget, escalation_exhausted=exhaustion)
+        states[name] = WorkflowStateSpec(role, state['on'], consumes, produces, budget=local_budget, escalation_exhausted=exhaustion, capabilities=capabilities)
     run_target = budget.on_exceeded
     if run_target not in states:
         raise _error(path + '.run_budget.on_exceeded', f'unknown target {run_target!r}')

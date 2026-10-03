@@ -417,3 +417,27 @@ its existing outcome validation enforces the narrowed State transitions.
 `executor_allowed_outcomes`, StageOutputContract, and the shared provider output
 schema all derive from this same compiled contract. Canonical delivery workflows
 omit restrictions and retain their original behavior.
+
+### Stage capabilities (V2-004B)
+
+Model states may declare `capabilities: [repo_read, repo_write, command]`. These are
+positive provider-tool grants owned by the logical state, not its role or profile.
+All rungs inherit the same declaration. `repo_write` and `command` each require
+`repo_read`; neither implies the other. Only these three exact strings are accepted,
+without duplicates or coercion. Terminal states and states with any command-provider
+rung reject the field, including an empty list: command profiles already own execution.
+
+Omission is legacy compatibility (`None`), preserving prior provider defaults.
+Explicit `[]` means no model repository/command tools, while still accepting durable
+context. New workflows should declare capabilities explicitly. Immutable state and
+ExecutionBinding metadata store explicit sets in canonical order: repo_read,
+repo_write, command. Runtime, budgets, routing and artifact contracts are unchanged.
+
+Provider resolution rejects combinations the adapter cannot faithfully represent;
+this is a provider incompatibility, not an invalid routing graph. Eager compilation
+therefore detects unsupported capabilities even on unused escalation rungs.
+
+Canonical feature/bugfix reasoning stages SPECIFY, TRIAGE and SPECIFY_FIX use read
+only. REPRODUCE, DIAGNOSE, DIAGNOSE_FAILURE and REDIAGNOSE use read plus command.
+IMPLEMENT, FIX, REPAIR_ONCE and REFIX use all three. VERIFY/VERIFY_AGAIN remain
+unchanged deterministic command states without model capabilities.

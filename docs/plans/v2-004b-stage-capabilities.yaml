@@ -1,0 +1,122 @@
+id: V2-004B
+goal: Declare provider-neutral stage capabilities and enforce them through provider adapters.
+status: complete
+scope:
+  - Audit installed Claude and Codex tool permission mechanisms before implementation.
+  - Planned optional state capabilities transported through immutable ExecutionBinding metadata.
+constraints:
+  - No runtime, Event, artifact, handoff, budget or routing changes.
+  - No real provider invocations, Adeo changes or V2-006 live attempts.
+  - Stop before implementation if an exact safe Codex mapping cannot be established.
+acceptance:
+  - Explicit capabilities do not silently grant undeclared tools.
+  - Canonical reproduction can run commands without enabling dedicated edit/write tools.
+  - Reasoning-only stages have repository read tools without command tools.
+  - Existing V2-005 behavior remains available and offline suite has no new failures.
+verification:
+  - Local claude --help and --version; codex --help, exec --help, features list and --version.
+  - Official Codex configuration reference checked for shell and independent repository tool controls.
+  - No executable implementation or capability tests until the mapping prerequisite is resolved.
+non_goals:
+  - New tool framework, custom repository MCP server, sandbox invention or provider-only behavioral promises.
+  - V2-006 execution or migration.
+proposed_contract_not_implemented:
+  vocabulary: [repo_read, repo_write, command]
+  ownership: Logical workflow state; every rung inherits that state's policy.
+  transport: Optional immutable canonical-order capability tuple on ExecutionBinding; no duplicate StageInvocation field.
+  omission: Proposed legacy compatibility mode; canonical model states would declare explicit capabilities.
+  deterministic_commands: Proposed rejection of model-tool capability declarations for command-provider states; terminal declarations also rejected.
+audit_2026_10_03:
+  claude:
+    version: 2.1.282
+    executable: Discovered using local PATH; no machine path added to workflow YAML.
+    confirmed_help:
+      tools: Explicit built-in tool list; empty string disables all tools.
+      allowed_tools: Tool permission allowlist; necessary to distinguish tool availability from permission to execute.
+      restricted: Removes code-running tools unless explicitly named by --tools; confines file tools to working directories.
+      permission_prompts_none: Actions that would prompt are denied; permission mode still governs other actions.
+    proposed_mapping:
+      repo_read: [Read, Glob, Grep]
+      repo_write: [Edit, Write]
+      command: [Bash]
+    limitation: Bash availability alone is not proof of command permission or filesystem/network containment. No permission expansion was implemented.
+  codex:
+    version: 0.157.0
+    existing_adapter: Uses exec with workspace-write sandbox, never approvals, ignored user config/rules and configured cwd.
+    confirmed_help:
+      sandbox: read-only, workspace-write and danger-full-access select sandbox policy for model-generated shell commands.
+      config: Explicit TOML configuration overrides are supported.
+      shell_tool: Installed stable feature, currently true; documented as enabling the default shell tool.
+      unified_exec: Installed stable feature, currently true; documented as selecting PTY-backed execution.
+    blocker: |
+      The audited supported CLI/config interface does not establish an independent
+      repository read/search capability with command execution disabled. read-only
+      is a filesystem sandbox for commands, not a command-tool deny policy. Keeping
+      shell enabled to implement repo_read would silently grant command. Disabling
+      shell_tool does not establish an alternative supported repository read/search
+      tool through this CLI boundary. Absence of a documented mapping is not proof
+      that no internal or future implementation could supply it; it is insufficient
+      evidence to promise the requested contract in Switchyard today.
+    rejected_approximation: Map repo_read to read-only while leaving shell commands enabled.
+    next_requirement: |
+      Establish an audited provider-native non-command read/search mechanism and
+      independent tool controls, or explicitly revise the generic contract to
+      acknowledge coupled read/command access. Do not invent flags, enable MCP,
+      silently broaden permissions or implement a new execution backend here.
+  official_sources:
+    - https://learn.chatgpt.com/docs/config-file/config-reference
+    - https://learn.chatgpt.com/docs/security
+  source_scope: Configuration reference confirms shell_tool and unified_exec controls; local CLI help confirms sandbox semantics. No live capability call occurred.
+audit_result_before_decision:
+  implementation: None; stopped at the mandated mapping audit.
+  provider_calls: 0
+  tests: No new tests or full-suite rerun; no executable code changed.
+  known_baseline: The REG-001 fake Python SIGKILL test remains untouched and enabled; existing platform skip unchanged.
+  completion: V2-004B incomplete; no completion commit and V2-006 remains pending.
+
+continued_audit_2026_10_04:
+  authorization: Continue investigation; original stop-before-implementation rule remains in force.
+  additional_checks:
+    - Installed codex app-server help and experimental generate-json-schema output inspected offline.
+    - Installed binary identifiers checked as discovery hints only, not treated as documented configuration support.
+    - Official configuration reference confirms shell_tool and unified_exec, not an independent CLI repository read/search mapping.
+  protocol_evidence: /tmp/switchyard-v2-004b-protocol
+  finding: No verified supported mapping for explicit repo_read without command access through the existing Codex exec adapter.
+  uncertainty: This does not prove the absence of every internal capability; undocumented binary identifiers are insufficient for an enforceable public adapter contract.
+  required_decision: |
+    Obtain a supported independent read/search control, or explicitly authorize a
+    provider support matrix that rejects unrepresentable capability combinations
+    before invocation. Do not silently treat repo_read as permission for commands.
+    The current task explicitly requires stopping when exact safe mapping cannot
+    be established, so no partial Claude-only implementation was started.
+  implementation: None.
+  provider_calls: 0
+  verification: MicroSpec validation and diff whitespace checks only; full offline suite not rerun because executable code and tests are unchanged.
+
+approved_support_matrix:
+  decision: Exact positive grants; unsupported provider combinations fail during eager resolution.
+  omission: None preserves legacy provider defaults; explicit empty tuple means no tools.
+  canonical_order: [repo_read, repo_write, command]
+  dependencies: Loader requires repo_read whenever repo_write or command is declared.
+  claude: Empty, read, read/write, read/command and read/write/command map to explicit built-in tools and permissions.
+  codex: Empty disables shell with read-only sandbox; read/command uses read-only shell; all three use workspace-write shell. Other explicit combinations fail.
+  command_states: Any explicit capabilities rejected if any rung uses provider command; terminals reject the field.
+  error: ProviderResolutionError includes flow, logical state, rung, provider and requested capabilities.
+  scope: Provider-native tools only; no claim of universal filesystem/network containment.
+
+implementation_result:
+  api: WorkflowStateSpec.capabilities and ExecutionBinding.capabilities are optional canonical immutable tuples; None differs from ().
+  loader: Strict vocabulary, duplicate/type checks and read prerequisite; command-provider states and terminals reject the field.
+  compiler: Transports the exact state policy to every rung without changing runtime routing or budgets.
+  provider: Claude exact tool/permission lists; Codex explicit support matrix with pre-invocation rejection of unsupported combinations.
+  canonical: Eleven model states declare explicit least-privilege capabilities; deterministic verifier states omit them.
+  compatibility: Omission retains legacy policy; synthetic cross-provider output-schema test now explicitly requests no tools.
+  verification:
+    new_capability_tests: 6 passed.
+    focused: 131 passed, including 4 V2-005 offline regressions.
+    full_offline: 434 tests in 34.131 seconds; 432 passed, 1 unchanged known local SIGKILL failure, 1 existing platform skip; zero new failures.
+    baseline_test: test_codex_repair.CodexRepairTests.test_exact_prompts_real_fake_cli_and_fresh_inputs remains unchanged and enabled.
+    microspecs: Existing validator and git diff whitespace checks passed.
+  limitations: Offline fake-process tests verify configured provider controls; no live tool execution proof or complete OS/network containment claim.
+  protected_scope: Runtime/Event, artifact persistence, StageOutputContract, budgets, transitions and fresh/continue unchanged; no real provider calls or Adeo changes.
+  completion: V2-004B complete; V2-006 live attempts remain pending.

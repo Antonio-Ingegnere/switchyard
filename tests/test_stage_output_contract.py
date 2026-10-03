@@ -154,7 +154,8 @@ class StageOutputContractTests(unittest.TestCase):
         resolver = ProviderStageExecutorResolver(self.bundle.profiles, config)
         for profile in ('claude-sonnet','codex'):
             spec = self.bundle.profiles[profile]
-            binding = replace(context.binding, profile_name=profile, provider=spec.provider, model=spec.model)
+            # This synthetic cross-provider schema test needs durable context only.
+            binding = replace(context.binding, profile_name=profile, provider=spec.provider, model=spec.model, capabilities=())
             invocation = replace(context, binding=binding)
             result = resolver(binding).run(invocation)
             self.assertEqual(result.produced_artifacts[0].name, 'microspec')

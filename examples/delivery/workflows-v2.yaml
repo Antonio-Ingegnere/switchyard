@@ -73,12 +73,14 @@ flows:
     run_budget: {max_invocations: 10, on_exceeded: NEEDS_HUMAN}
     states:
       SPECIFY:
+        capabilities: [repo_read]
         role: specifier
         budget: {max_invocations: 1, max_state_visits: 1, on_exceeded: NEEDS_HUMAN}
         consumes: [request]
         produces: [microspec]
         on: {ready: IMPLEMENT, needs_clarification: NEEDS_HUMAN}
       IMPLEMENT:
+        capabilities: [repo_read, repo_write, command]
         role: implementer
         budget: {max_invocations: 1, max_state_visits: 1, on_exceeded: NEEDS_HUMAN}
         consumes: [request, microspec]
@@ -91,6 +93,7 @@ flows:
         produces: [verifier_evidence]
         on: {pass: READY_FOR_MANUAL_QA, fail: DIAGNOSE_FAILURE}
       DIAGNOSE_FAILURE:
+        capabilities: [repo_read, command]
         role: diagnostician
         budget: {max_invocations: 3, max_state_visits: 1, on_exceeded: NEEDS_HUMAN}
         escalation_exhausted: NEEDS_REDIAGNOSIS
@@ -98,6 +101,7 @@ flows:
         produces: [failure_diagnosis]
         on: {ready: REPAIR_ONCE, inconclusive: NEEDS_REDIAGNOSIS, needs_clarification: NEEDS_HUMAN}
       REPAIR_ONCE:
+        capabilities: [repo_read, repo_write, command]
         role: fixer
         budget: {max_invocations: 1, max_state_visits: 1, on_exceeded: NEEDS_HUMAN}
         consumes: [microspec, verifier_evidence, failure_diagnosis]
@@ -117,18 +121,21 @@ flows:
     run_budget: {max_invocations: 14, on_exceeded: NEEDS_HUMAN}
     states:
       TRIAGE:
+        capabilities: [repo_read]
         role: triager
         budget: {max_invocations: 1, max_state_visits: 1, on_exceeded: NEEDS_HUMAN}
         consumes: [request]
         produces: [bug_spec]
         on: {ready: REPRODUCE, needs_clarification: NEEDS_HUMAN}
       REPRODUCE:
+        capabilities: [repo_read, command]
         role: reproducer
         budget: {max_invocations: 1, max_state_visits: 1, on_exceeded: NEEDS_HUMAN}
         consumes: [request, bug_spec]
         produces: [reproduction_evidence]
         on: {ready: DIAGNOSE, inconclusive: NEEDS_HUMAN}
       DIAGNOSE:
+        capabilities: [repo_read, command]
         role: diagnostician
         budget: {max_invocations: 3, max_state_visits: 1, on_exceeded: NEEDS_HUMAN}
         escalation_exhausted: NEEDS_HUMAN
@@ -136,12 +143,14 @@ flows:
         produces: [diagnosis]
         on: {ready: SPECIFY_FIX, inconclusive: NEEDS_HUMAN}
       SPECIFY_FIX:
+        capabilities: [repo_read]
         role: specifier
         budget: {max_invocations: 1, max_state_visits: 1, on_exceeded: NEEDS_HUMAN}
         consumes: [request, reproduction_evidence, diagnosis]
         produces: [fix_microspec]
         on: {ready: FIX, needs_clarification: NEEDS_HUMAN}
       FIX:
+        capabilities: [repo_read, repo_write, command]
         role: fixer
         budget: {max_invocations: 1, max_state_visits: 1, on_exceeded: NEEDS_HUMAN}
         consumes: [fix_microspec, diagnosis]
@@ -154,12 +163,14 @@ flows:
         produces: [verifier_evidence]
         on: {pass: READY_FOR_MANUAL_QA, fail: REDIAGNOSE}
       REDIAGNOSE:
+        capabilities: [repo_read, command]
         role: rediagnostician
         budget: {max_invocations: 1, max_state_visits: 1, on_exceeded: NEEDS_HUMAN}
         consumes: [request, reproduction_evidence, verifier_evidence, diagnosis]
         produces: [revised_diagnosis]
         on: {ready: REFIX, inconclusive: NEEDS_HUMAN}
       REFIX:
+        capabilities: [repo_read, repo_write, command]
         role: fixer
         budget: {max_invocations: 1, max_state_visits: 1, on_exceeded: NEEDS_HUMAN}
         consumes: [fix_microspec, revised_diagnosis, verifier_evidence]

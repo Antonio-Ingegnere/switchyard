@@ -1,6 +1,6 @@
 id: V2-006
 goal: Prove canonical BUGFIX and real cross-provider escalation through the existing V2 pipeline.
-status: prerequisite_addressed_live_work_pending
+status: capability_prerequisites_addressed_live_work_pending
 scope:
   - Disposable dependency-free priority/FIFO queue bug fixture and canonical bugfix runner proof.
   - Separate small example workflow proving Claude to Claude to Codex through ordinary V2 control flow.
@@ -133,3 +133,53 @@ v2_001e_prerequisite_resolution:
     The recorded repair test failure is a known local process-startup SIGKILL,
     reproducible on the original relevant commit. Diagnostic validation is correct;
     no repository fix is justified. The test remains enabled and unchanged.
+
+resume_capability_audit_2026_10_03:
+  rung_outcome_prerequisite: Resolved by V2-001E, commit 95820cb; no further outcome changes needed.
+  blocker: Canonical Claude REPRODUCE has no tool for running the required independent reproduction command.
+  classification: Provider adapter tool capability/configuration.
+  evidence:
+    canonical_binding: {state: REPRODUCE, provider: claude, profile: claude-haiku, model: haiku, effort: medium}
+    consumes: [request, bug_spec]
+    produces: [reproduction_evidence]
+    adapter: switchyard/provider_stages.py, ClaudeStageExecutor.run
+    configured_tools: [Read, Edit, Write, Glob, Grep]
+    mcp: Disabled through strict empty MCP configuration and disallowed mcp__* tools.
+    command_tool: Bash is absent from the explicit tool allowlist.
+    documented_policy: docs/design/provider-stages.md and V2-004 MicroSpec retain restricted file tools.
+  consequence: |
+    Claude can inspect source and tests but cannot execute the independently required
+    reproduction. A later command VERIFY cannot establish that REPRODUCE performed
+    its own run. Harness baseline output or fake-process execution cannot substitute
+    for this live acceptance requirement.
+  smallest_focused_fix: |
+    A separate provider-layer capability slice must define and verify a bounded,
+    explicit project-command execution policy sufficient for the reproducer. Audit
+    the installed CLI permission mechanism and cover it offline. Do not silently
+    expand the existing file-only policy or add a harness callback to run commands
+    on behalf of REPRODUCE. Runtime, outcome restrictions and canonical routing do
+    not need changes for this blocker.
+  scope_reason: V2-006 non_goals explicitly exclude provider permission expansion inside dogfood.
+  live_part_a_attempts: 0
+  live_part_b_attempts: 0
+  provider_calls: 0
+  implementation: No fixture, harness, example workflow, provider, compiler or runtime changes made in this resume.
+  completion: V2-006 remains incomplete; no success commit. Stop pending the focused capability fix.
+
+v2_004b_mapping_audit:
+  status: Not yet addressed; V2-004B stopped before implementation on Codex capability mapping.
+  reason: Independent repo_read without command access has no established supported mapping in the audited Codex CLI boundary.
+  details: docs/plans/v2-004b-stage-capabilities.yaml
+  reproduce_prerequisite: Still pending; Claude tool policy has not been expanded.
+  live_part_a_attempts: 0
+  live_part_b_attempts: 0
+
+v2_004b_resolution:
+  status: REPRODUCE command-capability prerequisite addressed by explicit stage capabilities and provider support matrix.
+  reproduce: Claude receives repo_read plus command, enabling Read/Glob/Grep/Bash without Edit/Write.
+  diagnose: All rungs inherit repo_read plus command; Codex horizontal rung uses read-only sandbox and shell enabled.
+  fix: Claude receives repo_read, repo_write and command.
+  part_b_design: Dedicated reasoning state must explicitly declare capabilities [] for all Claude/Claude/Codex rungs; factual artifacts remain supplied through StageInvocation.
+  live_part_a_attempts: 0
+  live_part_b_attempts: 0
+  completion: V2-006 remains pending; no live attempt performed in V2-004B.
