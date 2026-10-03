@@ -128,6 +128,15 @@ def compile_workflow(bundle: WorkflowBundle, flow_name: str,
                 outcomes.update(ESCALATION_TRIGGERS)
             outcomes.discard('budget_exceeded')  # Runtime control fact, never an executor result.
             transitions = {outcome: target(outcome) for outcome in sorted(outcomes)}
+            if declaration.outcomes is not None:
+                if not declaration.outcomes:
+                    raise WorkflowCompileError(f'{flow_name}.{name} rung {index}: empty outcomes restriction')
+                invalid = set(declaration.outcomes) - transitions.keys()
+                if invalid:
+                    raise WorkflowCompileError(
+                        f'{flow_name}.{name} rung {index}: unroutable outcomes {sorted(invalid)!r}')
+                transitions = {key: value for key, value in transitions.items()
+                               if key in declaration.outcomes}
             local = scope(_scope_id(flow_name, name, index), declaration.budget.max_invocations,
                           target('budget_exceeded'))
             visit_limit = spec.budget.max_state_visits if index == 0 and spec.budget else None

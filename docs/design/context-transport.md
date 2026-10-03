@@ -117,3 +117,15 @@ contracts fail during construction; they cannot create unbounded framework guida
 
 Post-result validation and commit ordering are unchanged. A returned spec.md still
 fails when only microspec is declared; guidance never aliases or repairs model output.
+
+### Per-rung restrictions
+
+V2-001E optionally narrows primary/escalation return outcomes in the compiler.
+`StageOutputContract.allowed_outcomes` continues to derive from the actual compiled
+runtime State through `ExecutionBinding.executor_allowed_outcomes`; context
+transport adds no override or routing logic. Consequently a three-rung contract can
+expose exactly `(inconclusive,)`, `(diagnosis_disproved,)`, and `(ready,)`, and the
+existing Claude/Codex schema generator receives those same enums. Budget refusal
+routes never appear as executor-returnable `budget_exceeded`. Durable input
+selection, continuation handoffs, fresh exclusion, and output validation are
+unchanged.

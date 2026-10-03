@@ -372,3 +372,48 @@ A future provider resolver can receive `bundle.profiles` during setup (before
 compilation calls it), while plan inspection uses `compiled.profiles`. Neither needs
 to reread YAML or infer commands from role/state names. No command fields enter runtime
 State, no process is launched by loading/compilation, and no adapter is implemented.
+
+### Optional per-rung return restrictions (V2-001E)
+
+Primary bindings and escalation bindings may declare `outcomes: [name, ...]`.
+**Escalation `on` controls entry into a rung from its immediate predecessor;
+`outcomes` controls what that rung's executor may return.** For example:
+
+```yaml
+primary:
+  profile: claude-haiku
+  effort: medium
+  outcomes: [inconclusive]
+escalation:
+  - kind: vertical
+    on: [inconclusive]
+    profile: claude-sonnet
+    effort: high
+    context: continue
+    outcomes: [diagnosis_disproved]
+  - kind: horizontal
+    on: [diagnosis_disproved]
+    profile: codex
+    effort: high
+    context: fresh
+    outcomes: [ready]
+```
+
+The list is optional, nonempty, unique, and uses the existing semantic identifier
+syntax. Strings are not coerced; `budget_exceeded` is forbidden. Omission preserves
+all existing outcomes and routing. Command bindings may restrict outcomes only if
+all explicit exit-code mappings and the default outcome remain included.
+
+The compiler first builds the existing full semantic transition map: adjacent
+rung match, otherwise normal state transition, otherwise recognized escalation
+trigger to `escalation_exhausted`. It rejects any explicit outcome absent from that
+map, separately for every state using the role, then filters the map before
+constructing the runtime State. A restriction cannot invent a destination or skip
+a rung. Final rungs may still return recognized triggers that route to exhaustion.
+Empty explicit contracts are rejected.
+
+All budget routes remain independent and unchanged. Runtime itself is unchanged:
+its existing outcome validation enforces the narrowed State transitions.
+`executor_allowed_outcomes`, StageOutputContract, and the shared provider output
+schema all derive from this same compiled contract. Canonical delivery workflows
+omit restrictions and retain their original behavior.

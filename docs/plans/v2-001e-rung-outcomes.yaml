@@ -1,0 +1,39 @@
+id: V2-001E
+goal: Restrict executor-returnable outcomes per binding without changing default V2 routing.
+scope:
+  - Optional primary and escalation binding outcomes in the strict V2 loader.
+  - Compiler narrowing before runtime State construction and inherited output contracts.
+  - Offline tests, design documentation and V2-006 prerequisite audit update.
+constraints:
+  - Runtime, canonical workflows, budgets, context selection and persistence remain unchanged.
+  - No live providers, Adeo changes or V2-006 execution.
+acceptance:
+  - Singleton inconclusive, diagnosis_disproved and ready contracts execute three distinct rungs.
+  - Runtime rejects excluded outcomes; context and provider schemas expose actual narrowed contracts.
+  - Omitted outcomes preserve canonical behavior and budget routes remain independent.
+verification:
+  - Focused loader, compiler, runtime integration and context contract tests.
+  - Existing V2/provider/runtime/V1/observability/delivery regressions and full offline suite.
+  - Only the established local SIGKILL failure and existing platform skip are acceptable.
+non_goals:
+  - Live dogfood, provider-only overrides, new runtime fields or changed escalation policy.
+design:
+  binding_api: 'InvocationBinding.outcomes: tuple[str, ...] | None = None; copied to immutable tuple.'
+  yaml: Optional nonempty outcomes list on primary and escalation bindings; existing identifier syntax, no duplicates or budget_exceeded.
+  distinction: Escalation on permits entry from the preceding rung; outcomes restricts return values from this rung.
+  compilation: |
+    Build the existing full semantic transition map with adjacent-rung, normal-state,
+    then recognized-trigger exhaustion precedence. Reject explicit outcomes absent
+    from that map, independently for each state using the role. Filter before State
+    construction. Preserve sorted transition order and all budget routes separately.
+  command_policy: All command exit mapping values including default must be included in an explicit restriction; existing state-routing validation still applies.
+  metadata: Existing executor_allowed_outcomes derives from State.on; no context/provider override or routing duplication.
+  empty_contract: Loader rejects empty lists; compiler defensively rejects empty explicit contracts.
+status: complete
+
+verification_result:
+  new_tests: 9 passed, covering strict loading, compiler, runtime, context/provider schemas and budget routing.
+  focused_regressions: 136 passed, including provider, context, workspace, compiler, loader, command profile and feature dogfood tests.
+  full_offline_suite: 428 tests; 426 passed, 1 known environmental SIGKILL failure, 1 existing platform skip; zero new failures.
+  baseline_failure: test_codex_repair.CodexRepairTests.test_exact_prompts_real_fake_cli_and_fresh_inputs, 4096 NUL diagnostic bytes; unchanged and not skipped.
+  protected_scope: Runtime, Event, canonical workflows, context selection, provider adapters and Adeo unchanged. No live provider calls.

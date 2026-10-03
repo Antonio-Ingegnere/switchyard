@@ -1,0 +1,135 @@
+id: V2-006
+goal: Prove canonical BUGFIX and real cross-provider escalation through the existing V2 pipeline.
+status: prerequisite_addressed_live_work_pending
+scope:
+  - Disposable dependency-free priority/FIFO queue bug fixture and canonical bugfix runner proof.
+  - Separate small example workflow proving Claude to Claude to Codex through ordinary V2 control flow.
+  - Offline fake-process coverage before one live attempt per part.
+constraints:
+  - Reuse execute_v2_workflow; no second runtime or handwritten provider dispatch.
+  - Canonical feature/bugfix graphs, budgets and context selection remain unchanged.
+  - No harness retry, manual implementation, output repair or provider-session transfer.
+  - Independent acceptance tests remain unchanged; all evidence retained.
+  - No Adeo changes or V2-007 work.
+acceptance:
+  - Part A reaches READY_FOR_MANUAL_QA with durable bug specification, reproduction, diagnosis, fix MicroSpec and passing verifier evidence.
+  - Part A real FIX changes source while preserving acceptance tests and immutable request.
+  - Part B actually invokes Claude, Claude and Codex through compiler/runtime/context/provider layers.
+  - Vertical continuation includes the preceding structured handoff; horizontal fresh excludes it while retaining factual artifacts.
+  - Both live proofs succeed without manual intervention before claiming completion.
+verification:
+  - Inspect declarative types, loader field whitelist and compiler outcome generation before implementation.
+  - Offline compilation probe inspects all canonical DIAGNOSE rung outcome contracts without invoking executors.
+  - Planned focused fake-process Part A/B coverage plus V2-005, provider, context, workspace, compiler, loader, runtime, V1, observability and delivery regressions.
+  - Planned one live canonical BUGFIX attempt and one live escalation proof attempt after blockers and offline checks pass.
+non_goals:
+  - Provider permission expansion, DSL/compiler redesign inside dogfood, acceptance migration or dashboards.
+planned_fixture:
+  path: tests/fixtures/bugfix_dogfood_project
+  files: [task_queue.py, tests/test_task_queue.py]
+  defect: |
+    Queue ordering uses the current queue length as the insertion tie-breaker.
+    Removing an item then inserting another can reuse an existing sequence number,
+    allowing a later equal-priority task to precede an earlier one. Priority ordering
+    and FIFO without removal still work. No TODO or trivial constant replacement.
+  baseline: |
+    Existing priority and ordinary FIFO tests pass. One independently specified
+    remove-then-insert equal-priority test fails deterministically. Validate exactly
+    this baseline before any provider invocation; reject green or unrelated failures.
+  human_report: |
+    There is something wrong with task ordering.
+
+    If I add several tasks with the same priority, process one of them, and then add
+    another task, the queue sometimes returns them in a different order from the
+    order they were added. Tasks with equal priority should stay FIFO.
+
+    Please reproduce it, find the cause and fix it without breaking priority ordering.
+  verifier: [python3, -m, unittest, discover, -s, tests]
+part_a:
+  workflow: examples/delivery/workflows-v2.yaml
+  flow: bugfix
+  expected_path: [TRIAGE, REPRODUCE, DIAGNOSE, SPECIFY_FIX, FIX, VERIFY, READY_FOR_MANUAL_QA]
+  followup_path: Existing REDIAGNOSE/REFIX/VERIFY_AGAIN behavior remains available.
+  runner: Existing execute_v2_workflow with real provider resolver and disposable working directory.
+part_b:
+  planned_example: examples/escalation/workflows-v2.yaml
+  reason_separate: Natural diagnosis outcomes are nondeterministic; Part A must not be changed to force escalation.
+  desired_contracts:
+    - {rung: 0, provider: claude, allowed_outcomes: [inconclusive], task: Initial hypothesis pass only.}
+    - {rung: 1, provider: claude, context: continue, allowed_outcomes: [diagnosis_disproved], task: Challenge and refine prior reasoning before independent assessment.}
+    - {rung: 2, provider: codex, context: fresh, allowed_outcomes: [ready], task: Independent final assessment from durable facts.}
+  facts: Immutable request and a fixed declared reproduction_evidence artifact; no code modification required.
+  proof: Sanitized invocation metadata records prior handoff identity for continuation and its absence for fresh, together with factual artifact versions/digests.
+  model_configuration: Existing explicit local selector aliases remain outside committed YAML; no silent substitution.
+execution_limits:
+  part_a_live_attempts: 1
+  part_b_live_attempts: 1
+  harness_retries: 0
+preimplementation_audit_2026_10_03:
+  blocker: Requested distinct singleton outcome contracts cannot be expressed by the current V2 DSL/compiler.
+  schema: |
+    InvocationBinding contains profile, effort and budget only. Primary YAML permits
+    only those fields. Escalation steps additionally declare kind, incoming on triggers
+    and context; they have no outgoing outcome restriction. Normal on belongs to the
+    enclosing logical state and applies at every rung.
+  compiler: |
+    For every ladder rung, compile_workflow starts with the logical state's on keys
+    and adds all ESCALATION_TRIGGERS, then removes budget_exceeded. The resulting
+    runtime State.on keys are faithfully copied into executor_allowed_outcomes and
+    StageOutputContract by V2-003C. This is existing behavior, not a V2-003C regression.
+  actual_compilation_probe:
+    flow: bugfix
+    state: DIAGNOSE
+    rung_0: [diagnosis_disproved, inconclusive, ready, verification_same_failure]
+    rung_1: [diagnosis_disproved, inconclusive, ready, verification_same_failure]
+    rung_2: [diagnosis_disproved, inconclusive, ready, verification_same_failure]
+    executors: Non-invoked inspection stubs; no real or fake process launched.
+  consequence: |
+    Declaring ready for the final rung also allows ready on earlier rungs, so providers
+    can exit the ladder early. Removing ready removes it from the final rung too.
+    Incoming escalation on lists do not restrict outgoing outcomes. Even with no
+    normal outcomes, all three semantic escalation triggers remain allowed on every
+    ladder rung. Asking a provider in prose to choose one does not enforce the
+    requested contract and was explicitly excluded by this task.
+  classification: Missing declarative per-rung semantic-outcome restriction; compiler metadata correctly reflects current graph semantics.
+  smallest_focused_prerequisite: |
+    Define an opt-in declarative per-rung outcome restriction with loader validation,
+    and compile it into that rung's actual runtime transition contract so the existing
+    StageOutputContract can expose it unchanged. Preserve current canonical behavior
+    when omitted. Exact syntax and interaction with exhaustion require a focused
+    schema/compiler slice, not a test-only provider override or runtime redesign.
+  stop_reason: |
+    Part B cannot meet the requested deterministic output-contract proof with ordinary
+    example configuration today. Do not spend provider calls or introduce a harness
+    workaround. Part A has not been attempted; its live execution capabilities have
+    not been established by this audit.
+  implementation: No fixture, runner, example flow, runtime, compiler or provider changes made.
+  provider_calls: 0
+  live_attempts: 0
+  completion: V2-006 incomplete; no completion commit. Stop pending the focused prerequisite.
+verification_result:
+  microspec: Validated using existing validate_microspec.
+  compilation_probe: All three canonical DIAGNOSE contracts contain the same four semantic outcomes documented above.
+  focused_v2_006_tests: Not implemented; blocked before fixture/example implementation.
+  full_offline_suite: 419 tests in 33.024 seconds; 417 passed, 1 failed, 1 existing platform skip.
+  existing_failure:
+    test: test_codex_repair.CodexRepairTests.test_exact_prompts_real_fake_cli_and_fresh_inputs
+    case: 4096 NUL diagnostic bytes.
+    assertion: Expected success, observed error at tests/test_codex_repair.py line 72.
+    focused_rerun: 5 tests; 4 passed, same failure reproduced.
+    standalone_probe: Same case returned error; no OSError was observed escaping Popen.
+    diagnosis: Cause not established; no pre-existing code or test changed in this slice.
+  live_provider_calls: 0
+  changed_files: [docs/plans/v2-006-bugfix-dogfood.yaml]
+  protected_scope: Runtime, compiler, provider adapters, canonical workflows and Adeo untouched.
+  commit: None; V2-006 is incomplete.
+
+v2_001e_prerequisite_resolution:
+  status: Addressed by V2-001E; optional binding outcomes compile to real per-rung State contracts.
+  proof: Offline singleton ladder exposes inconclusive, diagnosis_disproved, ready to runtime, StageOutputContract and provider schema.
+  compatibility: Existing canonical feature/bugfix workflows remain unrestricted and unchanged.
+  execution: Part A and Part B remain unattempted; no live execution in V2-001E.
+  reg_001: |
+    The recorded repair test failure is a known local process-startup SIGKILL,
+    reproducible on the original relevant commit. Diagnostic validation is correct;
+    no repository fix is justified. The test remains enabled and unchanged.

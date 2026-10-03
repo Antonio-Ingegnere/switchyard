@@ -70,6 +70,11 @@ class InvocationBinding:
     profile: str
     effort: Effort | None = None
     budget: BudgetSpec = field(default_factory=lambda: BudgetSpec(max_invocations=1))
+    outcomes: tuple[str, ...] | None = None
+
+    def __post_init__(self):
+        if self.outcomes is not None:
+            object.__setattr__(self, 'outcomes', tuple(self.outcomes))
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,12 +208,24 @@ def _binding(data, profiles, path):
             raise _error(path + '.effort', 'command bindings must omit effort')
         effort = _enum(data['effort'], {'low', 'medium', 'high'}, path + '.effort')
     budget = _budget(data['budget'], 'rung', path + '.budget') if 'budget' in data else BudgetSpec(max_invocations=1)
-    return InvocationBinding(ref, effort, budget)
+    outcomes = None
+    if 'outcomes' in data:
+        outcomes = _names(data['outcomes'], path + '.outcomes')
+        if not outcomes:
+            raise _error(path + '.outcomes', 'expected nonempty outcome list')
+        if 'budget_exceeded' in outcomes:
+            raise _error(path + '.outcomes', 'reserved control-plane outcome')
+        command = profiles[ref].command
+        if command is not None:
+            produced = set(command.outcomes.exit_codes.values()) | {command.outcomes.default}
+            if not produced.issubset(outcomes):
+                raise _error(path + '.outcomes', 'restriction excludes command exit outcomes')
+    return InvocationBinding(ref, effort, budget, outcomes)
 
 
 def _role(data, profiles, path):
     _fields(data, {'primary'}, {'escalation'}, path)
-    _fields(data['primary'], {'profile'}, {'effort', 'budget'}, path + '.primary')
+    _fields(data['primary'], {'profile'}, {'effort', 'budget', 'outcomes'}, path + '.primary')
     primary = previous = _binding(data['primary'], profiles, path + '.primary')
     ladder = data.get('escalation', [])
     if type(ladder) is not list:
@@ -216,7 +233,7 @@ def _role(data, profiles, path):
     steps = []
     for i, step in enumerate(ladder):
         here = f'{path}.escalation[{i}]'
-        _fields(step, {'kind', 'on', 'profile', 'context'}, {'effort', 'budget'}, here)
+        _fields(step, {'kind', 'on', 'profile', 'context'}, {'effort', 'budget', 'outcomes'}, here)
         kind = _enum(step['kind'], {'vertical', 'horizontal'}, here + '.kind')
         triggers = _names(step['on'], here + '.on', triggers=True)
         context = _enum(step['context'], {'continue', 'fresh'}, here + '.context')
