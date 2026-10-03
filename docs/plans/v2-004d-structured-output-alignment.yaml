@@ -1,0 +1,91 @@
+id: V2-004D
+goal: |
+  Make provider-facing structured-output instructions exactly match the
+  machine-enforced StageResult schema: all four top-level keys are mandatory,
+  and nullable means the key is mandatory and its value may be null.
+status: complete
+scope:
+  - switchyard/provider_stages.py shared StageResult field contract, schema construction, parser key check and renderer wording.
+  - tests/test_structured_output_alignment.py offline schema/instruction/fake-provider regressions.
+  - docs/design/provider-stages.md; docs/plans/v2-006-bugfix-dogfood.yaml V2-004D record.
+constraints:
+  - Schema and strict parser are not loosened; all four keys stay required.
+  - MAX_STRUCTURED_OUTPUT_RETRIES stays 1; no Switchyard retry added.
+  - One shared renderer for Claude and Codex; no provider-only prose.
+  - No runtime, Event, compiler routing, budget, context, capability, artifact persistence or handoff-semantics change.
+  - No live provider calls, V2-006 execution or Adeo changes.
+acceptance:
+  - Rendered instructions and generated schema agree on required keys, nullability and empty-list absence.
+  - Canonical BUGFIX TRIAGE input states that no key may be omitted and how to represent absence.
+  - Omitted-key output (outcome plus produced_artifacts only) is still rejected for Claude and Codex.
+  - Null/[] absence forms, non-null handoff and non-null diagnostics parse unchanged.
+  - Provider nonzero exit remains ProviderExecutionError with V2-004C diagnostics.
+  - Full offline suite has zero new failures beyond the known SIGKILL failure and platform skip.
+verification:
+  - tests/test_structured_output_alignment.py (7 offline tests).
+  - Groups V2-004C, V2-004B, V2-004/A, V2-003A/B/C, V2-002, V2-005, V2-006 offline, loader/compiler/runtime, V1, observability, DELIVERY-001 and full discovery under TERM=dumb.
+non_goals:
+  - Generic schema framework, schema loosening, provider retries or prose repair.
+  - New diagnostics semantics, permission broadening or capability policy changes.
+  - Explaining the Read permission denial observed in V2-006 Part A attempt 2.
+
+defect:
+  evidence: |
+    V2-006 Part A attempt 2, TRIAGE rung 0 (claude-haiku, haiku, medium, [repo_read]):
+    error_max_structured_output_retries / structured_output_retry_exhausted; output did
+    not match the schema because required properties handoff and diagnostics were missing.
+  contradiction: |
+    result_schema required outcome, produced_artifacts, handoff and diagnostics with
+    nullable handoff/diagnostics. render_invocation said "A handoff is supported/expected
+    as described in the contract, but remains optional", described artifact "Production"
+    as optional, and never mentioned the diagnostics key. Prose implied omission; the
+    schema required the key with a null value.
+
+audit:
+  duplicated_before: |
+    Key names were written separately in result_schema properties and in the
+    parse_stage_result exact-key check; the renderer had no key list; tests hard-coded
+    their own dictionaries. Nullability existed only in the schema.
+  single_source: |
+    RESULT_FIELDS in provider_stages.py: ordered ResultField(name, nullable, empty, rule).
+    RESULT_KEYS drives schema property order/required and the parser key check;
+    result_contract_text() renders the numbered instructions. An import-time check
+    requires RESULT_KEYS to equal the StageResult dataclass field order. Schema value
+    types themselves remain in result_schema; a regression proves nullability agrees.
+
+wording:
+  removed:
+    - A handoff is supported/expected as described in the contract, but remains optional.
+    - 'Production is optional: a stage may return no artifacts.'
+    - Return exactly one JSON StageResult object matching this schema.
+  added: |
+    Return exactly one JSON StageResult object containing ALL of these top-level keys.
+    Never omit any key. "Nullable" means the KEY is mandatory and its VALUE may be null.
+    1. outcome: KEY required; its VALUE is never null. Exactly one allowed semantic outcome string.
+    2. produced_artifacts: KEY required; its VALUE is never null; use [] when not applicable. List of {name, content} objects; not every declared artifact must be returned.
+    3. handoff: KEY required; its VALUE may be null; use null when not applicable. Otherwise an object of exactly the handoff body_fields; always null when the contract does not support a handoff.
+    4. diagnostics: KEY required; its VALUE may be null; use null when not applicable. Otherwise a diagnostic string; null is the normal absence value, never invent diagnostics to avoid null.
+  handoff_guidance: The handoff KEY is always present; its VALUE may be null. When the contract supports a handoff and one is returned, include only its body_fields.
+  artifact_guidance: Not every declared artifact must be returned.
+
+permission_denial_audit:
+  finding: Installed Claude 2.1.282 result-envelope permission_denials entries are {tool_name, tool_use_id, tool_input}; no separate textual reason exists.
+  decision: V2-004C tool-name-only extraction unchanged; tool input is never retained.
+
+unchanged:
+  - result_schema property types, nullability, enums, maxItems and additionalProperties=false.
+  - parse_stage_result strictness, including rejection of omitted keys.
+  - MAX_STRUCTURED_OUTPUT_RETRIES=1 and one provider process per invocation.
+  - V2-004C nonzero-exit diagnostics and ProviderExecutionError semantics.
+  - Runtime, Event, compiler routing, budgets, capabilities, context fresh/continue, artifact persistence, StageOutputContract and handoff semantics.
+
+implementation_result:
+  new_tests: 7 passed.
+  groups: |
+    V2-004C 14, V2-004B 6, V2-004/A 16, V2-003C 6, V2-003A/B 35, V2-002 19, V2-005 4,
+    V2-006 offline 5, loader/compiler/runtime 141, observability 71, DELIVERY-001 43:
+    all OK. V1 93: only the known SIGKILL failure plus the existing platform skip.
+  full_offline: 460 tests under TERM=dumb with uncommitted V2-006 work present; 458 passed, 1 unchanged known local SIGKILL failure, 1 existing platform skip; zero new failures.
+  provider_calls: 0
+  protected_scope: Runtime/Event, compiler, workflows, capabilities and Adeo untouched.
+  limitation: Clear instructions reduce but cannot guarantee provider schema conformance; nonconforming output remains an explicit execution failure.

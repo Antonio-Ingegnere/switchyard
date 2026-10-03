@@ -222,3 +222,35 @@ Runtime and Event are unchanged: the sequence remains `run_started`,
 `state_entered`, `invocation_started`, `run_error`, with no StageResult, artifact or
 handoff. Details stay in the exception and application reports. No retry, auth
 refresh or provider/model/effort/tool substitution is added.
+
+## Mandatory StageResult keys (V2-004D)
+
+The provider-facing StageResult object always contains **all four** top-level keys.
+**Nullable means the key is mandatory and its value may be null** — never that the
+key may be omitted.
+
+| Key | Value | Absence representation |
+| --- | --- | --- |
+| `outcome` | allowed semantic outcome string, never null | — |
+| `produced_artifacts` | list of `{name, content}`, never null | `[]` |
+| `handoff` | StageHandoff body object, or null | `null` (always null when unsupported) |
+| `diagnostics` | diagnostic string, or null | `null` |
+
+`switchyard.provider_stages.RESULT_FIELDS` is the single definition of these keys,
+their nullability and their absence value. `result_schema` orders/requires its
+properties from it, `parse_stage_result` checks exact keys against it, and the
+shared renderer generates the numbered OUTPUT CONTRACT instructions from it. Import
+fails if it drifts from the `StageResult` dataclass fields. Claude and Codex receive
+the same rendered contract; only their native schema transport differs.
+
+Before V2-004D the renderer said a handoff "remains optional" and never mentioned
+`diagnostics`, while the schema required both keys. Claude Haiku omitted both in V2-006
+Part A attempt #2, and the CLI rejected the output. The schema and strict parser are
+unchanged: an object without `handoff`/`diagnostics` is still rejected, and
+`MAX_STRUCTURED_OUTPUT_RETRIES=1` is unchanged. Models are told not to invent
+diagnostics; null is the normal absence value. Not every declared artifact must be
+returned. Handoff body, provenance and evidence-reference rules are unchanged.
+
+The installed Claude 2.1.282 result-envelope permission denial carries only
+`tool_name`, `tool_use_id` and `tool_input`; it has no separate textual reason, so
+V2-004C's tool-name-only `permission_denials` diagnostic is unchanged.

@@ -26,15 +26,50 @@ def _object(properties):
     return {'type':'object', 'properties':properties, 'required':list(properties), 'additionalProperties':False}
 
 
+@dataclass(frozen=True, slots=True)
+class ResultField:
+    """One top-level StageResult wire key. Every key is required; nullable means its value may be null."""
+    name: str
+    nullable: bool
+    empty: str | None  # JSON value to use when not applicable.
+    rule: str
+
+
+# Single provider-facing StageResult shape shared by schema, parser and renderer.
+RESULT_FIELDS = (
+    ResultField('outcome', False, None, 'Exactly one allowed semantic outcome string'),
+    ResultField('produced_artifacts', False, '[]', 'List of {name, content} objects; '
+                'not every declared artifact must be returned'),
+    ResultField('handoff', True, 'null', 'Otherwise an object of exactly the handoff body_fields; '
+                'always null when the contract does not support a handoff'),
+    ResultField('diagnostics', True, 'null', 'Otherwise a diagnostic string; null is the normal '
+                'absence value, never invent diagnostics to avoid null'),
+)
+RESULT_KEYS = tuple(field.name for field in RESULT_FIELDS)
+if RESULT_KEYS != tuple(StageResult.__dataclass_fields__):
+    raise RuntimeError('provider StageResult fields drifted from StageResult')
+
+
+def result_contract_text():
+    lines = ['Return exactly one JSON StageResult object containing ALL of these top-level keys. '
+             'Never omit any key. "Nullable" means the KEY is mandatory and its VALUE may be null.']
+    for index, field in enumerate(RESULT_FIELDS, 1):
+        value = 'its VALUE may be null' if field.nullable else 'its VALUE is never null'
+        empty = f'; use {field.empty} when not applicable' if field.empty else ''
+        lines.append(f'{index}. {field.name}: KEY required; {value}{empty}. {field.rule}.')
+    return '\n'.join(lines)
+
+
 def result_schema(contract=None):
     """Fresh schema per caller; no shared mutable schema state."""
     strings = {'type':'array','items':{'type':'string'}}
     handoff = _object({'summary':{'type':'string'}, **{key:strings for key in
                       ('findings','evidence','changed_assumptions','blockers')}})
-    schema = _object({'outcome':{'type':'string'},
-                    'produced_artifacts':{'type':'array','items':_object({'name':{'type':'string'},'content':{'type':'string'}})},
-                    'handoff':{'anyOf':[handoff,{'type':'null'}]},
-                    'diagnostics':{'type':['string','null']}})
+    properties = {'outcome':{'type':'string'},
+                  'produced_artifacts':{'type':'array','items':_object({'name':{'type':'string'},'content':{'type':'string'}})},
+                  'handoff':{'anyOf':[handoff,{'type':'null'}]},
+                  'diagnostics':{'type':['string','null']}}
+    schema = _object({key: properties[key] for key in RESULT_KEYS})
     if contract is not None:
         schema['properties']['outcome']['enum'] = list(contract.allowed_outcomes)
         artifacts = schema['properties']['produced_artifacts']
@@ -72,14 +107,15 @@ def render_invocation(invocation: StageInvocation) -> str:
     parts.append('STAGE OUTPUT CONTRACT\n'+_json(asdict(invocation.output_contract)))
     parts.append('Return only an allowed semantic outcome and only the declared logical artifact names, exactly. '
                  'Artifact names are identifiers, never filenames or paths; the workspace chooses storage paths. '
-                 'Production is optional: a stage may return no artifacts. Content must match the declared format '
+                 'Not every declared artifact must be returned. Content must match the declared format '
                  'and schema. For microspec, all schema_fields are required with the specified types; '
                  'return raw YAML/JSON text inside content, without markdown fences. '
-                 'A handoff is supported/expected as described in the contract, but remains optional. '
-                 'Return only its body_fields; no provenance, sequence, outcome or produced_artifacts fields. '
+                 'The handoff KEY is always present; its VALUE may be null. When the contract supports a '
+                 'handoff and one is returned, include only its body_fields; no provenance, sequence, outcome '
+                 'or produced_artifacts fields. '
                  'Evidence entries must be declared logical artifact names from evidence_artifacts, never paths. '
                  'Repository observations belong in summary/findings.')
-    parts.append('OUTPUT CONTRACT\nReturn exactly one JSON StageResult object matching this schema. '
+    parts.append('OUTPUT CONTRACT\n'+result_contract_text()+'\nMatch this schema. '
                  'Do not wrap it in prose or markdown. Handoff is bounded reasoning, not a transcript.\n'+_json(result_schema(invocation.output_contract)))
     return '\n\n'.join(parts)
 
@@ -119,7 +155,7 @@ def _text(value, nonempty=False):
 
 
 def parse_stage_result(value) -> StageResult:
-    _keys(value, ('outcome','produced_artifacts','handoff','diagnostics'))
+    _keys(value, RESULT_KEYS)
     _text(value['outcome'], True)
     _require('\0' not in value['outcome'] and value['outcome'] != 'budget_exceeded', 'invalid semantic outcome')
     _require(type(value['produced_artifacts']) is list, 'produced_artifacts must be a list')

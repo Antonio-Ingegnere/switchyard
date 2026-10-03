@@ -205,3 +205,25 @@ v2_004c_provider_failure_diagnostics:
   live_part_a_attempts: 1
   live_part_b_attempts: 0
   next: Another live Part A attempt requires explicit authorization after V2-004C.
+
+v2_004d_structured_output_alignment:
+  trigger: |
+    Part A attempt 2 (2026-10-04, after V2-004C) failed at TRIAGE rung 0 (claude,
+    claude-haiku, haiku, medium, [repo_read]) with exit status 1. V2-004C preserved:
+    subtype=error_max_structured_output_retries, terminal_reason=
+    structured_output_retry_exhausted; output missing required properties handoff
+    and diagnostics. Events: run_started, state_entered, invocation_started,
+    run_error. Only request v1 committed; no handoff; target files unchanged.
+  cause: |
+    Renderer/schema wording mismatch. The schema required all four StageResult keys
+    with nullable handoff/diagnostics; the shared renderer called the handoff
+    "optional" and never mentioned diagnostics.
+  resolution: |
+    V2-004D (docs/plans/v2-004d-structured-output-alignment.yaml) renders mandatory
+    keys and null/[] absence values from one shared StageResult field contract. Schema,
+    strict parsing and MAX_STRUCTURED_OUTPUT_RETRIES=1 unchanged.
+  permission_denial: The observed Read denial was not the cause; no permission change. The envelope exposes no safe textual reason.
+  attempt_history: Attempts 1 and 2 preserved.
+  live_part_a_attempts: 2
+  live_part_b_attempts: 0
+  next: Part A attempt 3 requires explicit authorization after V2-004D.
