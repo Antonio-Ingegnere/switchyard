@@ -1,0 +1,109 @@
+id: V2-003D
+goal: |
+  Make MicroSpec artifact rejections precisely diagnosable without exposing rejected
+  content, and make provider-facing MicroSpec guidance state the validator's exact
+  scalar-string requirements, including YAML quoting.
+status: complete
+scope:
+  - switchyard/work_contract.py validate_microspec diagnostics, parsed type naming and microspec_guidance.
+  - switchyard/provider_stages.py renders the generated guidance for microspec output artifacts.
+  - tests/test_microspec_contract_diagnostics.py.
+  - docs/design/work-contract.md, docs/design/context-transport.md; docs/plans/v2-006-bugfix-dogfood.yaml V2-003D record.
+constraints:
+  - Acceptance and rejection semantics unchanged; no coercion, stringification or artifact repair.
+  - Rejected values never appear in errors; invalid artifacts are never persisted.
+  - Artifact-then-handoff transactional commit ordering unchanged.
+  - No RESULT_FIELDS, Claude transport/normalization, Codex schema, StageResult parser or retry change.
+  - No runtime, Event, routing, budget, compiler, capability or fresh/continue change.
+  - No live provider calls, V2-006 attempt or Adeo change.
+acceptance:
+  - Every string and list MicroSpec field reports field or field[index] plus parsed type.
+  - Wrong type and empty/whitespace-only strings are distinguished.
+  - 'Unquoted "key: value" list item is reported as scope[0] mapping; quoted form is a valid string.'
+  - Canonical BUGFIX SPECIFY_FIX rendered input carries the generated YAML string and quoting rules.
+  - Rejected fix_microspec through ContextualExecutor commits no version and no handoff.
+  - Full offline suite has zero new failures beyond the known SIGKILL failure and platform skip.
+verification:
+  - tests/test_microspec_contract_diagnostics.py (9 offline tests).
+  - Groups V2-003A/B/C, V2-004A-E, V2-005, V2-006 offline, loader/compiler/runtime, V1, observability, DELIVERY-001 and full discovery under TERM=dumb.
+non_goals:
+  - Schema framework, new MicroSpec fields or acceptance of mappings.
+  - Tool-use telemetry implementation (audit only).
+  - Claiming the exact attempt-4 rejected value.
+
+trigger: |
+  V2-006 Part A attempt 4: SPECIFY_FIX (claude-sonnet, sonnet, medium, [repo_read])
+  exited 0 and its StageResult decoded, but fix_microspec failed with "invalid
+  MicroSpec scope item". At least one scope item parsed as a non-string. The rejected
+  content was not retained; an unquoted YAML "key: value" list item is one plausible,
+  unconfirmed cause.
+
+diagnostics:
+  previous_weakness: |
+    Item failures collapsed to "invalid MicroSpec <field> item", string fields to
+    "invalid MicroSpec <field>", missing fields to "missing required MicroSpec field",
+    with no index, field name or parsed type.
+  new_format:
+    root: 'MicroSpec root: expected mapping, got <type>'
+    missing: 'MicroSpec <field>: missing required field'
+    string_field: 'MicroSpec <field>: expected non-empty string, got <type>'
+    list_container: 'MicroSpec <field>: expected sequence of non-empty strings, got <type>'
+    list_item: 'MicroSpec <field>[<index>]: expected non-empty string, got <type>'
+  type_names: [string, empty string, mapping, sequence, null, boolean, integer, number, timestamp, binary, unsupported value]
+  context: 'Existing prefixes kept, e.g. "bugfix.SPECIFY_FIX[0]: artifact fix_microspec: MicroSpec scope[0]: expected non-empty string, got mapping".'
+  content_safety: Types come from parsed Python values; tests embed a marker in rejected values and assert it is absent from the whole exception chain.
+
+guidance:
+  source_of_truth: microspec_guidance(format) iterates MICROSPEC_FIELDS, the same definitions used by validate_microspec and StageOutputArtifactContract.schema_fields.
+  rendered_yaml: |
+    MICROSPEC CONTENT RULES (yaml)
+    Content is one YAML mapping with these required top-level keys: id, goal, scope, constraints, acceptance, verification, non_goals.
+    - id: one non-empty YAML string.
+    - goal: one non-empty YAML string.
+    - scope: a YAML sequence (may be empty: []); each item is one non-empty YAML string.
+    (same line for constraints, acceptance, verification, non_goals)
+    Every list item is a single scalar string: never a mapping, never a nested sequence, and never null, a number or a boolean.
+    Quote every list item as a double-quoted YAML string. Unquoted YAML-significant syntax changes the parsed type; in particular an item containing ": " parses as a mapping unless quoted. Also quote id and goal when they contain YAML-significant syntax.
+    Correct:   - "task_queue.py: preserve FIFO ordering"
+    Incorrect: - task_queue.py: preserve FIFO ordering
+  placement: One section per distinct microspec artifact format in the stage output contract; shared by Claude and Codex. Canonical TRIAGE (bug_spec) and SPECIFY_FIX (fix_microspec) receive it.
+
+tool_use_observability_audit:
+  question: Can Switchyard independently observe successful provider tool use without transcripts, tool inputs, session history, undocumented flags or live calls?
+  current_adapter:
+    claude: --output-format json returns only the final result envelope; it carries no tool-use names or counts (only permission_denials). Tool-count strings in the binary belong to internal telemetry, not the envelope.
+    codex: exec without --json; stdout is drained and discarded; only the final-result file is parsed.
+  supported_mechanisms:
+    claude: |
+      Documented --output-format stream-json (requires --verbose with --print) streams
+      assistant messages with tool_use blocks {id, name, input} and tool_result blocks
+      {tool_use_id, content, is_error}, ending with the same result message.
+    codex: |
+      Documented exec --json prints JSONL thread/turn/item events; items include
+      command_execution, file_change, mcp_tool_call and web_search with completion status.
+    excluded: Hooks are disabled by --safe-mode; internal telemetry and feature gates are not supported interfaces.
+  conclusion: A
+  retainable_facts: Per invocation, tool name (Claude) or item type (Codex), call count and success/error count.
+  inputs_excludable: Yes; inputs, command text, tool_result content and command output can be discarded while parsing each event, without retention.
+  smallest_change: |
+    Not trivial: switch Claude to stream-json --verbose and add Codex --json; parse
+    stdout incrementally in the shared process helper so tool payloads are never
+    buffered (they could otherwise exceed the 1 MiB result cap); keep final-result
+    decoding and V2-004C/E behavior; expose a sanitized per-invocation tool summary
+    to application observers without changing StageResult, runtime or Event.
+  recommendation: Separate focused provider slice before Part A attempt 5 if V2-006 must claim independently observed reproduction.
+  honest_claim_without_it: |
+    Switchyard proved REPRODUCE was granted repo_read and command (not repo_write)
+    and committed reproduction_evidence consistent with the independently verified
+    failing baseline. Switchyard did not independently observe the provider's
+    command tool call.
+
+implementation_result:
+  new_tests: 9 passed.
+  groups: |
+    V2-003A 23, V2-003B 12, V2-003C 6, V2-004A-E 52, V2-005 4, V2-006 offline 5,
+    loader/compiler/runtime 160, observability 71, DELIVERY-001 43: all OK.
+    V1 93: only the known SIGKILL failure plus the existing platform skip.
+  full_offline: 478 tests under TERM=dumb with uncommitted V2-006 work present; 476 passed, 1 unchanged known local SIGKILL failure, 1 existing platform skip; zero new failures.
+  provider_calls: 0
+  protected_scope: Runtime/Event, compiler, routing, budgets, capabilities, structured-output transport, commit ordering and Adeo untouched.

@@ -2,6 +2,7 @@
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
 from functools import wraps
+from datetime import date, datetime
 import hashlib
 import json
 import os
@@ -92,24 +93,73 @@ MICROSPEC_FIELDS = tuple(MicroSpecField(name, 'string', False) for name in ('id'
     for name in ('scope', 'constraints', 'acceptance', 'verification', 'non_goals'))
 
 
+def _kind(value):
+    """Stable parsed-type name for diagnostics; never the value itself."""
+    if type(value) is str:
+        return 'string' if value.strip() else 'empty string'
+    for kind, name in ((bool, 'boolean'), (dict, 'mapping'), (list, 'sequence'), (type(None), 'null'),
+                       (int, 'integer'), (float, 'number'), (bytes, 'binary')):
+        if type(value) is kind:
+            return name
+    return 'timestamp' if isinstance(value, (date, datetime)) else 'unsupported value'
+
+
+def _microspec_text(value, location):
+    kind = _kind(value)
+    _check(kind == 'string', f'MicroSpec {location}: expected non-empty string, got {kind}')
+    try:
+        value.encode('utf-8')
+    except UnicodeError:
+        raise WorkContractError(f'MicroSpec {location}: expected non-empty string, got invalid UTF-8') from None
+
+
 @_boundary
 def validate_microspec(content: str, format: str = 'yaml') -> MicroSpec:
-    """Validate required concepts from docs/protocols/micro-spec.md, not extensions."""
+    """Validate required concepts from docs/protocols/micro-spec.md, not extensions.
+
+    Errors name the field and item index plus the parsed type, never the rejected value.
+    """
     _text(content, 'MicroSpec content')
     _check(format in ('yaml', 'json'), 'MicroSpec requires yaml or json')
     value = _yaml_data(content) if format == 'yaml' else _json(content)
-    _check(type(value) is dict, 'MicroSpec root must be a mapping')
-    required = tuple(field.name for field in MICROSPEC_FIELDS)
-    _check(all(key in value for key in required), 'missing required MicroSpec field')
+    _check(type(value) is dict, f'MicroSpec root: expected mapping, got {_kind(value)}')
+    for field in MICROSPEC_FIELDS:
+        _check(field.name in value, f'MicroSpec {field.name}: missing required field')
     for key in (field.name for field in MICROSPEC_FIELDS if field.type == 'string'):
-        _text(value[key], 'MicroSpec ' + key)
+        _microspec_text(value[key], key)
     lists = {}
     for key in (field.name for field in MICROSPEC_FIELDS if field.type != 'string'):
-        _check(type(value[key]) is list, f'MicroSpec {key} must be a list')
-        for item in value[key]:
-            _text(item, 'MicroSpec ' + key + ' item')
+        _check(type(value[key]) is list, f'MicroSpec {key}: expected sequence of non-empty strings, got {_kind(value[key])}')
+        for index, item in enumerate(value[key]):
+            _microspec_text(item, f'{key}[{index}]')
         lists[key] = tuple(value[key])
     return MicroSpec(value['id'], value['goal'], **lists)
+
+
+def microspec_guidance(format: str) -> str:
+    """Provider-facing MicroSpec content rules generated from MICROSPEC_FIELDS."""
+    _check(format in ('yaml', 'json'), 'MicroSpec requires yaml or json')
+    yaml = format == 'yaml'
+    doc, string, sequence = ('YAML mapping', 'YAML string', 'YAML sequence') if yaml else \
+        ('JSON object', 'JSON string', 'JSON array')
+    lines = [f'MICROSPEC CONTENT RULES ({format})',
+             f'Content is one {doc} with these required top-level keys: '
+             + ', '.join(field.name for field in MICROSPEC_FIELDS) + '.']
+    for field in MICROSPEC_FIELDS:
+        if field.type == 'string':
+            lines.append(f'- {field.name}: one non-empty {string}.')
+        else:
+            empty = ' (may be empty: [])' if field.empty_allowed else ''
+            lines.append(f'- {field.name}: a {sequence}{empty}; each item is one non-empty {string}.')
+    lines.append('Every list item is a single scalar string: never a mapping, never a nested sequence, '
+                 'and never null, a number or a boolean.')
+    if yaml:
+        lines += ['Quote every list item as a double-quoted YAML string. Unquoted YAML-significant syntax '
+                  'changes the parsed type; in particular an item containing ": " parses as a mapping '
+                  'unless quoted. Also quote id and goal when they contain YAML-significant syntax.',
+                  'Correct:   - "task_queue.py: preserve FIFO ordering"',
+                  'Incorrect: - task_queue.py: preserve FIFO ordering']
+    return '\n'.join(lines)
 
 
 @dataclass(frozen=True, slots=True)

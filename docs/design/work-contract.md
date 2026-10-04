@@ -100,6 +100,25 @@ not forbid empty lists, so empty collections are accepted. It also allows extens
 optional/unknown fields are not rejected or transformed. Original bytes, including
 those fields, remain in the artifact; the typed result exposes only required concepts.
 
+Rejections name the narrowest location and the parsed type, never the rejected
+value (V2-003D):
+
+```text
+MicroSpec root: expected mapping, got sequence
+MicroSpec scope: missing required field
+MicroSpec goal: expected non-empty string, got null
+MicroSpec scope: expected sequence of non-empty strings, got string
+MicroSpec scope[1]: expected non-empty string, got mapping
+MicroSpec acceptance[0]: expected non-empty string, got empty string
+```
+
+Parsed type names are `string`, `empty string` (empty or whitespace-only), `mapping`,
+`sequence`, `null`, `boolean`, `integer`, `number`, `timestamp`, `binary` and
+`unsupported value`. Workspace and ContextualExecutor context is prefixed as before,
+e.g. `bugfix.SPECIFY_FIX[0]: artifact fix_microspec: MicroSpec scope[0]: ...`. YAML
+syntax errors keep their line/column-only messages. Acceptance and rejection are
+unchanged, and a rejected artifact still commits no version and no handoff.
+
 YAML uses the existing strict parser (duplicate keys, unsafe tags, aliases and merges
 rejected). JSON rejects malformed data, duplicate keys and nonstandard NaN/Infinity
 literals. Without a schema, structured artifacts need only be format-valid; markdown

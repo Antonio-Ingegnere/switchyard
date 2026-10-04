@@ -246,3 +246,29 @@ v2_004e_claude_structured_output_transport:
   live_part_a_attempts: 3
   live_part_b_attempts: 0
   next: Any further Part A live attempt requires separate explicit authorization after V2-004E.
+
+v2_003d_microspec_contract_diagnostics:
+  trigger_attempt_4: |
+    Part A attempt 4 (2026-10-04, after V2-004E): TRIAGE ready with bug_spec v1;
+    REPRODUCE ready with reproduction_evidence v1; DIAGNOSE ready without escalation
+    with diagnosis v1; three handoffs committed. SPECIFY_FIX (claude-sonnet, sonnet,
+    medium, [repo_read]) exited 0 and its StageResult decoded, then fix_microspec
+    failed MicroSpec validation ("invalid MicroSpec scope item"): at least one scope
+    item parsed as a non-string. Rejected content was not retained; no SPECIFY_FIX
+    artifact or handoff was committed. FIX and VERIFY were not reached; target source
+    and tests unchanged.
+  plausible_cause: 'An unquoted YAML "key: value" list item parses as a mapping; one plausible way, not confirmed.'
+  resolution: |
+    V2-003D (docs/plans/v2-003d-microspec-contract-diagnostics.yaml): content-free
+    field[index]/parsed-type diagnostics and validator-derived YAML string/quoting
+    guidance for microspec artifacts. Validation remains strict; no repair or retry.
+  reproduction_evidence_limitation: |
+    Switchyard proved REPRODUCE was granted repo_read and command (not repo_write) and
+    committed reproduction_evidence consistent with the independently verified failing
+    baseline. It did not independently observe the provider's command tool call. The
+    V2-003D audit found supported stream-json (Claude) and exec --json (Codex) event
+    streams that could provide sanitized tool-use facts in a separate slice.
+  attempt_history: Attempts 1-4 preserved.
+  live_part_a_attempts: 4
+  live_part_b_attempts: 0
+  next: Part A attempt 5 requires separate explicit authorization.

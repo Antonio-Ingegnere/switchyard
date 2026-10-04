@@ -13,6 +13,7 @@ from typing import Mapping
 from runtime import DiagnosticPayload, MAX_DIAGNOSTIC_BYTES
 from runtime.command import Command
 from .context_transport import StageInvocation, StageResult, StageHandoff, ProducedArtifact
+from .work_contract import microspec_guidance
 from .workflow_bundle import ExecutionProfile, CommandSpec
 from .workflow_compiler import ExecutionBinding
 from .provider_process import ProviderExecutionError, execute
@@ -128,6 +129,9 @@ def render_invocation(invocation: StageInvocation) -> str:
                  'or produced_artifacts fields. '
                  'Evidence entries must be declared logical artifact names from evidence_artifacts, never paths. '
                  'Repository observations belong in summary/findings.')
+    # MicroSpec content rules come from the validator's own field definitions (V2-003D).
+    for format in dict.fromkeys(a.format for a in invocation.output_contract.artifacts if a.schema == 'microspec'):
+        parts.append(microspec_guidance(format))
     parts.append('OUTPUT CONTRACT\n'+result_contract_text()+'\nMatch this schema. '
                  'Do not wrap it in prose or markdown. Handoff is bounded reasoning, not a transcript.\n'+_json(result_schema(invocation.output_contract)))
     return '\n\n'.join(parts)
