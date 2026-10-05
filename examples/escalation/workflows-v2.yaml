@@ -1,0 +1,42 @@
+# Bounded hypothesis/challenge/independent-assessment example. No repository tools.
+version: 2
+artifacts:
+  request: {format: markdown, source: request}
+  reproduction_evidence: {format: markdown}
+profiles:
+  claude-haiku: {provider: claude, model: haiku}
+  claude-sonnet: {provider: claude, model: sonnet}
+  codex: {provider: codex, model: codex}
+roles:
+  assessor:
+    primary:
+      profile: claude-haiku
+      effort: medium
+      outcomes: [inconclusive]
+    escalation:
+      - kind: vertical
+        on: [inconclusive]
+        profile: claude-sonnet
+        effort: high
+        context: continue
+        outcomes: [diagnosis_disproved]
+      - kind: horizontal
+        on: [diagnosis_disproved]
+        profile: codex
+        effort: high
+        context: fresh
+        outcomes: [ready]
+flows:
+  escalation:
+    entry: ASSESS
+    run_budget: {max_invocations: 3, on_exceeded: NEEDS_HUMAN}
+    states:
+      ASSESS:
+        role: assessor
+        capabilities: []
+        budget: {max_invocations: 3, max_state_visits: 1, on_exceeded: NEEDS_HUMAN}
+        consumes: [request, reproduction_evidence]
+        escalation_exhausted: NEEDS_HUMAN
+        on: {ready: ASSESSED}
+      ASSESSED: {terminal: true}
+      NEEDS_HUMAN: {terminal: true}

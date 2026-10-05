@@ -1,6 +1,6 @@
 id: V2-006
 goal: Prove canonical BUGFIX and real cross-provider escalation through the existing V2 pipeline.
-status: capability_prerequisites_addressed_live_work_pending
+status: complete
 scope:
   - Disposable dependency-free priority/FIFO queue bug fixture and canonical bugfix runner proof.
   - Separate small example workflow proving Claude to Claude to Codex through ordinary V2 control flow.
@@ -184,6 +184,59 @@ v2_004b_resolution:
   live_part_b_attempts: 0
   completion: V2-006 remains pending; no live attempt performed in V2-004B.
 
+resume_implementation_plan_2026_10_04:
+  fixture: Three unittest acceptance cases; only remove-then-insert FIFO fails on the committed fixture.
+  harness: examples/delivery/dogfood_bugfix.py composes existing execute_v2_workflow once per selected part; no routing or retry implementation.
+  part_b: examples/escalation/workflows-v2.yaml with explicit empty capabilities and three singleton outcomes; fixed cache evidence requires no repository tools.
+  evidence: Event recorder samples the existing ContextualExecutor context builder at invocation admission, retaining only binding, artifact versions/digests and previous handoff identity; offline process logs verify agreement with actual provider input.
+  baseline: Run canonical verifier with verbose reporting; assert exactly two passing tests and one named FIFO failure before any model invocation.
+  assertions: Immutable request, schema-valid artifacts, source modification, unchanged acceptance oracle, canonical verifier pass; exact Part B sequence and handoff identities.
+  failure: Preserve report/events/work/target even on failure; no retry or repair.
+
+offline_gate_2026_10_04:
+  new_tests: 5 passed, including both full fake-process paths, invalid baselines, acceptance integrity and failure retention.
+  focused_regressions: 136 passed.
+  full_suite: 439 tests; 437 passed, 1 unchanged known local SIGKILL failure, 1 existing platform skip; zero new failures.
+  authentication: Claude local auth status succeeds outside filesystem sandbox; no model call used for this check.
+  local_config: Existing V2-005 model aliases copied to an external temporary file, not committed.
+  next: One authorized Part A attempt, then one Part B attempt unless a genuine defect stops work.
+
+first_live_bugfix_attempt_2026_10_04:
+  part_a_attempts: 1
+  part_b_attempts: 0
+  baseline: All three fixture tests ran; priority and ordinary FIFO passed; only remove-then-insert FIFO failed as expected.
+  authentication: Local Claude authentication succeeded in the same external execution environment before the run.
+  compilation: Canonical BUGFIX compiled eagerly using unchanged workflow graph and the existing external Codex alias mapping.
+  invocation: {state: TRIAGE, rung: 0, provider: claude, profile: claude-haiku, model_selector: haiku, resolved_model: haiku, effort: medium, capabilities: [repo_read]}
+  failure: 'ProviderExecutionError: provider exited with status 1'
+  stderr_diagnostics: Empty.
+  terminal: null
+  event_sequence: [run_started, state_entered, invocation_started, run_error]
+  artifacts: {request: [1]}
+  handoff_count: 0
+  request_unchanged: true
+  source_and_acceptance_tests_unchanged: true
+  later_stages: REPRODUCE, DIAGNOSE, SPECIFY_FIX, FIX and VERIFY were not reached.
+  classification: Provider execution failure; provider-adapter diagnostics do not expose the underlying reason.
+  diagnostic_gap: |
+    ClaudeStageExecutor calls _success before decoding the stdout result envelope.
+    _success forwards only the stderr diagnostic tail for a nonzero exit. The bounded
+    stdout result is not included in the exception or retained by the dogfood harness.
+    This attempt supplied empty stderr, so its exact provider-side rejection reason
+    is unavailable. No unsupported conclusion about model, effort, authentication or
+    tool policy is asserted. No local debug evidence was available to recover it.
+  smallest_focused_fix: |
+    Provider adapter should surface bounded sanitized details from a provider error
+    envelope on nonzero exit while preserving strict success parsing, no retries and
+    existing diagnostic bounds. Add an offline fake-Claude regression for a nonzero
+    exit with error JSON on stdout and empty stderr. Do not rerun this attempt to
+    capture the lost response; another live attempt requires separate authorization.
+  evidence_root: /tmp/switchyard-v2-006-live-a-20261004
+  retained: [target, work, events.jsonl, observations.jsonl, baseline-files.json, baseline-verification.txt, changed-files.json, report.json, failure-audit.json]
+  console_log: /tmp/switchyard-v2-006-live-a-console.log
+  intervention: No harness retry, manual artifact repair, source intervention, provider substitution or configuration workaround.
+  completion: V2-006 incomplete. Part B not started under the stop-on-provider/framework-failure rule. No completion commit.
+
 v2_004c_provider_failure_diagnostics:
   trigger: |
     First real Part A attempt (2026-10-04) failed at TRIAGE rung 0
@@ -205,6 +258,54 @@ v2_004c_provider_failure_diagnostics:
   live_part_a_attempts: 1
   live_part_b_attempts: 0
   next: Another live Part A attempt requires explicit authorization after V2-004C.
+
+second_live_bugfix_attempt_2026_10_04:
+  authorization: Exactly one new live Part A attempt after V2-004C (d246dc9); Part B not authorized.
+  offline_gate: Run with TERM=dumb. V2-006 offline 5, V2-004C 14, V2-004B 6 and V2-005 4 passed; full suite 453 tests, 451 passed, 1 unchanged known local SIGKILL failure, 1 existing platform skip; zero new failures.
+  preflight: Fixture digests identical to attempt 1 baseline; canonical workflows-v2.yaml unchanged from HEAD; Claude auth status logged in (no model call); same external alias file mapping only the Codex selector.
+  fresh_root: /tmp/switchyard-v2-006-live-a2-20261004
+  console_log: /tmp/switchyard-v2-006-live-a2-console.log
+  baseline: Verified by harness before any model call; priority and ordinary FIFO passed, only remove-then-insert FIFO failed.
+  part_a_attempts: 2
+  part_b_attempts: 0
+  invocation: {state: TRIAGE, rung: 0, provider: claude, profile: claude-haiku, model_selector: haiku, resolved_model: haiku, effort: medium, capabilities: [repo_read]}
+  failure: 'ProviderExecutionError: provider exited with status 1'
+  returncode: 1
+  preserved_diagnostics: |
+    claude result: subtype=error_max_structured_output_retries, terminal_reason=structured_output_retry_exhausted, is_error=true
+    error: Failed to provide valid structured output after 1 attempts — last StructuredOutput error: Output does not match required schema: root: must have required property 'handoff', root: must have required property 'diagnostics'
+    permission_denials: Read
+  terminal: null
+  event_sequence: [run_started, state_entered, invocation_started, run_error]
+  artifacts: {request: [1]}
+  handoff_count: 0
+  request_unchanged: true
+  target_files_unchanged: true
+  duration_seconds: 28.8
+  later_stages: REPRODUCE, DIAGNOSE, SPECIFY_FIX, FIX and VERIFY were not reached.
+  classification: |
+    Structured-output conformance failure. Haiku returned a StructuredOutput object
+    omitting the required nullable keys handoff and diagnostics; the CLI rejected it
+    against the adapter's --json-schema and, with MAX_STRUCTURED_OUTPUT_RETRIES=1,
+    exited after one attempt. Secondary observation: one Read tool use was denied
+    despite the repo_read grant; its input is intentionally not retained, so the cause
+    (e.g. a path outside the configured working directory) is not established.
+    Not authentication, model availability, effort configuration or runtime.
+  contributing_adapter_wording: |
+    render_invocation tells the provider that a handoff "remains optional" and never
+    mentions the diagnostics key, while result_schema requires all four keys with
+    null permitted. The instruction and schema disagree about omission versus null.
+  smallest_focused_fix: |
+    Separate provider-adapter slice: state explicitly in the rendered output contract
+    that outcome, produced_artifacts, handoff and diagnostics must always be present,
+    using null (or []) when not applicable, and that "optional" means nullable, not
+    omittable. Keep the strict schema/parser, single CLI attempt and no Switchyard
+    retry. Optionally retain the sanitized permission-denial reason (not tool input)
+    to diagnose the Read denial. Offline regression on the rendered wording. Another
+    live attempt requires separate authorization.
+  intervention: No harness retry, manual artifact repair, source intervention, provider substitution, schema change or configuration workaround.
+  retained: [target, work, events.jsonl, observations.jsonl, baseline-files.json, baseline-verification.txt, changed-files.json, report.json, failure-audit.json]
+  completion: V2-006 incomplete. Part B not attempted. No commit.
 
 v2_004d_structured_output_alignment:
   trigger: |
@@ -228,6 +329,54 @@ v2_004d_structured_output_alignment:
   live_part_b_attempts: 0
   next: Part A attempt 3 requires explicit authorization after V2-004D.
 
+third_live_bugfix_attempt_2026_10_04:
+  authorization: Exactly one new live Part A attempt after V2-004D (3933073); Part B not authorized; no full-suite rerun required.
+  preflight: Claude auth logged in; workflows-v2.yaml unchanged since 9328ade; alias file external and its value absent from tracked files; fixture digests identical to attempts 1/2; fresh root; baseline valid on a throwaway copy and again inside the attempt target.
+  fresh_root: /tmp/switchyard-v2-006-live-a3-20261004
+  console_log: /tmp/switchyard-v2-006-live-a3-console.log
+  part_a_attempts: 3
+  part_b_attempts: 0
+  invocation: {state: TRIAGE, rung: 0, provider: claude, profile: claude-haiku, model_selector: haiku, resolved_model: haiku, effort: medium, capabilities: [repo_read]}
+  rendered_contract: V2-004D mandatory-key OUTPUT CONTRACT in effect (working tree at 3933073).
+  failure: 'ProviderExecutionError: provider exited with status 1'
+  returncode: 1
+  preserved_diagnostics: |
+    claude result: subtype=error_max_structured_output_retries, terminal_reason=structured_output_retry_exhausted, is_error=true
+    error: Failed to provide valid structured output after 1 attempts — last StructuredOutput error: Output does not match required schema: root: must have required property 'handoff', root: must have required property 'diagnostics'
+  permission_denials: None reported this attempt; the attempt 2 Read denial was not causal.
+  terminal: null
+  event_sequence: [run_started, state_entered, invocation_started, run_error]
+  artifacts: {request: [1]}
+  handoff_count: 0
+  request_unchanged: true
+  target_files_unchanged: true
+  duration_seconds: 21.6
+  later_stages: REPRODUCE, DIAGNOSE, SPECIFY_FIX, FIX and VERIFY were not reached.
+  classification: |
+    Claude structured-output transport limitation, not instruction wording. Same
+    missing handoff/diagnostics keys after V2-004D made the prompt explicit. Offline
+    inspection of installed Claude Code 2.1.282: --json-schema becomes a StructuredOutput
+    tool whose input is validated with Ajv after generation; strict (constrained)
+    tool input is gated by tengu_structured_output_strict, default false. Non-strict
+    tool input from Haiku omitted null-valued required keys. Retained evidence does not
+    show whether the model omitted them or tool-input handling dropped nulls; raw tool
+    input is intentionally not retained. Either way the provider side cannot reliably
+    produce "required key, null value" through this path. Not permission,
+    authentication, model availability, effort or runtime.
+  smallest_focused_fix: |
+    Decision required (touches the V2-004D "do not loosen schema" rule). Recommended:
+    a Claude-adapter-only wire projection. Send Claude the same schema except nullable
+    keys (handoff, diagnostics) are not listed as required, then map an absent nullable
+    key to null in ClaudeStageExecutor before the unchanged strict parse_stage_result.
+    outcome and produced_artifacts stay required; extra keys stay rejected; Codex keeps
+    the all-required schema its strict structured outputs need. Derive the projection
+    from RESULT_FIELDS. Alternatives with larger trade-offs: allow CLI schema retries
+    (MAX_STRUCTURED_OUTPUT_RETRIES above 1) or a non-Haiku TRIAGE profile, which would
+    not fix later Haiku rungs. Another live attempt requires separate authorization.
+  intervention: No harness retry, manual artifact repair, source intervention, provider substitution, schema change or configuration workaround.
+  retained: [target, work, events.jsonl, observations.jsonl, baseline-files.json, baseline-verification.txt, changed-files.json, report.json, failure-audit.json]
+  completion: V2-006 incomplete. Part B not attempted. No commit.
+
 v2_004e_claude_structured_output_transport:
   trigger: |
     Part A attempt 3 (2026-10-04, after V2-004D) failed at TRIAGE rung 0 (claude,
@@ -246,6 +395,54 @@ v2_004e_claude_structured_output_transport:
   live_part_a_attempts: 3
   live_part_b_attempts: 0
   next: Any further Part A live attempt requires separate explicit authorization after V2-004E.
+
+fourth_live_bugfix_attempt_2026_10_04:
+  authorization: Exactly one new live Part A attempt after V2-004E (2ae49ea); Part B not authorized; no full-suite rerun required.
+  preflight: Claude auth logged in; workflows-v2.yaml unchanged since 9328ade; alias file external and its value absent from tracked files; fixture digests identical to attempts 1-3; fresh root; baseline valid on a throwaway copy and inside the attempt target.
+  fresh_root: /tmp/switchyard-v2-006-live-a4-20261004
+  console_log: /tmp/switchyard-v2-006-live-a4-console.log
+  part_a_attempts: 4
+  part_b_attempts: 0
+  state_sequence: [TRIAGE, REPRODUCE, DIAGNOSE, SPECIFY_FIX]
+  invocations:
+    - {state: TRIAGE, rung: 0, profile: claude-haiku, model_selector: haiku, resolved_model: haiku, effort: medium, capabilities: [repo_read], outcome: ready}
+    - {state: REPRODUCE, rung: 0, profile: claude-haiku, model_selector: haiku, resolved_model: haiku, effort: medium, capabilities: [repo_read, command], outcome: ready}
+    - {state: DIAGNOSE, rung: 0, profile: claude-haiku, model_selector: haiku, resolved_model: haiku, effort: medium, capabilities: [repo_read, command], outcome: ready}
+    - {state: SPECIFY_FIX, rung: 0, profile: claude-sonnet, model_selector: sonnet, resolved_model: sonnet, effort: medium, capabilities: [repo_read], outcome: null}
+  v2_004e_effect: Claude structured-output transport succeeded for all four Claude invocations; no provider process failure.
+  committed_before_failure:
+    artifacts: {request: [1], bug_spec: [1], reproduction_evidence: [1], diagnosis: [1]}
+    handoff_count: 3
+    content: bug_spec is a valid MicroSpec; reproduction_evidence and diagnosis identify the len(self._pending) heap tiebreaker reuse after pop and report the single expected FIFO failure.
+  reproduce_execution_note: Retained evidence shows test results consistent with a real run, but tool/command execution by the provider is not independently recorded by the harness.
+  failure: 'ExecutionError: executor raised in state @v2:bugfix:SPECIFY_FIX:0'
+  cause_chain: ['WorkContractError: bugfix.SPECIFY_FIX[0]: artifact fix_microspec: invalid MicroSpec scope item']
+  returncode: 0
+  provider_diagnostics: None; provider process and StageResult decoding succeeded.
+  event_sequence: [run_started, state_entered, invocation_started, invocation_finished, transition_selected, state_exited, state_entered, invocation_started, invocation_finished, transition_selected, state_exited, state_entered, invocation_started, invocation_finished, transition_selected, state_exited, state_entered, invocation_started, run_error]
+  terminal: null
+  request_unchanged: true
+  target_files_unchanged: true
+  duration_seconds: 92.4
+  later_stages: FIX and VERIFY were not reached; no source change attempted.
+  classification: |
+    Produced-artifact contract violation at SPECIFY_FIX. Sonnet returned a structurally
+    valid StageResult whose fix_microspec YAML content had at least one scope list item
+    that was not a nonempty string; ContextualExecutor validation correctly rejected
+    the artifact before commit. Not structured-output transport, permissions, auth,
+    model availability or runtime. The rejected content is not retained, so the exact
+    item is unknown; an unquoted "file: description" scope entry parsing as a YAML
+    mapping is a plausible but unconfirmed cause.
+  smallest_next_action: |
+    Observability first, as in V2-004C: make MicroSpec validation errors name the
+    field, item index and offending parsed type (no content), so a rejection is
+    diagnosable. Then, if confirmed or separately approved, tighten the shared microspec
+    rendering guidance (list items are plain single-line strings; quote YAML items
+    containing ': '). Keep strict validation; no retry or repair. Another live attempt
+    requires separate authorization.
+  intervention: No harness retry, manual artifact repair, source intervention, provider substitution or configuration workaround.
+  retained: [target, work, events.jsonl, observations.jsonl, baseline-files.json, baseline-verification.txt, changed-files.json, report.json, failure-audit.json]
+  completion: V2-006 incomplete. Part B not attempted. No commit.
 
 v2_003d_microspec_contract_diagnostics:
   trigger_attempt_4: |
@@ -272,6 +469,96 @@ v2_003d_microspec_contract_diagnostics:
   live_part_a_attempts: 4
   live_part_b_attempts: 0
   next: Part A attempt 5 requires separate explicit authorization.
+
+fifth_live_bugfix_attempt_2026_10_05:
+  authorization: Exactly one new live Part A attempt after V2-003D (0eb51e0); no Part B, telemetry or framework
+    slice; no full-suite rerun.
+  preflight: Claude authentication active outside filesystem sandbox; workflow byte-identical to accepted
+    9328ade; existing external aliases unchanged and resolved alias absent from tracked files; fixture and
+    fresh target digests match attempt 4 baseline; fresh empty work directory; no workspace state reused.
+    Canonical baseline verifier with verbose reporting confirmed only test_fifo_after_remove_then_insert
+    fails and both unrelated tests pass.
+  launch_gate: External /tmp/switchyard-v2-006-attempt5.py delegates to the existing unmodified dogfood
+    harness exactly once. It adds pre-provider assertions to the existing baseline call; no replacement
+    executor, provider dispatch, retry or repair.
+  fresh_root: /tmp/switchyard-v2-006-live-a5-20261005
+  console_log: /tmp/switchyard-v2-006-live-a5-console.log
+  part_a_attempts: 5
+  part_b_attempts: 0
+  terminal: null
+  state_sequence:
+  - TRIAGE
+  invocation:
+    failing_state: TRIAGE
+    rung: 0
+    provider: claude
+    profile: claude-haiku
+    model_selector: haiku
+    resolved_model: haiku
+    effort: medium
+    capabilities:
+    - repo_read
+  failure: 'ExecutionError: executor raised in state @v2:bugfix:TRIAGE:0'
+  cause_chain:
+  - 'WorkContractError: bugfix.TRIAGE[0]: invalid logical identifier'
+  - 'WorkContractError: invalid logical identifier'
+  returncode: 0
+  returncode_basis: 'Inferred from ClaudeStageExecutor control flow: nonzero return or unsuccessful envelope
+    would raise ProviderExecutionError before workspace validation.'
+  provider_diagnostics: No provider diagnostics retained by the existing harness for this WorkContractError.
+  event_sequence:
+  - run_started
+  - state_entered
+  - invocation_started
+  - run_error
+  artifacts:
+    request:
+    - 1
+  handoff_count: 0
+  request_unchanged: true
+  target_files_unchanged: true
+  acceptance_tests_unchanged: true
+  changed_files: []
+  duration_seconds: 23.158
+  classification: Work-contract rejection after successful Claude process and StageResult decoding; code-path
+    analysis identifies an invalid handoff evidence logical identifier.
+  diagnostic_inference: Handoff metadata comes from the valid canonical binding; produced_artifacts names
+    are checked against declared outputs. The remaining provider-controlled logical identifiers validated
+    by _handoff are handoff.evidence entries. The rejected entry and index are not retained.
+  v2_003d: Guidance and strict validator remain unchanged at 0eb51e0. SPECIFY_FIX was not reached, so this
+    attempt does not establish live fix_microspec success after V2-003D.
+  later_stages: REPRODUCE, DIAGNOSE, SPECIFY_FIX, FIX and VERIFY not reached; no verifier_evidence.
+  reproduction_evidence_limitation: 'Attempt #5 never reached REPRODUCE. The following approved claim applies
+    only to the preserved attempt #4 evidence.'
+  preserved_attempt_4_evidence_claim: 'REPRODUCE was granted repo_read + command and produced reproduction
+    evidence consistent with the independently verified baseline.
+
+
+    Successful command-tool use was not independently observed by Switchyard.'
+  smallest_next_action: Separate focused content-free handoff-validation diagnostics identifying field/index/type
+    and logical-identifier versus catalog-membership failure; keep validation strict. No retry authorized.
+    Exact rejected value cannot be recovered from retained evidence.
+  retained:
+  - target/
+  - work/
+  - work/manifest.jsonl
+  - events.jsonl
+  - observations.jsonl
+  - baseline-files.json
+  - baseline-verification.txt
+  - preflight.json
+  - changed-files.json
+  - report.json
+  - failure-audit.json
+  artifact_directories: 'No work/artifacts/ or work/handoffs/ created: no provider artifact or handoff committed.
+    Immutable request retained as work/request.md.'
+  retention: No credentials, complete provider transcripts, raw tool inputs or rejected content retained
+    in attempt evidence; no new telemetry channel.
+  intervention: No workflow/provider/runtime changes, retry, artifact repair, source fix, substitution,
+    telemetry, or Part B. External launch gate only asserts auth, canonical config, fresh directories, fixture
+    digests and existing baseline before the unmodified harness invokes the workflow.
+  completion: V2-006 incomplete. Attempts 1-4 preserved. Part B not started; no commit. Stopped after this
+    one authorized attempt.
 
 
 v2_003e_handoff_contract_diagnostics:
@@ -307,6 +594,98 @@ v2_003e_handoff_contract_diagnostics:
     through the current adapter. No telemetry change in this slice.
   next: Part A attempt 6 requires separate explicit authorization; not authorized or run. Part B remains unattempted.
 
+sixth_live_bugfix_attempt_2026_10_05:
+  authorization: Exactly one new live Part A attempt after V2-003E (363cd5e); no Part B; minimal preflight
+    only, no full-suite rerun.
+  preflight: 'All checks passed before the first provider invocation: active Claude authentication; canonical
+    workflow byte-identical to accepted 9328ade; existing external/untracked model aliases unchanged; framework/config
+    unchanged; fresh copied fixture and empty work directory; fixture and target digests match established
+    baseline; only test_fifo_after_remove_then_insert fails, unrelated priority and ordinary FIFO tests
+    pass; no workspace/artifact state from attempts 1-5 reused.'
+  launch_gate: External /tmp/switchyard-v2-006-attempt6.py delegates once to the existing unmodified harness.
+    It adds pre-provider assertions and read-only rendered-contract checks; no replacement dispatch or workflow
+    semantics.
+  guidance: Read-only pre-provider inspection confirmed V2-003E handoff guidance with the actual catalog
+    and V2-003D SPECIFY_FIX output guidance; no rendered prompt retained.
+  fresh_root: /tmp/switchyard-v2-006-live-a6-20261005
+  console_log: /tmp/switchyard-v2-006-live-a6-console.log
+  part_a_attempts: 6
+  part_b_attempts: 0
+  run_id: run:235490f4-1ddc-4111-835a-1661197c3f0b
+  terminal: null
+  state_sequence:
+  - TRIAGE
+  invocation:
+    failing_state: TRIAGE
+    rung: 0
+    provider: claude
+    profile: claude-haiku
+    model_selector: haiku
+    resolved_model: haiku
+    effort: medium
+    capabilities:
+    - repo_read
+  failure_boundary: Produced-artifact work-contract validation of bug_spec after successful provider process
+    and StageResult parsing; before handoff validation or persistence.
+  failure: 'ExecutionError: executor raised in state @v2:bugfix:TRIAGE:0'
+  work_contract_diagnostic: 'bugfix.TRIAGE[0]: artifact bug_spec: MicroSpec acceptance: missing required
+    field'
+  field: acceptance
+  index: null
+  category: missing required field
+  returncode: 0
+  returncode_basis: 'Inferred from existing ClaudeStageExecutor control flow: downstream artifact WorkContractError
+    is reached only after exit 0, successful envelope and StageResult parsing.'
+  provider_diagnostics: None retained by the existing harness for this downstream WorkContractError.
+  event_sequence:
+  - run_started
+  - state_entered
+  - invocation_started
+  - run_error
+  artifacts:
+    request:
+    - 1
+  handoff_count: 0
+  request_unchanged: true
+  target_files_unchanged: true
+  acceptance_tests_unchanged: true
+  changed_files: []
+  duration_seconds: 20.333
+  rejected_content_retained: false
+  classification: Provider-produced bug_spec omitted the required MicroSpec acceptance field. Strict validator
+    correctly rejected it before persistence. No evidence of transport, authentication, permission or runtime
+    failure.
+  accepted_prerequisites: No regression established in V2-004C/D/E or V2-003D/E. V2-003D correctly identified
+    the missing required MicroSpec field. Handoff validation was not reached.
+  later_states: REPRODUCE, DIAGNOSE, SPECIFY_FIX, FIX and VERIFY not reached; no verifier_evidence.
+  reproduction_evidence_limitation: REPRODUCE was not reached in attempt 6; no reproduction evidence or
+    command-use claim is made for this attempt. The previously approved observability limitation remains
+    unchanged.
+  smallest_next_action: Separately scoped provider-output conformance investigation focused on required-field
+    completeness of TRIAGE bug_spec. Existing guidance already declares acceptance required and strict validation
+    correctly rejects its absence; no framework regression or further diagnostic fix is established. Keep
+    validation unchanged. Any further live attempt requires separate explicit authorization.
+  retained:
+  - target/
+  - work/
+  - work/manifest.jsonl
+  - work/request.md
+  - events.jsonl
+  - observations.jsonl
+  - baseline-files.json
+  - baseline-verification.txt
+  - preflight.json
+  - changed-files.json
+  - report.json
+  - failure-audit.json
+  artifact_directories: No work/artifacts/ or work/handoffs/ were created because no provider outputs committed.
+  retention: No credentials, complete provider transcripts, raw tool inputs or rejected contract values
+    retained in attempt evidence.
+  intervention: None. Exactly one canonical workflow run; no retry, repair, source fix, substitution, telemetry,
+    framework change or Part B.
+  completion: Part A attempt 6 failed. V2-006 incomplete; attempts 1-5 preserved exactly. No commit, no
+    Part B. Stopped; further live execution requires separate authorization.
+
 
 v2_001f_bugfix_triage_profile_correction:
   trigger_attempt_6: |
@@ -333,3 +712,584 @@ v2_001f_bugfix_triage_profile_correction:
   live_part_b_attempts: 0
   live_calls_in_v2_001f: 0
   next: Any next live Part A attempt requires separate explicit authorization. Attempt 7 was not authorized or run; Part B remains unattempted.
+
+seventh_live_bugfix_attempt_2026_10_05:
+  authorization: Exactly one real canonical Part A run after V2-001F ddd61df; no Part B, no retry, no full-suite
+    rerun.
+  preflight: Claude authentication active; workflow byte-identical to committed ddd61df with Sonnet TRIAGE;
+    external aliases unchanged/untracked; framework unchanged; fresh target and empty work directory; copied
+    fixture digests match established baseline; only test_fifo_after_remove_then_insert fails and both unrelated
+    tests pass; no workspace/artifact state reused from attempts 1-6.
+  contract_preflight: Read-only rendering confirmed actual Sonnet/medium/repo_read-only TRIAGE binding,
+    full MicroSpec/YAML/StageResult/handoff guidance and dynamic catalog; SPECIFY_FIX retains MicroSpec
+    guidance.
+  launch_gate: External /tmp/switchyard-v2-006-attempt7.py adds only preflight assertions/read-only contract
+    inspection and delegates exactly once to the existing unmodified harness.
+  part_a_attempts: 7
+  part_b_attempts: 0
+  status: passed
+  terminal: READY_FOR_MANUAL_QA
+  run_id: run:e600ddd2-cfd2-4778-9744-fdfe96b1ce51
+  duration_seconds: 140.512
+  state_sequence:
+  - TRIAGE
+  - REPRODUCE
+  - DIAGNOSE
+  - SPECIFY_FIX
+  - FIX
+  - VERIFY
+  - READY_FOR_MANUAL_QA
+  invocations:
+  - state: TRIAGE
+    rung: 0
+    provider: claude
+    profile: claude-sonnet
+    model_selector: sonnet
+    resolved_model: sonnet
+    effort: medium
+    capabilities:
+    - repo_read
+    outcome: ready
+    context_mode: null
+    previous_handoff: null
+  - state: REPRODUCE
+    rung: 0
+    provider: claude
+    profile: claude-haiku
+    model_selector: haiku
+    resolved_model: haiku
+    effort: medium
+    capabilities:
+    - repo_read
+    - command
+    outcome: ready
+    context_mode: null
+    previous_handoff: null
+  - state: DIAGNOSE
+    rung: 0
+    provider: claude
+    profile: claude-haiku
+    model_selector: haiku
+    resolved_model: haiku
+    effort: medium
+    capabilities:
+    - repo_read
+    - command
+    outcome: ready
+    context_mode: null
+    previous_handoff: null
+  - state: SPECIFY_FIX
+    rung: 0
+    provider: claude
+    profile: claude-sonnet
+    model_selector: sonnet
+    resolved_model: sonnet
+    effort: medium
+    capabilities:
+    - repo_read
+    outcome: ready
+    context_mode: null
+    previous_handoff: null
+  - state: FIX
+    rung: 0
+    provider: claude
+    profile: claude-sonnet
+    model_selector: sonnet
+    resolved_model: sonnet
+    effort: medium
+    capabilities:
+    - repo_read
+    - repo_write
+    - command
+    outcome: ready
+    context_mode: null
+    previous_handoff: null
+  - state: VERIFY
+    rung: 0
+    provider: command
+    profile: command
+    model_selector: null
+    resolved_model: null
+    effort: null
+    capabilities: null
+    outcome: pass
+    context_mode: null
+    previous_handoff: null
+  event_sequence:
+  - run_started
+  - state_entered
+  - invocation_started
+  - invocation_finished
+  - transition_selected
+  - state_exited
+  - state_entered
+  - invocation_started
+  - invocation_finished
+  - transition_selected
+  - state_exited
+  - state_entered
+  - invocation_started
+  - invocation_finished
+  - transition_selected
+  - state_exited
+  - state_entered
+  - invocation_started
+  - invocation_finished
+  - transition_selected
+  - state_exited
+  - state_entered
+  - invocation_started
+  - invocation_finished
+  - transition_selected
+  - state_exited
+  - state_entered
+  - invocation_started
+  - invocation_finished
+  - transition_selected
+  - state_exited
+  - state_entered
+  - state_exited
+  - run_finished
+  artifacts:
+    request:
+    - 1
+    implementation_handoff:
+    - 1
+    verifier_evidence:
+    - 1
+    bug_spec:
+    - 1
+    reproduction_evidence:
+    - 1
+    diagnosis:
+    - 1
+    fix_microspec:
+    - 1
+  artifact_records:
+  - name: request
+    version: 1
+    path: request.md
+    format: markdown
+    schema: null
+    sha256: c055a01bfb723d1c177175030f32ec67b30fd9fe866f644071e2640950ed9ea5
+    byte_size: 355
+    producer: null
+  - name: implementation_handoff
+    version: 1
+    path: artifacts/implementation_handoff/000001.md
+    format: markdown
+    schema: null
+    sha256: c845fa12835f07f059a2f9b03b4f761686429b61b4d54744c74e99f5d092cc64
+    byte_size: 662
+    producer:
+      flow_name: bugfix
+      logical_state: FIX
+      rung_index: 0
+      profile_name: claude-sonnet
+  - name: verifier_evidence
+    version: 1
+    path: artifacts/verifier_evidence/000001.md
+    format: markdown
+    schema: null
+    sha256: 80b301b721a0cda6dc5b685ff7dd8abd47959474be2b4a4083142fd9e1d4e87c
+    byte_size: 102
+    producer:
+      flow_name: bugfix
+      logical_state: VERIFY
+      rung_index: 0
+      profile_name: command
+  - name: bug_spec
+    version: 1
+    path: artifacts/bug_spec/000001.yaml
+    format: yaml
+    schema: microspec
+    sha256: 5781dc13210131aaf46856d2d69caf65e03dff11e2d83b8f1c076415bbd920e6
+    byte_size: 1302
+    producer:
+      flow_name: bugfix
+      logical_state: TRIAGE
+      rung_index: 0
+      profile_name: claude-sonnet
+  - name: reproduction_evidence
+    version: 1
+    path: artifacts/reproduction_evidence/000001.md
+    format: markdown
+    schema: null
+    sha256: e22e752cb08bb936f7c866e48c68725066e51f78765ffa9599c55747581e9330
+    byte_size: 2418
+    producer:
+      flow_name: bugfix
+      logical_state: REPRODUCE
+      rung_index: 0
+      profile_name: claude-haiku
+  - name: diagnosis
+    version: 1
+    path: artifacts/diagnosis/000001.md
+    format: markdown
+    schema: null
+    sha256: d8479cce0f16bf87d022dc5cb9a17fdcd3ec7d430c934cb1bd984b96db2cfe52
+    byte_size: 3164
+    producer:
+      flow_name: bugfix
+      logical_state: DIAGNOSE
+      rung_index: 0
+      profile_name: claude-haiku
+  - name: fix_microspec
+    version: 1
+    path: artifacts/fix_microspec/000001.yaml
+    format: yaml
+    schema: microspec
+    sha256: 76566c2eeb1b2b04800a0eb7b6c499f846ccb7db33c8b14f26133b6c2a040951
+    byte_size: 1564
+    producer:
+      flow_name: bugfix
+      logical_state: SPECIFY_FIX
+      rung_index: 0
+      profile_name: claude-sonnet
+  handoff_count: 5
+  handoffs:
+  - sequence: 1
+    logical_state: TRIAGE
+    rung: 0
+    profile: claude-sonnet
+    outcome: ready
+    evidence:
+    - request
+    - bug_spec
+    produced_artifacts:
+    - bug_spec
+  - sequence: 2
+    logical_state: REPRODUCE
+    rung: 0
+    profile: claude-haiku
+    outcome: ready
+    evidence:
+    - reproduction_evidence
+    produced_artifacts:
+    - reproduction_evidence
+  - sequence: 3
+    logical_state: DIAGNOSE
+    rung: 0
+    profile: claude-haiku
+    outcome: ready
+    evidence:
+    - reproduction_evidence
+    - bug_spec
+    - request
+    produced_artifacts:
+    - diagnosis
+  - sequence: 4
+    logical_state: SPECIFY_FIX
+    rung: 0
+    profile: claude-sonnet
+    outcome: ready
+    evidence:
+    - reproduction_evidence
+    - diagnosis
+    - request
+    produced_artifacts:
+    - fix_microspec
+  - sequence: 5
+    logical_state: FIX
+    rung: 0
+    profile: claude-sonnet
+    outcome: ready
+    evidence:
+    - fix_microspec
+    - diagnosis
+    - verifier_evidence
+    produced_artifacts:
+    - implementation_handoff
+  handoff_lineage: Sequences 1-5 belong to TRIAGE, REPRODUCE, DIAGNOSE, SPECIFY_FIX and FIX respectively.
+    All are rung 0; every invocation has context_mode null and previous_handoff null. No continuation or
+    horizontal fresh branch was taken. VERIFY returned no handoff.
+  changed_files:
+  - task_queue.py
+  source_fix: Provider FIX added _counter=0 and used/incremented it on each add, replacing len(self._pending);
+    pop and __len__ unchanged.
+  acceptance:
+    request_unchanged: true
+    microspecs_strictly_valid:
+    - bug_spec v1
+    - fix_microspec v1
+    reproduction_matches_independent_baseline: true
+    diagnosis_compatible_with_fixture_defect: true
+    evidence_review: 'Both artifacts correctly identify reuse of len(self._pending) after removal and the
+      actual/expected FIFO orders. Their general description of tied tuple ordering as undefined is imprecise:
+      Python compares the task strings lexicographically. This does not change the concrete baseline result,
+      identified defect or proposed fix.'
+    source_changed_by_fix_stage: true
+    acceptance_tests_byte_identical: true
+    acceptance_test_sha256: 4c22a89ed2a13cf231a7e6bfe04e21013b8a805f8ef653c7c1ba795a6a4cb26a
+    verifier_exit_code: 0
+    verifier_exit_code_basis: 'Inferred from canonical command profile: only normal exit 0 maps to the recorded
+      pass outcome.'
+    verifier_evidence_version: 1
+    reproduction_evidence_limitation: 'REPRODUCE had repo_read + command and no repo_write, and its durable
+      evidence matched the
+
+      independently verified baseline.
+
+
+      Switchyard did not independently observe successful provider command-tool execution.'
+  verification_command:
+  - python3
+  - -m
+  - unittest
+  - discover
+  - -s
+  - tests
+  verification_result: pass; 3 tests ran, OK; verifier_evidence v1 persisted.
+  escalation: false
+  rediagnosis: false
+  refix: false
+  second_verification: false
+  intervention: None. No harness/provider retry, manually authored output, artifact/handoff repair, manual
+    source fix, substitution, capability broadening or telemetry.
+  fresh_root: /tmp/switchyard-v2-006-live-a7-20261005
+  console_log: /tmp/switchyard-v2-006-live-a7-console.log
+  retained:
+  - target/
+  - work/
+  - work/manifest.jsonl
+  - work/request.md
+  - work/artifacts/
+  - work/handoffs/
+  - events.jsonl
+  - observations.jsonl
+  - baseline-files.json
+  - baseline-verification.txt
+  - preflight.json
+  - changed-files.json
+  - report.json
+  retention: No credentials, complete provider transcripts, raw tool inputs or rejected values retained.
+    No failure-audit.json because the attempt passed.
+  completion: Part A attempt 7 succeeded. V2-006 remains incomplete pending Part B. Attempts 1-6 preserved
+    exactly. No commit or Part B; stopped pending explicit authorization for one Claude rung 0 -> Claude
+    rung 1 / continue -> Codex rung 2 / fresh Part B attempt.
+
+first_live_part_b_attempt_2026_10_05:
+  authorization: Exactly one first real Part B attempt, using the existing example as-is. Final verification
+    and V2-006 commit authorized only after success with zero new offline failures.
+  preflight: Existing Part B focused offline test passed. Existing escalation example compiled with exact
+    singleton outcomes and empty capabilities. All real executors resolved without invocation; external
+    Codex alias resolved; concrete machine-local ID absent from tracked files. Fresh disposable target/work
+    root; no Part A rerun.
+  workflow: examples/escalation/workflows-v2.yaml
+  flow: escalation
+  logical_state: ASSESS
+  run_id: run:728e99f5-0ec0-4389-ab53-e0c97974bd57
+  live_part_b_attempts: 1
+  status: passed
+  terminal: ASSESSED
+  duration_seconds: 55.56
+  state_sequence:
+  - ASSESS
+  - ASSESS
+  - ASSESS
+  - ASSESSED
+  rung_sequence:
+  - 0
+  - 1
+  - 2
+  provider_sequence:
+  - claude
+  - claude
+  - codex
+  invocations:
+  - rung: 0
+    provider: claude
+    profile: claude-haiku
+    model_selector: haiku
+    resolved_model: haiku
+    effort: medium
+    capabilities: []
+    escalation_kind: null
+    context_mode: null
+    allowed_outcomes:
+    - inconclusive
+    outcome: inconclusive
+    previous_handoff: null
+    inputs:
+    - name: request
+      version: 1
+      sha256: 0fc688be2b07b39fee40ded4055bcd591c9ed7988158ea34e0102368195266c8
+    - name: reproduction_evidence
+      version: 1
+      sha256: 86baf279c376eceb6e54ba8b85c230b11d6fe9cb255632ffee76b561bc4b6a3f
+  - rung: 1
+    provider: claude
+    profile: claude-sonnet
+    model_selector: sonnet
+    resolved_model: sonnet
+    effort: high
+    capabilities: []
+    escalation_kind: vertical
+    context_mode: continue
+    allowed_outcomes:
+    - diagnosis_disproved
+    outcome: diagnosis_disproved
+    previous_handoff:
+      sequence: 1
+      flow: escalation
+      logical_state: ASSESS
+      rung_index: 0
+      profile: claude-haiku
+    inputs:
+    - name: request
+      version: 1
+      sha256: 0fc688be2b07b39fee40ded4055bcd591c9ed7988158ea34e0102368195266c8
+    - name: reproduction_evidence
+      version: 1
+      sha256: 86baf279c376eceb6e54ba8b85c230b11d6fe9cb255632ffee76b561bc4b6a3f
+  - rung: 2
+    provider: codex
+    profile: codex
+    model_selector: codex
+    resolved_model: external machine-local alias; exact concrete ID retained only in report.json and observations.jsonl
+    effort: high
+    capabilities: []
+    escalation_kind: horizontal
+    context_mode: fresh
+    allowed_outcomes:
+    - ready
+    outcome: ready
+    previous_handoff: null
+    inputs:
+    - name: request
+      version: 1
+      sha256: 0fc688be2b07b39fee40ded4055bcd591c9ed7988158ea34e0102368195266c8
+    - name: reproduction_evidence
+      version: 1
+      sha256: 86baf279c376eceb6e54ba8b85c230b11d6fe9cb255632ffee76b561bc4b6a3f
+  artifacts:
+    request:
+    - 1
+    reproduction_evidence:
+    - 1
+  handoff_count: 3
+  lineage_and_facts:
+    vertical_continue: true
+    rung_0_handoff:
+      flow: escalation
+      logical_state: ASSESS
+      rung_index: 0
+      profile: claude-haiku
+      sequence: 1
+      path: work/handoffs/000001.json
+      sha256: bbf0673194326ff7e9c45013522a8ff37bcf5c20d784baa912e51e1e03c467ce
+    rung_1_previous_handoff:
+      flow: escalation
+      logical_state: ASSESS
+      profile: claude-haiku
+      rung_index: 0
+      sequence: 1
+    rung_1_handoff:
+      flow: escalation
+      logical_state: ASSESS
+      rung_index: 1
+      profile: claude-sonnet
+      sequence: 2
+      path: work/handoffs/000002.json
+      sha256: 12f7ba6da877c4129a9188a8691f9f6c9ad7a681e519ae4d9d5a5d6265b0ddb4
+    rung_2_previous_handoff: null
+    rung_2_handoff:
+      flow: escalation
+      logical_state: ASSESS
+      rung_index: 2
+      profile: codex
+      sequence: 3
+      path: work/handoffs/000003.json
+      sha256: 7065132f35a5c36b228a53e512dc44114144ecabb0845c3324e9045030e170af
+    codex_factual_inputs:
+    - name: request
+      sha256: 0fc688be2b07b39fee40ded4055bcd591c9ed7988158ea34e0102368195266c8
+      version: 1
+    - name: reproduction_evidence
+      sha256: 86baf279c376eceb6e54ba8b85c230b11d6fe9cb255632ffee76b561bc4b6a3f
+      version: 1
+    prior_claude_handoffs_still_durable: true
+    request_and_facts_unchanged: true
+    all_capabilities_empty: true
+    target_empty: true
+    no_provider_native_continuation: true
+    evidence_basis: Existing harness snapshots the same ContextualExecutor context builder at invocation
+      admission; the existing offline Part B test compares these observations to actual fake-provider inputs.
+      No prompts or provider transcripts retained.
+  event_sequence:
+  - run_started
+  - state_entered
+  - invocation_started
+  - invocation_finished
+  - transition_selected
+  - state_exited
+  - state_entered
+  - invocation_started
+  - invocation_finished
+  - transition_selected
+  - state_exited
+  - state_entered
+  - invocation_started
+  - invocation_finished
+  - transition_selected
+  - state_exited
+  - state_entered
+  - state_exited
+  - run_finished
+  capability_proof: All three compiled/observed bindings have capabilities []. Existing adapter mapping
+    disables Claude tools and uses read-only sandbox with shell_tool=false for Codex; the focused offline
+    test validates actual fake-process argv. Target remained empty.
+  semantic_result: Rung 0 returned the required inconclusive hypothesis handoff; rung 1 disproved cache
+    capacity as the cause; fresh Codex independently identified inconsistent lookup/insertion key normalization
+    and returned ready.
+  native_sessions: No provider-native continuation or session transfer. Switchyard selects only structured
+    handoffs from the workspace; freshness and facts are reconstructible from retained metadata.
+  changed_files: []
+  intervention: None; one ordinary loader/compiler/runtime/context/provider workflow run. No manual provider
+    calls, retries, source changes, repairs, substitutions or capability expansion.
+  evidence_root: /tmp/switchyard-v2-006-live-b1-20261005
+  console_log: /tmp/switchyard-v2-006-live-b1-console.log
+  retained:
+  - target/
+  - work/
+  - work/manifest.jsonl
+  - work/request.md
+  - work/artifacts/reproduction_evidence/000001.md
+  - work/handoffs/
+  - events.jsonl
+  - observations.jsonl
+  - baseline-files.json
+  - changed-files.json
+  - preflight.json
+  - report.json
+  retention: No credentials, complete provider transcripts or raw tool inputs. Concrete Codex resolved model
+    and local alias configuration stay outside the repository.
+  part_a_preservation: Successful attempt 7 and failures 1-6 are unchanged. No live Part A execution in
+    this resume.
+
+final_v2_006_verification_2026_10_05:
+  status: complete
+  part_a: Successful real attempt 7 reached READY_FOR_MANUAL_QA; attempts 1-7 and corrective slices preserved. No live Part A rerun during finalization.
+  part_b: The first and only real attempt reached ASSESSED through Claude -> Claude / vertical / continue -> Codex / horizontal / fresh.
+  live_totals: {part_a_attempts: 7, part_b_attempts: 1, harness_retries: 0}
+  authorization_history: Each additional Part A attempt was separately authorized; original execution_limits describe the initial per-authorization plan, not a rewritten attempt count.
+  focused_preflight: Existing Part B pipeline/lineage test passed before any Part B provider use.
+  final_focused: All 5 V2-006 tests passed, including Part A fake-provider/real-verifier path, Part B fake-provider lineage, invalid baseline gate, failure retention and acceptance-oracle protection.
+  full_offline: 492 tests under TERM=dumb in 42.157 seconds; 490 passed, 1 unchanged known synthetic SIGKILL failure, 1 existing platform skip; ZERO new failures.
+  known_failure: test_codex_repair.CodexRepairTests.test_exact_prompts_real_fake_cli_and_fresh_inputs, 4096 NUL diagnostics case; expected success versus observed error, unchanged accepted local SIGKILL baseline. Test was neither modified nor skipped.
+  existing_skip: test_command.CommandTests.test_windows_batch_executables_rejected, Windows batch-path validation.
+  coverage: V2-006, V2-001E/F, V2-003A/B/C/D/E, V2-004A/B/C/D/E, V2-005, V2-002, V2 loader/compiler, all runtime regressions, V1, observability and DELIVERY-001 included in full discovery.
+  focused_log: /tmp/switchyard-v2-006-final-focused.log
+  full_log: /tmp/switchyard-v2-006-final-full-suite.log
+  part_a_evidence: /tmp/switchyard-v2-006-live-a7-20261005
+  part_b_evidence: /tmp/switchyard-v2-006-live-b1-20261005
+  reproduction_evidence_limitation: |
+    REPRODUCE had repo_read + command and no repo_write, and its durable evidence matched the
+    independently verified baseline.
+
+    Switchyard did not independently observe successful provider command-tool execution.
+  runtime_and_event: Unmodified by V2-006; existing orchestration, context and real provider adapters reused.
+  configuration: No machine-local alias files, concrete Codex model IDs, credentials, provider transcripts or external evidence files committed. Historical external evidence paths intentionally remain audit text.
+  scope: Only V2-006 fixture, harness, escalation example, focused tests, directly related README and this complete history; prerequisites remain separate commits. Adeo untouched.
+  commit: V2-006
+  stop: No V2-007 or further live execution.
