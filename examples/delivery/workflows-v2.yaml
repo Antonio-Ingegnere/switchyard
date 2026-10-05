@@ -38,7 +38,7 @@ roles:
   specifier:
     primary: {profile: claude-sonnet, effort: medium}
   triager:
-    primary: {profile: claude-haiku, effort: medium}
+    primary: {profile: claude-sonnet, effort: medium}
   reproducer:
     primary: {profile: claude-haiku, effort: medium}
   diagnostician:

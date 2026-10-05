@@ -1,5 +1,6 @@
 """V2-004E: Claude transport may omit nullable StageResult keys; the canonical contract stays strict."""
 import copy
+from dataclasses import replace
 import json
 import os
 from pathlib import Path
@@ -166,9 +167,13 @@ class ClaudeBoundaryTests(unittest.TestCase):
         self.assertIn('Output does not match required schema', caught.exception.diagnostics.utf8.decode())
 
     def test_replay_part_a_attempt_3_triage_shape(self):
-        # Canonical BUGFIX TRIAGE (claude-haiku, haiku, medium, [repo_read]) returning a legal
+        # Historical attempt-3 TRIAGE (claude-haiku, haiku, medium, [repo_read]) returning a legal
         # outcome and a valid bug_spec MicroSpec, with handoff and diagnostics omitted.
         bundle = load_workflow_bundle(CANONICAL)
+        # V2-001F promotes current TRIAGE; retain this replay's original Haiku binding.
+        roles = dict(bundle.roles)
+        roles['triager'] = replace(roles['triager'], primary=replace(roles['triager'].primary, profile='claude-haiku'))
+        bundle = replace(bundle, roles=roles)
         request = 'Equal-priority tasks lose FIFO order after a pop.'
         workspace = WorkWorkspace.open(self.root/'work', bundle.artifacts)
         workspace.initialize_request(request)

@@ -64,7 +64,7 @@ class SchemaInstructionAlignmentTests(unittest.TestCase):
                 self.assertNotIn('optional', rendered.lower())
 
     def test_canonical_triage_input_states_mandatory_keys(self):
-        # Exact live failure context: canonical BUGFIX TRIAGE, Claude Haiku, repo_read.
+        # Current canonical BUGFIX TRIAGE retains the failure-class guidance after V2-001F.
         with TemporaryDirectory() as folder:
             root = Path(folder)
             for name in ('claude','python3'):  # Never launched: compilation only resolves executables.
@@ -82,7 +82,7 @@ class SchemaInstructionAlignmentTests(unittest.TestCase):
             invocation = compiled.executors[state]._context(InvocationRequest(WorkUnit(request)))
         binding = invocation.binding
         self.assertEqual((binding.provider, binding.profile_name, binding.model, binding.effort, binding.capabilities),
-                         ('claude','claude-haiku','haiku','medium',('repo_read',)))
+                         ('claude','claude-sonnet','sonnet','medium',('repo_read',)))
         rendered = render_invocation(invocation)
         for text in ('Never omit any key.',
                      '2. produced_artifacts: KEY required; its VALUE is never null; use [] when not applicable.',

@@ -1,0 +1,71 @@
+id: V2-001F
+goal: Assign canonical BUGFIX TRIAGE to the existing Sonnet profile while preserving investigation stages and all contracts.
+status: complete
+scope:
+  - Change only roles.triager.primary.profile in examples/delivery/workflows-v2.yaml from claude-haiku to claude-sonnet.
+  - Compiled canonical binding and rendered TRIAGE contract regressions.
+  - Narrow V2-001F evidence and resolution record in the existing V2-006 MicroSpec.
+constraints:
+  - Keep TRIAGE effort medium and capabilities [repo_read]; no command or write access.
+  - Preserve REPRODUCE, all DIAGNOSE rungs, SPECIFY_FIX, FIX and the complete FEATURE plan.
+  - No new profile, runtime fallback, model substitution, provider retry, schema retry or contract repair.
+  - No runtime/Event, compiler, routing, budgets, capabilities, validation, persistence or fresh/continue changes.
+  - No live provider calls, Part A attempt 7, Part B or Adeo changes.
+  - Existing V2-006 implementation and live-attempt history/status remain uncommitted except this narrow resolution record.
+acceptance:
+  - Compiled bugfix.TRIAGE binding is claude / claude-sonnet / sonnet / medium / [repo_read].
+  - Every other compiled BUGFIX plan entry, including escalation rungs, is unchanged by the profile correction.
+  - FEATURE compilation is unchanged; SPECIFY already uses claude-sonnet / sonnet / medium / [repo_read].
+  - Rendered real TRIAGE input retains V2-003D MicroSpec rules, V2-003E handoff rules, V2-004D/E StageResult contract and repo_read-only capabilities.
+  - Full offline suite has zero new failures beyond the accepted synthetic SIGKILL failure and existing platform skip.
+verification:
+  - Focused tests/test_canonical_bugfix_profiles.py; real compilation and provider rendering without launching processes.
+  - Full unittest discovery under TERM=dumb, including V2-003D/E, V2-004A-E, V2-005, V2-006 offline, loader/compiler/runtime, V1, observability and DELIVERY-001.
+non_goals:
+  - New validator/guidance/transport slices or semantic acceptance defaults.
+  - General framework model-selection policy or speculative FEATURE cleanup.
+evidence:
+  attempt_4: Haiku successfully completed TRIAGE, REPRODUCE and DIAGNOSE in real canonical execution.
+  attempt_5: TRIAGE handoff evidence identifier rejected; V2-003E supplied precise diagnostics and explicit identifier guidance.
+  attempt_6: |
+    Minimal preflight passed. TRIAGE used Claude / claude-haiku / haiku / medium /
+    [repo_read]. Provider process and transport succeeded (exit 0 inferred from the
+    downstream boundary). bug_spec failed strict MicroSpec validation because the
+    required acceptance field was missing, despite explicit V2-003D guidance.
+    Only request v1 remained durable; zero handoffs and no target changes.
+    REPRODUCE and later states were not reached. Rejection was correct;
+    no framework regression was established. Handoff semantic validation was not reached.
+selection_rationale: |
+  This canonical configuration uses Haiku for bounded investigation, reproduction
+  and diagnosis with comparatively simple outputs, and Sonnet for contract-heavy
+  specification stages producing complete structured semantic artifacts. TRIAGE
+  produces a strict bug_spec MicroSpec and therefore now uses Sonnet, like existing
+  SPECIFY_FIX and FEATURE SPECIFY. Accumulated dogfood evidence supports changing
+  TRIAGE without promoting the successful Haiku investigation stages. This is a
+  configuration choice, not a new DSL/framework rule or a guarantee of model quality.
+compiled_bindings:
+  triage_before: {role_name: triager, profile_name: claude-haiku, provider: claude, model: haiku, resolved_model: haiku, effort: medium, capabilities: [repo_read], rung_index: 0}
+  triage_after: {role_name: triager, profile_name: claude-sonnet, provider: claude, model: sonnet, resolved_model: sonnet, effort: medium, capabilities: [repo_read], rung_index: 0}
+  reproduce: {role_name: reproducer, profile_name: claude-haiku, provider: claude, model: haiku, effort: medium, capabilities: [repo_read, command], rung_index: 0}
+  diagnose: {role_name: diagnostician, profile_name: claude-haiku, provider: claude, model: haiku, effort: medium, capabilities: [repo_read, command], rung_index: 0}
+  specify_fix: {role_name: specifier, profile_name: claude-sonnet, provider: claude, model: sonnet, effort: medium, capabilities: [repo_read], rung_index: 0}
+  fix: {role_name: fixer, profile_name: claude-sonnet, provider: claude, model: sonnet, effort: medium, capabilities: [repo_read, repo_write, command], rung_index: 0}
+  other_rungs: Unchanged, including DIAGNOSE Sonnet/high/continue and Codex/high/fresh escalation.
+feature_audit: Entire compiled FEATURE plan unchanged; SPECIFY already follows the Sonnet specification-stage pattern.
+documentation_audit: Existing workflow design documents do not specify a Haiku assignment for TRIAGE; no design correction is required. Rationale is recorded here without a new model-selection architecture.
+
+verification_result:
+  canonical_focused: 2 tests passed, covering full compilation, exact change scope and real TRIAGE renderer with provider process execution forbidden.
+  related_focused: 18 tests passed across canonical profile, V2-004E transport normalization and V2-004D structured-output alignment.
+  compatibility_updates: Historical attempt-3 replay now explicitly selects its original Haiku binding; current canonical TRIAGE prompt test expects Sonnet. All transport assertions preserved.
+  full_suite: 492 tests under TERM=dumb; 490 passed, 1 unchanged known synthetic SIGKILL failure, 1 existing platform skip; zero new failures.
+  full_log: /tmp/switchyard-v2-001f-full-suite-final.log
+  focused_log: /tmp/switchyard-v2-001f-focused.log
+  compiled_bindings: /tmp/switchyard-v2-001f-compiled-bindings.json
+  known_failure: test_codex_repair.CodexRepairTests.test_exact_prompts_real_fake_cli_and_fresh_inputs, 4096 NUL diagnostic case; unchanged accepted baseline.
+  existing_skip: test_command.CommandTests.test_windows_batch_executables_rejected, Windows batch-path validation.
+  regressions: V2-003D/E, V2-004A-E, V2-005, V2-006 offline, loader/compiler/runtime, V1, observability and DELIVERY-001 included in full discovery.
+  live_provider_calls: 0
+  protected_scope: All runtime and switchyard implementation files unchanged; no validation, transport, fallback, retry, persistence, capability or fresh/continue changes; Adeo untouched.
+  commit_scope: Canonical YAML, new configuration tests, two profile-dependent regression updates, this MicroSpec and only the narrow V2-001F record from V2-006.
+  stop: No Part A attempt 7 or Part B. Any further live execution requires separate authorization.

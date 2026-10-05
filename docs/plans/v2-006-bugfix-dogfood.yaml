@@ -306,3 +306,30 @@ v2_003e_handoff_contract_diagnostics:
     Switchyard does not independently observe successful provider command-tool execution
     through the current adapter. No telemetry change in this slice.
   next: Part A attempt 6 requires separate explicit authorization; not authorized or run. Part B remains unattempted.
+
+
+v2_001f_bugfix_triage_profile_correction:
+  trigger_attempt_6: |
+    Minimal preflight passed. TRIAGE rung 0 used Claude / claude-haiku / haiku /
+    medium / [repo_read]. Provider process, Claude transport, V2-004E normalization
+    and StageResult decoding succeeded (exit 0 inferred from downstream validation).
+    bug_spec was rejected with: bugfix.TRIAGE[0]: artifact bug_spec:
+    MicroSpec acceptance: missing required field. Request v1 remained the only
+    durable artifact; zero handoffs; source and tests unchanged. REPRODUCE and
+    later states were not reached. Strict rejection was correct; no framework
+    regression established. Handoff semantic validation was not reached.
+  classification: TRIAGE model/profile reliability under a strict semantic artifact contract; not a new validator, guidance or transport gap.
+  accumulated_evidence: Haiku completed TRIAGE and the investigation stages in attempt 4, but produced invalid TRIAGE handoff content in attempt 5 and omitted required semantic MicroSpec content in attempt 6 despite improved guidance.
+  correction: |
+    V2-001F changes only roles.triager.primary.profile in the canonical delivery
+    workflow from claude-haiku to existing claude-sonnet. TRIAGE remains medium
+    effort with repo_read only. REPRODUCE and DIAGNOSE remain Haiku at rung 0;
+    SPECIFY_FIX and FIX remain Sonnet. All other bindings/rungs, routing, budgets,
+    capabilities and contracts are unchanged. FEATURE SPECIFY already uses Sonnet.
+  rationale: Contract-heavy MicroSpec-producing specification stages use Sonnet; bounded investigation stages retain Haiku. This is canonical configuration, not a model-selection framework rule.
+  strictness: No semantic field defaults, synthesis, nullability, repair, dropping of acceptance, runtime fallback or retries.
+  attempt_history: Attempts 1-6 preserved exactly; existing V2-006 implementation and detailed live-attempt history/status remain uncommitted.
+  live_part_a_attempts: 6
+  live_part_b_attempts: 0
+  live_calls_in_v2_001f: 0
+  next: Any next live Part A attempt requires separate explicit authorization. Attempt 7 was not authorized or run; Part B remains unattempted.
