@@ -138,3 +138,23 @@ existing Claude/Codex schema generator receives those same enums. Budget refusal
 routes never appear as executor-returnable `budget_exceeded`. Durable input
 selection, continuation handoffs, fresh exclusion, and output validation are
 unchanged.
+
+### Explicit handoff body guidance (V2-003E)
+
+The renderer adds `HANDOFF BODY RULES` from the work-contract's shared body field
+metadata and size bounds. It describes each required non-null field, prose versus
+identifier content, empty-list allowance, UTF-8/non-whitespace text and limits.
+`evidence` is a list of strings, not nested reference objects. The whole handoff
+remains nullable; supported/expected policies are unchanged.
+
+The renderer lists `output_contract.handoff.evidence_artifacts` dynamically. This
+is the existing full declared catalog, not just consumed or committed artifacts.
+It does not narrow membership or claim availability. ASCII identifier syntax is
+explicit; filenames, paths, sentences, space-separated labels and Markdown
+references belong in prose fields, not in evidence identifiers. No fixed examples
+can accidentally imply permission to reference undeclared names.
+
+All returned artifacts and the handoff are still prevalidated before publication.
+An invalid reference now reports `handoff.evidence[index]` with a safe category;
+no body value appears in the exception chain. Fresh/continue selection, output
+contracts, schema shape, persistence formats and runtime behavior are unchanged.

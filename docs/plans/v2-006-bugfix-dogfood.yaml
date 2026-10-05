@@ -272,3 +272,37 @@ v2_003d_microspec_contract_diagnostics:
   live_part_a_attempts: 4
   live_part_b_attempts: 0
   next: Part A attempt 5 requires separate explicit authorization.
+
+
+v2_003e_handoff_contract_diagnostics:
+  trigger_attempt_5: |
+    Part A attempt 5 passed minimal preflight after V2-003D (0eb51e0), then failed
+    at TRIAGE rung 0 (claude, claude-haiku, selector/resolved model haiku, medium,
+    [repo_read]). Claude/Haiku process appears to have succeeded (exit 0 inferred
+    from the downstream validation path). Error: WorkContractError:
+    bugfix.TRIAGE[0]: invalid logical identifier. Code-path audit locates the
+    rejected identifier to handoff.evidence; rejected value and index were not
+    retained. Provider-produced handoff content violated the strict work contract;
+    the rejection was correct. This is downstream of successful transport, not
+    an artifact validation failure or a V2-004E regression.
+  event_sequence: [run_started, state_entered, invocation_started, run_error]
+  committed_before_failure: Request v1 only; zero handoffs; target source and tests unchanged.
+  later_states: REPRODUCE and all later states were not reached.
+  resolution: |
+    V2-003E (docs/plans/v2-003e-handoff-contract-diagnostics.yaml) adds safe handoff
+    field/index/type or category diagnostics and validator-aligned provider guidance.
+    Evidence is a sequence of exact declared logical artifact-name strings, not
+    nested objects or prose. Guidance lists the existing invocation catalog and
+    ASCII identifier syntax. Strict validation and prevalidation-before-commit
+    ordering remain unchanged; no auto-repair, removed handoffs or retries.
+  verification: 12 focused tests passed; full TERM=dumb suite 490 tests, 488 passed, 1 unchanged known local SIGKILL failure, 1 existing platform skip, zero new failures.
+  attempt_history: Attempts 1-5 preserved; existing V2-006 implementation and attempt history remain uncommitted.
+  live_part_a_attempts: 5
+  live_part_b_attempts: 0
+  live_calls_in_v2_003e: 0
+  tool_observability: |
+    REPRODUCE is granted repo_read + command and is not granted repo_write.
+    Its reproduction evidence may be compared with the independently verified baseline.
+    Switchyard does not independently observe successful provider command-tool execution
+    through the current adapter. No telemetry change in this slice.
+  next: Part A attempt 6 requires separate explicit authorization; not authorized or run. Part B remains unattempted.

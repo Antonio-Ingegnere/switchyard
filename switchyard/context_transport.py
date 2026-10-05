@@ -8,7 +8,8 @@ from runtime import (DiagnosticInput, DiagnosticPayload, ExecutorResult,
                      InvocationRequest, InvocationResponse)
 from .workflow_compiler import ExecutionBinding
 from .work_contract import (ArtifactProducer, ArtifactRecord, HandoffRecord,
-                            WorkContractError, WorkWorkspace, MicroSpecField, MICROSPEC_FIELDS)
+                            WorkContractError, WorkWorkspace, MicroSpecField, MICROSPEC_FIELDS,
+                            HANDOFF_BODY_FIELDS, handoff_check, _kind)
 from .workflow_bundle import WorkflowBundle, WorkflowStateSpec
 
 
@@ -45,7 +46,15 @@ class StageHandoff:
     blockers: tuple[str, ...] = ()
 
     def __post_init__(self):
-        _tuples(self, 'findings', 'evidence', 'changed_assumptions', 'blockers')
+        for descriptor in HANDOFF_BODY_FIELDS:
+            if descriptor.sequence:
+                value = getattr(self, descriptor.name)
+                handoff_check(type(value) in (tuple, list), descriptor.name, 'sequence', _kind(value))
+                object.__setattr__(self, descriptor.name, tuple(value))
+
+
+if tuple(f.name for f in HANDOFF_BODY_FIELDS) != tuple(f.name for f in fields(StageHandoff)):
+    raise RuntimeError('handoff body definitions drifted from StageHandoff')
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,7 +212,7 @@ class ContextualExecutor:
             names.append(artifact.name)
         handoff = None
         if result.handoff is not None:
-            _require(type(result.handoff) is StageHandoff, 'expected StageHandoff body')
+            handoff_check(type(result.handoff) is StageHandoff, '', 'StageHandoff body', _kind(result.handoff))
             handoff = HandoffRecord(flow=self.binding.flow_name, logical_state=self.binding.logical_state,
                                     role=self.binding.role_name, rung_index=self.binding.rung_index,
                                     profile_name=self.binding.profile_name, outcome=result.outcome,

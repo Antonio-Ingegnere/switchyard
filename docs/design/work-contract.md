@@ -187,3 +187,66 @@ Hashes detect content disagreement with manifest records; they are not signature
 do not defend against a party deliberately rewriting both data and manifest. Concurrent
 hostile filesystem replacement is outside the cooperating-writer boundary. Missing or
 mutated indexed files fail verified reads rather than returning trusted evidence.
+
+## Handoff diagnostics and identifier contract (V2-003E)
+
+The provider body has exactly `summary`, `findings`, `evidence`,
+`changed_assumptions`, and `blockers`. In provider JSON all five keys are required
+and none is nullable; the whole handoff may be null. `StageHandoff` and
+`HandoffRecord` Python constructors retain their empty collection defaults.
+`summary` is nonempty UTF-8 prose. The four collections are sequences of nonempty
+UTF-8 strings (not reference objects); empty lists are valid. `findings`,
+`changed_assumptions`, and `blockers` contain prose. `evidence` contains exact
+logical artifact names from the declared catalog. Membership does not require an
+artifact to be committed and does not pin a version. Duplicate references remain
+allowed. No paths or descriptive labels are interpreted as artifact references.
+
+Storage rejects whitespace-only strings. The existing transport parser accepts
+nonempty whitespace strings; downstream work-contract validation still rejects
+these. Prose may contain punctuation, paths and NUL; this slice adds no prose
+character restriction. All collections have a 64-item limit and all text items,
+summary and outcome have an 8192-character limit, unchanged.
+
+A logical identifier starts with an ASCII letter and continues with ASCII letters,
+digits, `_`, `-` or `.`. It is case-sensitive. Empty strings, whitespace, NUL,
+slashes, backslashes, other punctuation and non-ASCII characters are invalid.
+There is no independent identifier length limit; the handoff item limit applies
+to references. A filename-shaped string can satisfy the lexical rule but is still
+rejected unless it is an exact declared logical artifact name.
+
+The rest of `HandoffRecord` is wrapper/store-owned: `flow`, `logical_state`, `role`
+and optional non-null `profile_name` use the same identifier syntax; `rung_index`
+is a nonnegative integer; `version` is integer 1; `sequence` is a nonnegative
+integer and must be 0 for submission, then match the manifest on read. Booleans
+are not integers. `outcome` is nonempty UTF-8 text; runtime membership checks
+remain separate. `produced_artifacts` is a sequence of declared names and cannot
+reference the immutable request. The executor derives it from validated outputs.
+Persisted records require exactly the record fields; missing/extra keys fail.
+
+Errors use code-owned locations and safe categories, never rejected values:
+
+```text
+bugfix.TRIAGE[0]: handoff.evidence[1]: expected logical identifier, got invalid format
+handoff.evidence[1]: expected declared artifact identifier, got undeclared reference
+handoff.findings[2]: expected non-empty string, got mapping
+handoff.blockers[1]: expected non-empty string, got empty string
+handoff.summary: expected UTF-8 string, got invalid UTF-8
+handoff.sequence: expected 0 for a new handoff, got store-assigned sequence
+```
+
+The V2-003D parsed-type helper is reused (including tuple sequences).
+Format failure is distinct from missing catalog membership and immutable-request
+production. Other categories cover missing/unexpected fields, wrong types, empty
+text, invalid UTF-8, length limits, numeric range and manifest sequence mismatch.
+Original sequence indices are preserved. Encoding exceptions are replaced outside
+the exception handler so neither cause nor suppressed context retains rejected text.
+
+`HANDOFF_BODY_FIELDS` supplies only focused body metadata, with a drift check
+against `StageHandoff`. Collection/reference fields and existing size constants
+are shared by validation and provider guidance. There is no generic schema system.
+
+ContextualExecutor first validates produced artifacts, then the complete handoff,
+then commits artifacts in result order, then the handoff. A rejected handoff leaves
+all outputs of that invocation uncommitted, including otherwise valid artifacts.
+This does not change the documented I/O/crash boundaries above. There is no
+stripping, coercion, reference guessing, evidence removal, repair or retry.

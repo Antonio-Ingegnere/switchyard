@@ -34,8 +34,11 @@ def _boundary(function):
     return wrapped
 
 
+LOGICAL_IDENTIFIER_PATTERN = r'[A-Za-z][A-Za-z0-9_.-]*'
+
+
 def _name(value):
-    _check(type(value) is str and re.fullmatch(r'[A-Za-z][A-Za-z0-9_.-]*', value), 'invalid logical identifier')
+    _check(type(value) is str and re.fullmatch(LOGICAL_IDENTIFIER_PATTERN, value), 'invalid logical identifier')
 
 
 def _text(value, label, nonempty=True):
@@ -97,7 +100,7 @@ def _kind(value):
     """Stable parsed-type name for diagnostics; never the value itself."""
     if type(value) is str:
         return 'string' if value.strip() else 'empty string'
-    for kind, name in ((bool, 'boolean'), (dict, 'mapping'), (list, 'sequence'), (type(None), 'null'),
+    for kind, name in ((bool, 'boolean'), (dict, 'mapping'), (list, 'sequence'), (tuple, 'sequence'), (type(None), 'null'),
                        (int, 'integer'), (float, 'number'), (bytes, 'binary')):
         if type(value) is kind:
             return name
@@ -200,10 +203,79 @@ class HandoffRecord:
     sequence: int = 0
 
     def __post_init__(self):
-        for key in ('findings', 'evidence', 'changed_assumptions', 'blockers', 'produced_artifacts'):
+        for key in HANDOFF_COLLECTION_FIELDS:
             value = getattr(self, key)
-            _check(type(value) in (list, tuple), f'handoff {key} must be a sequence')
+            handoff_check(type(value) in (list, tuple), key, 'sequence', _kind(value))
             object.__setattr__(self, key, tuple(value))
+
+
+@dataclass(frozen=True, slots=True)
+class HandoffBodyField:
+    name: str
+    sequence: bool = False
+    reference: bool = False
+
+
+# Only the provider-owned body; provenance and storage metadata remain separate.
+HANDOFF_BODY_FIELDS = (HandoffBodyField('summary'), HandoffBodyField('findings', True),
+                       HandoffBodyField('evidence', True, True),
+                       HandoffBodyField('changed_assumptions', True), HandoffBodyField('blockers', True))
+HANDOFF_COLLECTION_FIELDS = tuple(f.name for f in HANDOFF_BODY_FIELDS if f.sequence) + ('produced_artifacts',)
+HANDOFF_REFERENCE_FIELDS = tuple(f.name for f in HANDOFF_BODY_FIELDS if f.reference) + ('produced_artifacts',)
+HANDOFF_MAX_ITEMS = 64
+HANDOFF_MAX_TEXT = 8192
+
+
+def handoff_check(condition, location, expected, actual, error=WorkContractError):
+    """Locations and categories are code-owned; never pass rejected content here."""
+    if not condition:
+        raise error(f'handoff{("." + location) if location else ""}: expected {expected}, got {actual}')
+
+
+def handoff_text(value, location, *, strip=True, error=WorkContractError):
+    # Transport historically accepts whitespace-only strings; storage does not.
+    valid = type(value) is str and bool(value.strip() if strip else value)
+    handoff_check(valid, location, 'non-empty string', _kind(value), error)
+    valid_utf8 = True
+    try:
+        value.encode('utf-8')
+    except UnicodeError:
+        valid_utf8 = False
+    # Raise outside except: even __context__ must not retain the rejected value.
+    handoff_check(valid_utf8, location, 'UTF-8 string', 'invalid UTF-8', error)
+
+
+def _handoff_name(value, location):
+    handoff_check(type(value) is str, location, 'logical identifier', _kind(value))
+    handoff_check(bool(re.fullmatch(LOGICAL_IDENTIFIER_PATTERN, value)), location,
+                  'logical identifier', 'empty string' if not value.strip() else 'invalid format')
+
+
+def handoff_guidance(contract):
+    lines = ['HANDOFF BODY RULES',
+             'The handoff key is required and nullable. When returning an object, include exactly all '
+             'body_fields; none of its fields is nullable. Do not include provenance, outcome, '
+             'produced_artifacts, version or sequence; the wrapper/store owns them.']
+    if not contract.supported:
+        return '\n'.join(lines + ['This contract does not support a handoff object; return null.'])
+    for field in HANDOFF_BODY_FIELDS:
+        shape = (f'a list of at most {HANDOFF_MAX_ITEMS} non-empty strings; [] is allowed' if field.sequence
+                 else 'one non-empty string')
+        meaning = ('Each item is a declared logical artifact name, not prose or a reference object.' if field.reference
+                   else 'Prose is allowed, including repository paths and observations.')
+        lines.append(f'- {field.name}: required; {shape}. {meaning} '
+                     f'Each string must be UTF-8, non-whitespace and at most {HANDOFF_MAX_TEXT} characters.')
+    lines += ['Logical identifiers start with an ASCII letter (A-Z or a-z); subsequent characters '
+              'are ASCII letters, digits, underscore (_), hyphen (-) or dot (.). '
+              'Whitespace, NUL, slashes, backslashes and other punctuation are invalid. '
+              'There is no separate identifier-length limit; the handoff string limit applies.',
+              'evidence entries must use only the exact logical artifact names in evidence_artifacts. '
+              'Do not use filenames, paths, sentences, labels with spaces, Markdown references or '
+              'arbitrary descriptive text as evidence identifiers. Put descriptions in summary/findings.',
+              'Valid evidence artifact identifiers for this invocation (declared catalog; '
+              'membership does not assert availability or pin a version):']
+    lines += ['- ' + name for name in contract.evidence_artifacts] or ['(none; use evidence: [])']
+    return '\n'.join(lines)
 
 
 def _producer(value):
@@ -214,28 +286,32 @@ def _producer(value):
 
 
 def _handoff(value, catalog):
-    _check(type(value) is HandoffRecord, 'expected HandoffRecord')
+    handoff_check(type(value) is HandoffRecord, '', 'HandoffRecord', _kind(value))
     for key in ('flow', 'logical_state', 'role'):
-        _name(getattr(value, key))
+        _handoff_name(getattr(value, key), key)
     if value.profile_name is not None:
-        _name(value.profile_name)
-    _check(type(value.rung_index) is int and value.rung_index >= 0, 'invalid handoff rung index')
-    _check(type(value.version) is int and value.version == 1, 'unsupported handoff version')
-    _check(type(value.sequence) is int and value.sequence >= 0, 'invalid handoff sequence')
+        _handoff_name(value.profile_name, 'profile_name')
+    for key in ('rung_index', 'version', 'sequence'):
+        number = getattr(value, key)
+        expected = 'integer equal to 1' if key == 'version' else 'non-negative integer'
+        handoff_check(type(number) is int, key, expected, _kind(number))
+        handoff_check(number == 1 if key == 'version' else number >= 0, key, expected, 'out of range')
     for key in ('outcome', 'summary'):
         text = getattr(value, key)
-        _text(text, 'handoff ' + key)
-        _check(len(text) <= 8192, 'handoff text exceeds 8192 characters')
-    for key in ('findings', 'evidence', 'changed_assumptions', 'blockers', 'produced_artifacts'):
+        handoff_text(text, key)
+        handoff_check(len(text) <= HANDOFF_MAX_TEXT, key, f'at most {HANDOFF_MAX_TEXT} characters', 'length exceeded')
+    for key in HANDOFF_COLLECTION_FIELDS:
         values = getattr(value, key)
-        _check(len(values) <= 64, 'handoff collection exceeds 64 items')
-        for text in values:
-            _text(text, 'handoff ' + key)
-            _check(len(text) <= 8192, 'handoff item exceeds 8192 characters')
-            if key in ('evidence', 'produced_artifacts'):
-                _name(text)
-                _check(text in catalog, 'undeclared handoff artifact')
-                _check(key != 'produced_artifacts' or catalog[text].source != 'request', 'cannot produce request')
+        handoff_check(len(values) <= HANDOFF_MAX_ITEMS, key, f'at most {HANDOFF_MAX_ITEMS} items', 'length exceeded')
+        for index, text in enumerate(values):
+            location = f'{key}[{index}]'
+            handoff_text(text, location)
+            handoff_check(len(text) <= HANDOFF_MAX_TEXT, location, f'at most {HANDOFF_MAX_TEXT} characters', 'length exceeded')
+            if key in HANDOFF_REFERENCE_FIELDS:
+                _handoff_name(text, location)
+                handoff_check(text in catalog, location, 'declared artifact identifier', 'undeclared reference')
+                handoff_check(key != 'produced_artifacts' or catalog[text].source != 'request', location,
+                              'produced artifact identifier', 'immutable request reference')
 
 
 def _catalog_data(catalog):
@@ -436,7 +512,7 @@ class WorkWorkspace:
     def validate_handoff(self, record: HandoffRecord) -> None:
         """Validate a proposed handoff before committing a batch of outputs."""
         _handoff(record, self.artifacts)
-        _check(record.sequence == 0, 'store assigns handoff sequence')
+        handoff_check(record.sequence == 0, 'sequence', '0 for a new handoff', 'store-assigned sequence')
 
     @_boundary
     def write_artifact(self, name: str, content: str, producer: ArtifactProducer | None = None) -> ArtifactRecord:
@@ -470,7 +546,7 @@ class WorkWorkspace:
     @_boundary
     def write_handoff(self, record: HandoffRecord) -> HandoffRecord:
         _handoff(record, self.artifacts)
-        _check(record.sequence == 0, 'store assigns handoff sequence')
+        handoff_check(record.sequence == 0, 'sequence', '0 for a new handoff', 'store-assigned sequence')
         with self._locked():
             _, _, handoffs = self._scan()
             committed = replace(record, sequence=len(handoffs)+1)
@@ -489,10 +565,14 @@ class WorkWorkspace:
         result = []
         for record in records:
             value = _json(self._verified(record))
-            _keys(value, HandoffRecord.__dataclass_fields__, 'handoff')
+            handoff_check(type(value) is dict, '', 'HandoffRecord mapping', _kind(value))
+            for key in HandoffRecord.__dataclass_fields__:
+                handoff_check(key in value, key, 'required field', 'missing field')
+            handoff_check(set(value) == set(HandoffRecord.__dataclass_fields__), '',
+                          'exact handoff fields', 'unexpected fields')
             handoff = HandoffRecord(**value)
             _handoff(handoff, self.artifacts)
-            _check(handoff.sequence == record['sequence'], 'handoff sequence mismatch')
+            handoff_check(handoff.sequence == record['sequence'], 'sequence', 'manifest sequence', 'sequence mismatch')
             if logical_state is None or handoff.logical_state == logical_state:
                 result.append(handoff)
         return tuple(result)

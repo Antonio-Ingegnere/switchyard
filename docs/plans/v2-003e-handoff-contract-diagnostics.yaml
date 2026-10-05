@@ -1,0 +1,61 @@
+id: V2-003E
+goal: Improve safe handoff field/index diagnostics and provider identifier guidance without changing validation semantics.
+status: complete
+scope:
+  - Complete handoff body and record diagnostic audit, shared field metadata and existing bounds.
+  - Provider guidance with exact invocation artifact catalog and identifier-versus-prose rules.
+  - Fake-process TRIAGE failure and valid-equivalent regressions plus complete validator boundary coverage.
+  - Existing work-contract, context-transport and provider-stages design documents.
+  - Narrow V2-003E resolution record in the shared V2-006 MicroSpec.
+constraints:
+  - Preserve exact acceptance/rejection rules, transport schemas and nullability.
+  - No auto-repair, stripping, coercion, guessed references, removed evidence or retries.
+  - Preserve validation-before-commit ordering and existing I/O failure boundaries.
+  - No runtime, Event, routing, budgets, compiler, capability or fresh/continue changes.
+  - No live provider calls, V2-006 attempt 6, Part B, telemetry or Adeo changes.
+acceptance:
+  - Every validated handoff body and record field reports safe structural location and category.
+  - Original item indices survive type, text, identifier-format and catalog-membership failures.
+  - Rejected content never appears in error chains, diagnostics or workspace files.
+  - Valid artifacts plus invalid TRIAGE handoff commit no invocation output.
+  - Equivalent valid TRIAGE output commits its artifact and handoff normally.
+  - Actual fake-provider TRIAGE stdin contains exact generated body rules and allowed artifact identifiers.
+  - All required offline regressions pass except the accepted local SIGKILL failure and platform skip.
+verification:
+  - Focused handoff diagnostics and fake-process provider-guidance tests.
+  - Full offline unittest discovery under TERM=dumb covering V2-003A-E, V2-004A-E, V2-005, V2-006, V1, loader/compiler/runtime, observability and DELIVERY-001.
+non_goals:
+  - Reopen V2-004E or change provider structured-output transport.
+  - Tool telemetry, schema framework, workflow changes or handoff persistence redesign.
+contract_audit:
+  body: Exactly summary/findings/evidence/changed_assumptions/blockers; provider JSON requires all five; whole handoff may be null.
+  structure: Summary is a string; other body fields are sequences of strings; there are no nested evidence objects.
+  provenance: Flow, logical_state, role and optional profile_name are logical identifiers; rung_index and sequence nonnegative integers; version integer 1; outcome nonempty text; produced_artifacts is wrapper-owned declared references excluding request.
+  identifiers: ASCII letter first, then ASCII letters/digits/underscore/hyphen/dot; no standalone length limit; existing reference text limit applies.
+  membership: Exact catalog membership, not availability or version pinning; duplicate references allowed.
+  bounds: At most 64 items per collection; 8192 characters per text; valid UTF-8; storage rejects whitespace-only strings.
+  transport: Existing parser accepts nonempty whitespace strings; work validation rejects them. JSON Schema and Claude nullable projection unchanged; parser error messages only improved.
+  safe_categories: Parsed type, empty string, invalid format, undeclared reference, immutable request reference, invalid UTF-8, length exceeded, out of range, store-assigned sequence, missing/unexpected fields and sequence mismatch.
+  ordering: Validate all artifacts, validate complete handoff, commit artifacts, commit handoff; invalid handoff commits nothing from invocation. Existing I/O partial-prefix behavior unchanged.
+  source_of_truth: HANDOFF_BODY_FIELDS shared by validator collection/reference lists, body shape guidance and existing schema generation; StageHandoff dataclass drift check; shared bounds and V2-003D type names.
+trigger_attempt_5:
+  state: TRIAGE rung 0
+  binding: Claude / claude-haiku / haiku / medium / repo_read
+  diagnostic: 'bugfix.TRIAGE[0]: invalid logical identifier'
+  location: Code-path audit identifies handoff.evidence; rejected value and index were not retained.
+  provider: Successful process inferred from downstream WorkContractError; not a V2-004E regression.
+  committed: Request v1 only; no handoff; target source/tests unchanged.
+
+verification_result:
+  focused: 12 V2-003E tests passed, including actual fake-process invalid and valid TRIAGE cases.
+  full_suite: 490 tests under TERM=dumb; 488 passed, 1 known local synthetic SIGKILL failure, 1 existing platform skip; zero new failures.
+  log: /tmp/switchyard-v2-003e-full-suite.log
+  known_failure: test_codex_repair.CodexRepairTests.test_exact_prompts_real_fake_cli_and_fresh_inputs, 4096 NUL diagnostic case; expected success, observed error, unchanged baseline.
+  existing_skip: test_command.CommandTests.test_windows_batch_executables_rejected, Windows batch-path validation.
+  groups: V2-003A 23, V2-003B 12, V2-003C 6, V2-003D 9, V2-004A-E 52, V2-005 4, V2-006 offline 5; loader/compiler/runtime, V1, observability and DELIVERY-001 all included in full discovery.
+  compatibility_probe: Canonical and Claude schemas byte-identical to HEAD; old/new storage validation decisions matched across 322 field/value cases.
+  privacy: Unique rejected markers absent from both cause/context chains, diagnostics and byte-identical workspace snapshots; malformed UTF-8 does not retain encoding exception context.
+  live_provider_calls: 0
+  v2_006_attempt_6: Not authorized or run; Part B remains unattempted.
+  protected_scope: No runtime/Event, routing, budget, compiler, capabilities, fresh/continue, transport protocol, persistence-format, ordering or Adeo changes.
+  commit_scope: Only V2-003E files and the narrow V2-003E resolution record from V2-006; existing dogfood implementation and attempt-history changes remain uncommitted.

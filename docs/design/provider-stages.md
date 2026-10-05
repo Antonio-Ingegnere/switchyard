@@ -295,3 +295,22 @@ Nonzero Claude exits are never normalized (V2-004C path). The rendered prompt st
 describes the canonical four-key shape (V2-004D) without encouraging omission.
 `MAX_STRUCTURED_OUTPUT_RETRIES=1`, models, profiles, efforts, capabilities and runtime
 are unchanged.
+
+## Handoff semantic guidance and safe diagnostics (V2-003E)
+
+Handoff guidance now comes from `HANDOFF_BODY_FIELDS` and the work validator's size
+bounds. Each body's key is required and non-null when the handoff is an object;
+whole-handoff nullability is unchanged. `summary`, `findings`,
+`changed_assumptions` and `blockers` are prose. `evidence` items are strings naming
+exact declared artifacts, never paths or reference objects. The rendered prompt
+states ASCII identifier syntax and dynamically lists the invocation contract's
+`evidence_artifacts` catalog, without claiming those artifacts already exist.
+
+The same metadata generates the existing handoff JSON Schema shape, byte-for-byte
+unchanged. Body parser errors now identify field/index/category while preserving
+ProviderExecutionError and its exact acceptance rules. Semantic identifier and
+catalog checks remain downstream WorkContractError checks; whitespace-only strings
+still pass transport and fail work validation. Neither Claude's wire projection
+nor normalization (V2-004E), Codex transport, provider retries or tool policy changes.
+See [the work contract](work-contract.md#handoff-diagnostics-and-identifier-contract-v2-003e)
+for the complete field, identifier, rejection and publication rules.

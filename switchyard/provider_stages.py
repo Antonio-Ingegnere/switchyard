@@ -13,7 +13,8 @@ from typing import Mapping
 from runtime import DiagnosticPayload, MAX_DIAGNOSTIC_BYTES
 from runtime.command import Command
 from .context_transport import StageInvocation, StageResult, StageHandoff, ProducedArtifact
-from .work_contract import microspec_guidance
+from .work_contract import (microspec_guidance, handoff_guidance, HANDOFF_BODY_FIELDS,
+                            HANDOFF_MAX_ITEMS, HANDOFF_MAX_TEXT, handoff_check, handoff_text, _kind)
 from .workflow_bundle import ExecutionProfile, CommandSpec
 from .workflow_compiler import ExecutionBinding
 from .provider_process import ProviderExecutionError, execute
@@ -75,8 +76,7 @@ def result_schema(contract=None, transport='canonical'):
     if transport not in ('canonical', 'claude'):
         raise ValueError('unknown StageResult transport')
     strings = {'type':'array','items':{'type':'string'}}
-    handoff = _object({'summary':{'type':'string'}, **{key:strings for key in
-                      ('findings','evidence','changed_assumptions','blockers')}})
+    handoff = _object({f.name: strings if f.sequence else {'type':'string'} for f in HANDOFF_BODY_FIELDS})
     properties = {'outcome':{'type':'string'},
                   'produced_artifacts':{'type':'array','items':_object({'name':{'type':'string'},'content':{'type':'string'}})},
                   'handoff':{'anyOf':[handoff,{'type':'null'}]},
@@ -132,6 +132,7 @@ def render_invocation(invocation: StageInvocation) -> str:
     # MicroSpec content rules come from the validator's own field definitions (V2-003D).
     for format in dict.fromkeys(a.format for a in invocation.output_contract.artifacts if a.schema == 'microspec'):
         parts.append(microspec_guidance(format))
+    parts.append(handoff_guidance(invocation.output_contract.handoff))
     parts.append('OUTPUT CONTRACT\n'+result_contract_text()+'\nMatch this schema. '
                  'Do not wrap it in prose or markdown. Handoff is bounded reasoning, not a transcript.\n'+_json(result_schema(invocation.output_contract)))
     return '\n\n'.join(parts)
@@ -195,13 +196,25 @@ def parse_stage_result(value) -> StageResult:
         seen.add(item['name']); artifacts.append(ProducedArtifact(**item))
     handoff = value['handoff']
     if handoff is not None:
-        _keys(handoff, StageHandoff.__dataclass_fields__)
-        _text(handoff['summary'], True)
-        _require(len(handoff['summary']) <= 8192, 'handoff summary too long')
-        for key in ('findings','evidence','changed_assumptions','blockers'):
-            _require(type(handoff[key]) is list and len(handoff[key]) <= 64, 'invalid handoff collection')
-            for item in handoff[key]:
-                _text(item, True); _require(len(item) <= 8192, 'handoff item too long')
+        handoff_check(type(handoff) is dict, '', 'body object or null', _kind(handoff), ProviderExecutionError)
+        for descriptor in HANDOFF_BODY_FIELDS:
+            handoff_check(descriptor.name in handoff, descriptor.name, 'required field', 'missing field', ProviderExecutionError)
+        handoff_check(set(handoff) == set(StageHandoff.__dataclass_fields__), '',
+                      'exact body fields', 'unexpected fields', ProviderExecutionError)
+        for descriptor in HANDOFF_BODY_FIELDS:
+            key = descriptor.name
+            items = handoff[key]
+            if descriptor.sequence:
+                handoff_check(type(items) is list, key, 'sequence', _kind(items), ProviderExecutionError)
+                handoff_check(len(items) <= HANDOFF_MAX_ITEMS, key, f'at most {HANDOFF_MAX_ITEMS} items',
+                              'length exceeded', ProviderExecutionError)
+                located = ((f'{key}[{index}]', item) for index, item in enumerate(items))
+            else:
+                located = ((key, items),)
+            for location, item in located:
+                handoff_text(item, location, strip=False, error=ProviderExecutionError)
+                handoff_check(len(item) <= HANDOFF_MAX_TEXT, location, f'at most {HANDOFF_MAX_TEXT} characters',
+                              'length exceeded', ProviderExecutionError)
         handoff = StageHandoff(**handoff)
     diagnostics = value['diagnostics']
     if diagnostics is not None:
