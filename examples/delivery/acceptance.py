@@ -1,16 +1,12 @@
 """Conservative Git acceptance: human-approved exact trees, never auto-staging."""
 from dataclasses import dataclass
 import hashlib
-import os
-from pathlib import Path
 import re
 import subprocess
 
+from switchyard.git_safety import GitRepository, ScopeBlocked
+
 from runtime import ExecutorResult, InvocationResponse
-
-
-class ScopeBlocked(ValueError):
-    pass
 
 
 @dataclass(frozen=True)
@@ -39,43 +35,15 @@ class Snapshot:
     patch_sha256: str
 
 
-class GitAcceptance:
+class GitAcceptance(GitRepository):
     def __init__(self, workspace: str, git_executable: str, approval: AcceptanceApproval | None = None):
-        for value in (workspace, git_executable):
-            if type(value) is not str or not os.path.isabs(value) or '\0' in value:
-                raise ValueError('workspace and Git executable must be absolute paths')
-        self.workspace = Path(workspace).resolve()
-        self.git_executable = git_executable
+        super().__init__(workspace, git_executable)
         self.approval = approval
         self.checked = None
         self.scoped = None
 
-    def git(self, *args, input=None):
-        result = subprocess.run([self.git_executable, *args], cwd=self.workspace,
-                                input=input, capture_output=True, timeout=30)
-        if result.returncode:
-            raise ScopeBlocked('Git inspection or update failed')
-        return result.stdout
-
     def inspect(self) -> Snapshot:
-        root = Path(os.fsdecode(self.git('rev-parse', '--show-toplevel').strip())).resolve()
-        if root != self.workspace:
-            raise ScopeBlocked('workspace must be the repository root')
-        branch = self.git('symbolic-ref', '--quiet', 'HEAD').decode().strip()
-        head = self.git('rev-parse', '--verify', 'HEAD').decode().strip()
-        for marker in ('MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REVERT_HEAD', 'rebase-merge', 'rebase-apply', 'BISECT_LOG', 'sequencer'):
-            path = Path(os.fsdecode(self.git('rev-parse', '--git-path', marker).strip()))
-            if not path.is_absolute():
-                path = self.workspace / path
-            if path.exists():
-                raise ScopeBlocked('Git operation in progress')
-        if self.git('ls-files', '--unmerged', '-z'):
-            raise ScopeBlocked('unmerged index')
-        if any(entry.startswith(b'160000 ') for entry in self.git('ls-files', '--stage', '-z').split(b'\0')):
-            raise ScopeBlocked('submodules are outside this acceptance preset')
-        flags = self.git('ls-files', '-v', '-z').split(b'\0')
-        if any(entry and (entry[:1] == b'S' or entry[:1].islower()) for entry in flags):
-            raise ScopeBlocked('sparse or assume-unchanged index entries require review')
+        branch, head = self.check_repository()
         self.git('diff', '--quiet', '--ignore-submodules=none', '--')
         if self.git('ls-files', '--others', '--exclude-standard', '-z'):
             raise ScopeBlocked('untracked files require scope review')
@@ -104,9 +72,8 @@ class GitAcceptance:
         if self.scoped is None or self.inspect() != self.scoped:
             raise ScopeBlocked('scope changed before commit')
         # Commit the immutable reviewed tree, never a subsequently changed index.
-        commit = self.git('commit-tree', self.scoped.tree, '-p', self.scoped.head,
-                          input=self.approval.message.encode('utf-8')).decode().strip()
-        self.git('update-ref', '-m', 'Switchyard acceptance', self.scoped.branch, commit, self.scoped.head)
+        commit = self.commit_tree(self.scoped.tree, self.scoped.head, self.approval.message)
+        self.advance_branch(self.scoped.branch, commit, self.scoped.head)
 
 
 @dataclass(frozen=True)

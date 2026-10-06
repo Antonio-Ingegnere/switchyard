@@ -1,0 +1,70 @@
+id: V2-007
+goal: Add a durable human-selected QA boundary with exact-candidate deterministic acceptance and feedback-only reopen.
+status: complete
+scope:
+  - switchyard/qa_lifecycle.py reusable capture, accept and reopen API using WorkWorkspace.
+  - Extract existing DELIVERY-001 Git guards and immutable-tree/ref primitives to switchyard/git_safety.py; preserve old staged-approval behavior.
+  - Real disposable Git tests and retained deterministic lifecycle dogfood.
+  - Existing V2 work-contract and workflow-bundle design documentation.
+constraints:
+  - READY_FOR_MANUAL_QA remains the terminal of the delivery run; human selects the later lifecycle operation.
+  - No provider calls, agent acceptance authority, agent final commit, push, retry, cleanup or history rewrite.
+  - Exact base HEAD, worktree identity, path set and raw content fingerprints must still match QA.
+  - Caller staging must be empty, including intent-to-add entries; use a private index and explicit candidate paths.
+  - No runtime/Event, workflow routing/budget/capability or DELIVERY-001 semantics changes.
+  - No V2-006 history mutation, live providers, Adeo, project/epic orchestration or V2-008.
+acceptance:
+  - Modified, added and deleted paths are captured with SHA-256 and Git executable mode or deletion marker.
+  - Safe accept commits exactly the reviewed tree, advances HEAD by one direct child and leaves a clean tracked/nonignored worktree.
+  - Scope, content, HEAD, identity, conflict and staging failures block without changing worktree or caller index.
+  - Reopen persists nonempty human feedback and immutable decision without touching Git.
+  - Every completed decision finalizes the candidate; durable unresolved intent blocks crash replay.
+  - Post-publication failures explicitly report non-rollbackable state and never reset the commit.
+  - Old acceptance regressions and full suite have zero new failures beyond accepted local deviations.
+verification:
+  - Focused tests/test_qa_lifecycle.py and tests/test_delivery_accept.py using real disposable Git repositories.
+  - Retained safe accept, unsafe scope, candidate drift, base HEAD drift and reopen dogfood; zero provider calls.
+  - All V2/V1/runtime/observability/delivery regressions in full unittest discovery under TERM=dumb.
+non_goals:
+  - Model-driven decisions or commit messages, automatic repair runs, push or another workflow engine.
+  - General Git recovery, multiwriter transactions, project lifecycle orchestration or CLI expansion.
+audit:
+  delivery_001_reused: Git repository guards and immutable commit-tree followed by update-ref compare-and-swap; old public GitAcceptance and manual staged-patch approval remain intact.
+  delivery_001_specific: Existing inspect requires staged changes, no unstaged/untracked changes and manual HEAD/patch-digest approval. V2 instead snapshots the QA worktree and stages its exact scope itself.
+  work_workspace: Catalogs are immutable; canonical delivery artifacts cannot be silently extended. A fresh external lifecycle WorkWorkspace uses the same existing catalog/manifest/versioning/publication machinery, with copied immutable request and source run/workspace references.
+  runtime: Small deterministic controller, no new Flow/Event protocol. Lifecycle operation identity is candidate digest plus its immutable intent/decision; source runtime run_id/correlation identity retained as provenance.
+  cli: Existing generic CLI is V1 flow-file execution; DELIVERY-001 CLI is tied to its pre-staged approval surface. V2 lifecycle remains a reusable API, avoiding unrelated CLI design.
+api:
+  capture: create_qa_candidate(target, source_workspace, source_result, source_flow, work_root)
+  accept: accept_v2_work(target, work_root)
+  reopen: reopen_v2_work(target, work_root, feedback)
+  commit_message: '<source_flow>: accept reviewed V2 work'
+  records: request, qa_candidate, qa_intent, qa_decision and qa_feedback in a normal WorkWorkspace.
+  policy: New lifecycle workspace per candidate; all completed decisions including COMMIT_BLOCKED finalize it. Incomplete durable intent requires manual inspection; no automatic replay.
+dogfood:
+  evidence: /tmp/switchyard-v2-007-dogfood-20261005/report.json
+  safe_accept:
+    terminal: ACCEPTED
+    commit: 32b5968ebcaa02bfb34d79f8dd1a219204e0399c
+    committed_paths: [source.txt]
+    message: 'feature: accept reviewed V2 work'
+    checks: One direct descendant of baseline; exact candidate scope; clean worktree.
+  unsafe_scope: COMMIT_BLOCKED / unexpected_worktree_paths; HEAD, caller index, candidate and unrelated work preserved.
+  candidate_drift: COMMIT_BLOCKED / candidate_drift; no commit or destructive cleanup.
+  base_head_drift: COMMIT_BLOCKED / base_head_changed; independently advanced HEAD preserved.
+  reopen: REOPENED; HEAD and index unchanged; candidate work preserved; qa_feedback v1 and qa_decision v1 durable.
+  feedback: The edge case still fails; retain this feedback for rework.
+  provider_calls: 0
+  repository_policy: All dogfood commits are in disposable target repositories; test identity is repository-local; no global configuration changes.
+verification_results:
+  focused: 44 passed; 33 V2-007 tests and 11 unchanged DELIVERY-001 acceptance regressions.
+  full_suite: 525 tests; 523 passed; one unchanged known synthetic SIGKILL failure; one existing Windows platform skip; zero new failures.
+  environment: TERM=dumb
+  known_failure: test_codex_repair.CodexRepairTests.test_exact_prompts_real_fake_cli_and_fresh_inputs, existing synthetic 4096-NUL case.
+  existing_skip: test_command.CommandTests.test_windows_batch_executables_rejected, Windows batch-path validation.
+  coverage: Complete discovery includes V2-006, V2-005, V2-004A/B/C/D/E, V2-003A/B/C/D/E, V2-002, V2-001E/F, loader/compiler, RUNTIME-V2, V1, observability and DELIVERY-001.
+  focused_log: /tmp/switchyard-v2-007-focused-final.log
+  full_suite_log: /tmp/switchyard-v2-007-full-suite.log
+  recovery_regression: Unverifiable publication raises LifecycleRecoveryRequired; durable prepared intent blocks replay without claiming HEAD stayed unchanged.
+  microspec: Existing strict MicroSpec validator passed.
+  scope: Runtime/Event, canonical workflows, V2-006 history and Adeo untouched; no live provider calls; no machine-local configuration committed.

@@ -441,3 +441,15 @@ Canonical feature/bugfix reasoning stages SPECIFY, TRIAGE and SPECIFY_FIX use re
 only. REPRODUCE, DIAGNOSE, DIAGNOSE_FAILURE and REDIAGNOSE use read plus command.
 IMPLEMENT, FIX, REPAIR_ONCE and REFIX use all three. VERIFY/VERIFY_AGAIN remain
 unchanged deterministic command states without model capabilities.
+
+### Delivery terminal and human QA (V2-007)
+
+FEATURE/BUGFIX delivery still terminates at `READY_FOR_MANUAL_QA`; neither graph
+waits for a human. After that terminal, `create_qa_candidate` freezes the presented
+Git worktree in a normal external WorkWorkspace. The caller's later human decision
+invokes `accept_v2_work` or `reopen_v2_work`. Acceptance is deterministic, exact-scope
+and fingerprint checked; reopen only records feedback. Terminals are `ACCEPTED`,
+`COMMIT_BLOCKED` or `REOPENED`. No role, model capability, transition, escalation,
+budget, fresh/continue behavior or provider contract changes. See the
+[work-contract lifecycle boundary](work-contract.md#human-qa-lifecycle-v2-007) for
+index safety, crash/replay rules, identity policy and post-commit non-rollback.
