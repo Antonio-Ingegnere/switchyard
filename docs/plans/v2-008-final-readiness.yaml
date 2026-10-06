@@ -1,0 +1,136 @@
+id: V2-008
+goal: Freeze a coherent and regression-protected V2 single-work-item delivery and human QA engine for consumer migration.
+status: complete
+scope:
+  - Audit existing public, internal, legacy and example surfaces without adding an architectural layer.
+  - Offline FEATURE delivery through real compiler/runtime/provider-process adapters/verifier/workspace and Git lifecycle across a process boundary.
+  - Small prepublication outcome-membership and rejected-name diagnostic correction in context transport.
+  - Normative invariants, readiness/API/restart documentation and current README navigation.
+constraints:
+  - No live Claude/Codex calls or provider budget; only fake CLI processes.
+  - Preserve canonical models, efforts, capabilities, escalation, budgets and adapter behavior.
+  - Preserve runtime/Event, V1, DELIVERY-001 and historical plans including V2-006/V2-007.
+  - No Adeo changes, project orchestration, push, release machinery or V2-009.
+acceptance:
+  - FEATURE reaches READY_FOR_MANUAL_QA without committing; a later human-selected ACCEPT makes exactly one exact-byte and exact-scope commit.
+  - REOPEN preserves HEAD and worktree and exposes durable feedback to a caller.
+  - New process reconstructs completed run from recorded events and WorkWorkspace, without serialized Python objects or provider sessions.
+  - Undeclared stage outcomes and rejected artifact names fail safely before durable output publication.
+  - Supported surfaces, crash boundaries, canonical configuration and limitations are explicit and internally consistent.
+  - Focused matrix and full suite under TERM=dumb have zero new failures beyond accepted local deviations.
+verification:
+  - tests/test_v2_readiness.py joins canonical FEATURE, fake provider processes, real command verifier, separate-process reconstruction and actual Git acceptance/reopen.
+  - tests/test_context_transport.py proves undeclared outcomes and arbitrary production names publish nothing and do not leak rejected content.
+  - Explicit grouped runs cover every top-level test module; final full discovery includes all V2, runtime, provider, workspace, V1, DELIVERY-001 and observability regressions.
+  - Retained disposable accept/reopen dogfood reports plus strict MicroSpec validation and final staged-diff review.
+non_goals:
+  - New runtime, transaction framework, consumer migration, API façade, CLI expansion or model tuning.
+  - Automatic recovery/retry, provider sessions, telemetry streaming, project/DAG orchestration, server/GUI, publishing or PR/push automation.
+surface_inventory:
+  - surface: switchyard.workflow_bundle.load_workflow_bundle and WorkflowBundle.flow
+    classification: PUBLIC
+    purpose: Strict separate V2 loader and flow selection; FlowConfigError on invalid input.
+  - surface: ArtifactSpec, BudgetSpec, CommandOutcomes, CommandCapture, CommandSpec, ExecutionProfile, InvocationBinding, EscalationStep, RoleBinding, WorkflowStateSpec, WorkflowSpec, WorkflowBundle
+    classification: PUBLIC
+    purpose: Immutable V2 schema values from switchyard.workflow_bundle; no renaming or façade needed.
+  - surface: switchyard.workflow_compiler.compile_workflow, CompiledWorkflow, CompiledStatePlan, ExecutionBinding, WorkflowCompileError
+    classification: PUBLIC
+    purpose: Compile to existing runtime and inspect exact rung/budget/capability bindings; caller-supplied executor resolution.
+  - surface: runtime.run, WorkUnit, RunResult, Executor and invocation/result protocols; runtime.recording.JsonlRecorder; switchyard.observability.read_events and projections
+    classification: PUBLIC
+    purpose: Shared V1/V2 execution and recording boundary; no runtime redesign.
+  - surface: switchyard.context_transport.workspace_resolver, StageExecutor, StageInvocation, StageResult, ProducedArtifact, ArtifactSnapshot, StageHandoff, StageOutputContract, StageOutputArtifactContract, StageHandoffContract
+    classification: PUBLIC
+    purpose: Durable-context composition and strict stage input/output extension point.
+  - surface: switchyard.provider_stages.ProviderRuntimeConfig, ProviderStageExecutorResolver, ProviderResolutionError; switchyard.provider_process.ProviderExecutionError
+    classification: PUBLIC
+    purpose: Local executables/environment/timeouts/aliases, eager capability resolution and bounded operational errors.
+  - surface: switchyard.work_contract.WorkWorkspace, ArtifactRecord, ArtifactProducer, HandoffRecord, MicroSpec, validate_microspec, WorkContractError
+    classification: PUBLIC
+    purpose: Open/initialize/read/write/version artifacts, validate/write/read structured handoffs, immutable request and verified manifest history.
+  - surface: switchyard.workflow_execution.execute_v2_workflow and WorkflowExecution
+    classification: PUBLIC
+    purpose: Small reusable full V2 runner returning result/workspace/compiled plan.
+  - surface: switchyard.qa_lifecycle.create_qa_candidate, accept_v2_work, reopen_v2_work, QaCandidate, QaDecision, LifecycleError, LifecycleRecoveryRequired
+    classification: PUBLIC
+    purpose: Explicit human lifecycle operations on fresh external QA workspace; no agent acceptance authority.
+  - surface: Compiler lowering helpers, ContextualExecutor, concrete provider executors/render/schema/process helpers, workspace publication helpers, git_safety and private QA Git controller
+    classification: INTERNAL
+    purpose: Implementation mechanisms behind documented extension points; no new consumer imports required.
+  - surface: V1 flow_config loader, switchyard CLI, runtime command/Claude/Codex adapters and DELIVERY-001 presets/acceptance/analytics
+    classification: LEGACY-COMPATIBILITY
+    purpose: Preserve public behavior and tests; no migration or deletion.
+  - surface: examples/delivery/workflows-v2.yaml
+    classification: EXAMPLE-ONLY
+    purpose: Canonical portable FEATURE/BUGFIX delivery configuration; supported starting point, not runtime logic.
+  - surface: examples/escalation/workflows-v2.yaml and factual markdown
+    classification: EXAMPLE-ONLY
+    purpose: Bounded cross-provider escalation and singleton outcomes; vertical continue and horizontal fresh without tools.
+  - surface: examples/delivery/dogfood_feature.py and dogfood_bugfix.py
+    classification: EXAMPLE-ONLY
+    purpose: Existing live/offline evidence harnesses; not consumer APIs; no live calls repeated.
+  - surface: examples/delivery/offline_lifecycle.py and design-doc snippets
+    classification: EXAMPLE-ONLY
+    purpose: Executable lifecycle/reconstruction recipe and minimal programmatic instruction; fixtures reuse existing FEATURE test data.
+audit:
+  bugfix_integration: Existing V2-006 offline tests already prove canonical BUGFIX delivery and verifier. Repeating their machinery through the identical QA API would duplicate coverage; new complete FEATURE plus V2-007 covers the join.
+  output_consistency: Previously a syntactically valid undeclared outcome could publish outputs before runtime rejection. Context transport now checks the existing compiled allowed-outcome set first; runtime still owns routing. Undeclared production errors no longer echo rejected names.
+  crash_consistency: No new storage mechanism or crash-consistency redesign. Sequential publication, partial-prefix hazards, locks, intents, immutable commit/CAS, event-recorder limits and manual recovery are documented in v2-readiness.md.
+  canonical_config: All four profiles are referenced. TRIAGE/SPECIFY_FIX Sonnet medium read-only; REPRODUCE/DIAGNOSE primary Haiku medium read+command; FIX Sonnet medium read+write+command; verification deterministic. Run/state/rung budget ownership and adjacent ladders unchanged.
+  local_config: Portable generic selectors only in canonical YAML; machine aliases remain local. offline-model is an explicitly fake test selector, not a machine model ID.
+  unused_catalog: triage and revised_fix_microspec are unused declarations, retained to avoid needless catalog compatibility changes.
+  errors: Existing error classes retained; configuration errors name trusted local configuration, provider operational errors bounded/redacted, work-contract rejected content omitted, lifecycle fixed reasons and explicit recovery.
+  terminology: Workflow bundle contains named flows; logical states use roles/profiles/rungs; artifacts are durable facts and handoffs prior reasoning; continue/fresh are context policies, not sessions. Explicit lifecycle terminals retained.
+  cleanup: No production dead code or example removed. Historical README notes labelled as historical; current navigation and API docs added; stale equal-rung-outcome/current-publication claims corrected in context-transport design.
+  compatibility: No package export churn, new façade, CLI, dependency, runtime/Event or provider behavior changes. DELIVERY-001 and historical plans untouched.
+dogfood:
+  accept:
+    evidence: /tmp/switchyard-v2-008-accept-20261006/report.json
+    delivery_terminal: READY_FOR_MANUAL_QA
+    lifecycle_terminal: ACCEPTED
+    commit: 25767cec15b8c9b5aa65b3bebefd7e094b408517
+    committed_paths: [catalog.py]
+    checks: Delivery did not commit; restarted lifecycle committed exactly one direct child with exact candidate bytes; acceptance tests unchanged; clean worktree.
+  reopen:
+    evidence: /tmp/switchyard-v2-008-reopen-final-20261006/report.json
+    delivery_terminal: READY_FOR_MANUAL_QA
+    lifecycle_terminal: REOPENED
+    unchanged_head: e92bd1682e6c95d8fc2941fea78a08fac5614859
+    candidate_identity: 5d30ddc8086dabff2ec07c7eb01e0248730c7dfb19ed798e343984b74e9b6b27
+    feedback: Please review the naming before acceptance.
+    checks: HEAD unchanged; catalog.py change preserved; no staging; qa_feedback readable after reopen; candidate retained.
+  reconstruction: Both operations used a new Python process, read_events plus validated summaries and RunResult reconstructed from persisted events, WorkWorkspace.open from disk, and candidate reopening. No provider session ID or serialized Python object.
+  delivery: SPECIFY -> IMPLEMENT -> VERIFY -> READY_FOR_MANUAL_QA; two fake Claude processes, two handoffs and request/microspec/implementation_handoff/verifier_evidence v1.
+  verifier: Real python3 -m unittest discover -s tests; 3 tests passed.
+  provider_calls_during_qa: 0
+  live_provider_calls: 0
+  extra_offline_run: The initial directory named reopen was invoked with the default accept operation; it is another successful disposable ACCEPT run, not the reported REOPEN proof. Preserved externally at /tmp/switchyard-v2-008-reopen-20261006.
+verification_results:
+  matrix: /tmp/switchyard-v2-008-matrix.json
+  canonical_bindings: /tmp/switchyard-v2-008-canonical-bindings.json
+  focused_counts:
+    V2-008: 2
+    V2-007: 33
+    V2-006: 5
+    V2-005: 4
+    V2-004A-B-C-D-E: 52
+    V2-003A-B-C-D-E-workspace: 63
+    V2-001A-B-C-D-E-F-loader: 58
+    V2-002-compiler: 19
+    RUNTIME-V2: 50
+    DELIVERY-001: 43
+    observability: 70
+    V1-runtime-adapters: 129
+  focused_result: All groups passed except the unchanged known synthetic SIGKILL failure and existing Windows-only skip in V1-runtime-adapters. V2-003 group reran successfully after its expected diagnostic assertion was updated to require no rejected-name echo.
+  full_suite: 528 tests; 526 passed; one unchanged known synthetic SIGKILL failure; one unchanged Windows-only skip; zero new failures.
+  full_suite_log: /tmp/switchyard-v2-008-full-suite-final.log
+  full_suite_environment: TERM=dumb
+  known_failure: test_codex_repair.CodexRepairTests.test_exact_prompts_real_fake_cli_and_fresh_inputs, synthetic 4096-NUL case; not modified or skipped.
+  existing_skip: test_command.CommandTests.test_windows_batch_executables_rejected, Windows batch-path validation.
+  checks: Strict MicroSpec validator, local documentation links and git diff --check passed.
+readiness:
+  declaration: Switchyard V2 is internally complete for bounded single-work-item FEATURE and BUGFIX delivery, cross-provider escalation, deterministic verification, durable context, manual QA, safe acceptance and reopen lifecycle. No known internal prerequisite remains before consumer migration.
+  limitations: No successful provider command-tool telemetry, no automatic provider retry, no push, no runtime crash-resume, cooperative exclusive Git/workspace access, existing provider capability matrices and manual partial-state recovery; accepted local test deviations remain explicit.
+  frozen: Canonical workflow configuration, provider behavior, runtime/Event, V1/DELIVERY-001 compatibility and historical evidence.
+  consumer_boundary: Migration supplies project workflow/configuration, local executables/aliases, durable event recording, isolated worktree ownership and human authorization; not another internal engine prerequisite.
+  stop: Adeo untouched; no V2-009 begun.

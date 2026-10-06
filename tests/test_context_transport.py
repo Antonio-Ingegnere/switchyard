@@ -149,6 +149,23 @@ class ContextTests(unittest.TestCase):
             self.assertIsNone(self.workspace.latest_artifact('microspec'))
             self.assertEqual(self.workspace.handoffs(),())
 
+    def test_rejected_outcome_and_artifact_name_never_publish_or_leak(self):
+        marker = 'UNTRUSTED_SECRET_MARKER_' * 100
+        results = [StageResult(marker, (ProducedArtifact('microspec', SPEC),), StageHandoff('valid')),
+                   StageResult('ready', (ProducedArtifact(marker, 'content'),))]
+        before = (self.workspace.root/'manifest.jsonl').read_bytes()
+        for result in results:
+            with self.subTest(outcome=result.outcome == 'ready'):
+                with self.assertRaises(WorkContractError) as caught:
+                    self.wrapper(result=result).run(InvocationRequest(WorkUnit(REQUEST)))
+                error = caught.exception
+                while error is not None:
+                    self.assertNotIn(marker, str(error))
+                    error = error.__cause__
+                self.assertEqual((self.workspace.root/'manifest.jsonl').read_bytes(), before)
+                self.assertIsNone(self.workspace.latest_artifact('microspec'))
+                self.assertEqual(self.workspace.handoffs(), ())
+
     def test_latest_snapshot_isolation_and_bound(self):
         wrapper=self.wrapper('IMPLEMENT')
         self.workspace.write_artifact('microspec',SPEC)

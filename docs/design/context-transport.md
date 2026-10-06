@@ -66,10 +66,10 @@ StageHandoff cannot supply these fields. `WorkWorkspace.validate_artifact` and
 `validate_handoff` provide the same storage validators without writes.
 
 Commit artifacts in result order, then the handoff, then return InvocationResponse.
-No runtime transition is selected by this layer. Runtime remains authoritative for
-state-declared outcome membership; an undeclared semantic outcome can consequently
-be rejected after durable outputs have committed. Storage success is not execution
-success and must be interpreted with canonical runtime events.
+No runtime transition is selected by this layer. The wrapper prevalidates membership
+in the compiled output contract before any publication (V2-008). Runtime remains authoritative for routing and independently
+checks outcome membership. Storage success is not execution success: later runtime
+or recorder failure must still be interpreted with canonical events.
 
 Prevalidation prevents validation-induced partial batches. I/O failure can still
 leave a committed prefix; raise before returning an outcome and retain immutable
@@ -94,8 +94,9 @@ control-plane `budget_exceeded`, into `ExecutionBinding.executor_allowed_outcome
 CompiledStatePlan exposes the same property. It does this before eager executor
 resolution; no circular dependency, registry, routing reconstruction or runtime-name
 parsing is involved. ContextualExecutor consumes that tuple without learning targets.
-Current ladder rungs happen to have equal sets because exhaustion handles every
-recognized escalation trigger; this slice does not change that routing semantics.
+Without per-rung restrictions, ladder rungs may share sets because exhaustion
+handles recognized escalation triggers. V2-001E restrictions can narrow those sets
+individually, as described below.
 
 Produced descriptors come from state.produces plus the bundle artifact catalog.
 Names are exact logical identifiers, never filenames. All production remains optional;

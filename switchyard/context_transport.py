@@ -195,6 +195,7 @@ class ContextualExecutor:
         _require(type(result) is StageResult, 'expected StageResult')
         _require(type(result.outcome) is str and bool(result.outcome) and '\0' not in result.outcome
                  and result.outcome != 'budget_exceeded', 'invalid stage outcome')
+        _require(result.outcome in self.output_contract.allowed_outcomes, 'undeclared stage outcome')
         _require(result.diagnostics is None or type(result.diagnostics) is DiagnosticPayload,
                  'expected DiagnosticPayload')
         producer = ArtifactProducer(self.binding.flow_name, self.binding.logical_state,
@@ -203,7 +204,7 @@ class ContextualExecutor:
         for artifact in result.produced_artifacts:
             _require(type(artifact) is ProducedArtifact, 'expected ProducedArtifact')
             _require(type(artifact.name) is str and artifact.name in self.declaration.produces,
-                     f'undeclared production: {artifact.name}')
+                     'undeclared production')
             _require(artifact.name not in names, f'duplicate production: {artifact.name}')
             try:
                 self.workspace.validate_artifact(artifact.name, artifact.content, producer)

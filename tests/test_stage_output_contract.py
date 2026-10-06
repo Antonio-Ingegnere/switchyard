@@ -47,8 +47,9 @@ class StageOutputContractTests(unittest.TestCase):
         class Bad:
             def run(self, invocation):
                 return StageResult('ready', (ProducedArtifact('spec.md', SPEC),), StageHandoff('summary'))
-        with self.assertRaisesRegex(WorkContractError, 'undeclared production: spec.md'):
+        with self.assertRaisesRegex(WorkContractError, r'feature.SPECIFY\[0\]: undeclared production$') as caught:
             replace(wrapper, stage_executor=Bad()).run(InvocationRequest(WorkUnit(REQUEST)))
+        self.assertNotIn('spec.md', str(caught.exception))
         self.assertIsNone(self.workspace.latest_artifact('microspec'))
         self.assertEqual(self.workspace.handoffs(), ())
         class Aware:

@@ -1,3 +1,37 @@
+# Switchyard
+
+A deterministic control plane for bounded, interchangeable coding agents. Agents
+execute; runtime owns transitions, budgets and escalation. V2 supports one FEATURE
+or BUGFIX work item through verified delivery, human QA, safe acceptance or reopen.
+
+Start here:
+
+- [V2 readiness and supported Python APIs](docs/design/v2-readiness.md)
+- [Normative V2 invariants](docs/design/v2-invariants.md)
+- [Canonical FEATURE / BUGFIX bundle](examples/delivery/workflows-v2.yaml)
+- [Cross-provider escalation example](examples/escalation/workflows-v2.yaml)
+- [Offline delivery → QA → accept/reopen example](examples/delivery/offline_lifecycle.py)
+- [QA safety and durable work contract](docs/design/work-contract.md)
+
+From the source checkout, use Python 3.10+ with PyYAML installed:
+
+```sh
+TERM=dumb python3 -m unittest discover -s tests -v
+python3 -m examples.delivery.offline_lifecycle --root /tmp/new-v2-accept
+python3 -m examples.delivery.offline_lifecycle --root /tmp/new-v2-reopen --operation reopen
+```
+
+The lifecycle examples use fake provider processes, a real verifier, and disposable
+Git repositories. Paths must be fresh; results are retained. Live dogfood harnesses
+are separate, opt-in evidence tools. No provider budget is needed for the test suite.
+
+## Historical implementation notes
+
+The sections below preserve slice-by-slice implementation history, including limits
+that applied **at that slice**. Statements such as “compiler unimplemented” or
+“providers remain future work” are historical, not current V2 limitations. Use the
+readiness document above for the current surface. V1 and DELIVERY-001 remain compatible.
+
 # RUNTIME-001 through RUNTIME-007
 
 Minimal synchronous Python control plane using only the standard library.
