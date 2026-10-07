@@ -24,6 +24,9 @@ def _safe_display(value: str, limit: int | None = None) -> str:
 def _parser():
     parser = argparse.ArgumentParser(prog='switchyard', allow_abbrev=False)
     commands = parser.add_subparsers(dest='command', required=True)
+    config = commands.add_parser('config', allow_abbrev=False)
+    config.add_argument('action', choices=('validate', 'show'))
+    config.add_argument('config_file', nargs='?', default='.switchyard/config.yaml')
     validate = commands.add_parser('validate', allow_abbrev=False)
     validate.add_argument('flow_file')
     execute = commands.add_parser('run', allow_abbrev=False)
@@ -39,6 +42,15 @@ def _parser():
 
 def main(argv=None) -> int:
     args = _parser().parse_args(argv)
+    if args.command == 'config':
+        from .simple_config import load_simple_config
+        try:
+            config = load_simple_config(args.config_file)
+        except FlowConfigError as exc:
+            print('switchyard: '+_safe_display(str(exc), 512), file=sys.stderr)
+            return 2
+        print(json.dumps(config.show(), indent=2) if args.action == 'show' else 'Valid project configuration')
+        return 0
     try:
         loaded = load_flow(args.flow_file)
     except FlowConfigError as exc:

@@ -1,0 +1,44 @@
+id: CONFIG-001
+goal: Make one project-local human-editable agents/flows/lifecycle file the normal Switchyard and Adeo configuration surface.
+status: complete
+scope:
+  - Strict SimpleConfig loader and deterministic lowering to existing WorkflowBundle and compiler.
+  - Config validate/show CLI with no provider resolution or invocation.
+  - Complete default FEATURE/BUGFIX example and simple configuration documentation.
+  - Adeo consumer changes in its separate repository, with shared Astra specification agent and YAML-owned verifier.
+constraints:
+  - Preserve runtime/Event, adjacent escalation, budgets, context, output contracts, adapters and QA safety.
+  - No live providers, model retries, new capability vocabulary in the engine or project orchestration.
+  - Preserve verbose V2 and legacy APIs as advanced compatibility surfaces.
+acceptance:
+  - One project file declares execution agents, direct models, effort, permissions, graphs, artifacts, limits and lifecycle policy.
+  - Editing one shared agent changes all specification bindings; editing one state reference changes only that state.
+  - Unsupported permission combinations fail before executable resolution with simple-config locations.
+  - Real fake-process FEATURE and BUGFIX reach READY_FOR_MANUAL_QA using only the project file and external launch environment.
+  - Existing real deterministic verifier and Git QA lifecycle pass exact-scope accept and durable reopen regressions.
+  - Zero new failures relative to the documented Switchyard and Adeo baselines.
+verification:
+  - tests/test_simple_config.py covers parsing, equivalence, permissions, escalation, budgets, CLI, edits and real one-file delivery/lifecycle.
+  - Full Switchyard unittest discovery under TERM=dumb preserves known synthetic SIGKILL failure and existing platform skip.
+  - Adeo delivery-selftest.py exercises its actual consumer, persistent external QA, restart, policy, edits, isolation and legacy compatibility.
+  - Full Adeo verifier compares against two existing unrelated Electron selftest failures.
+non_goals:
+  - Runtime rewrite, provider behavior tuning, secrets in YAML, release infrastructure, push or automatic provider retry.
+  - Project/epic orchestration or historical plan rewrites.
+design:
+  lowering: Agents become internal profiles; each state gets an internal role; run ladders become adjacent V2 escalation steps; output declarations form the validated artifact catalog.
+  permissions: Agent workspace/shell policy becomes existing shared state capabilities; heterogeneous ladder permissions fail closed.
+  validation_reuse: workflow_bundle_from_data reuses the unchanged advanced loader validator; validate_provider_configuration shares existing resolver checks without executable resolution.
+  input_rule: Each non-request input needs a reachable producer before its consumer within the same flow; runtime still checks path-specific availability.
+  defaults: One invocation per rung, one state visit, state invocation sum of rung limits, run invocation sum of state limits, NEEDS_HUMAN exhaustion.
+  lifecycle: Consumer gates candidate/accept/reopen operations with explicit boolean policy; V2 remains sole commit authority.
+  history: Adeo stores a digest-bound project-config snapshot as runtime evidence for status and pending QA after restart; new work always uses project config.yaml.
+  advanced: Verbose V2 and optional runtime model aliases remain supported but are not used by normal Adeo delivery.
+  default_delta: Only specification agents move from Sonnet read-only to direct Codex Astra high read-plus-shell; investigation/coding, topology, artifacts, escalation and budgets match the accepted workflow. Adeo verifier argv lives in its command agent.
+results:
+  simple_config: 22 passed, including three one-file FEATURE/BUGFIX and accept/reopen integrations.
+  provider_regressions: 30 passed after shared validation extraction.
+  full_switchyard: 550 tests; 548 passed; unchanged synthetic SIGKILL failure; existing Windows-only skip; zero new failures.
+  log: /tmp/config-001-switchyard-full.log
+  consumer: Adeo changes and final consumer verification are recorded in its separate CONFIG-001 plan and commit.
+  protected: Runtime/Event, compiler semantics, capability matrix, provider transport, persistence and QA safety unchanged; zero live calls.

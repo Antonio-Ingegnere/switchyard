@@ -1,5 +1,8 @@
 # V2 readiness and consumer surface
 
+CONFIG-001 adds the [one-file configuration front end](../configuration.md) over this engine.
+Normal consumers use `load_simple_config` / `compile_simple_config`; verbose bundles remain advanced.
+
 Switchyard V2 is internally complete for bounded single-work-item FEATURE and
 BUGFIX delivery, cross-provider escalation, deterministic verification, durable
 context, manual QA, safe acceptance and reopen. No known internal prerequisite

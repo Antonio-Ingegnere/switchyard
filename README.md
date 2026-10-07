@@ -6,9 +6,11 @@ or BUGFIX work item through verified delivery, human QA, safe acceptance or reop
 
 Start here:
 
+- [One-file project configuration](docs/configuration.md) — start with `.switchyard/config.yaml`
+- [Complete FEATURE / BUGFIX project config](examples/simple/config.yaml)
 - [V2 readiness and supported Python APIs](docs/design/v2-readiness.md)
 - [Normative V2 invariants](docs/design/v2-invariants.md)
-- [Canonical FEATURE / BUGFIX bundle](examples/delivery/workflows-v2.yaml)
+- [Advanced V2 FEATURE / BUGFIX bundle](examples/delivery/workflows-v2.yaml)
 - [Cross-provider escalation example](examples/escalation/workflows-v2.yaml)
 - [Offline delivery → QA → accept/reopen example](examples/delivery/offline_lifecycle.py)
 - [QA safety and durable work contract](docs/design/work-contract.md)

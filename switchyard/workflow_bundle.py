@@ -440,7 +440,11 @@ def load_workflow_bundle(path: str | os.PathLike[str]) -> WorkflowBundle:
         text = Path(path).read_text(encoding='utf-8')
     except (OSError, UnicodeError, TypeError, ValueError) as exc:
         raise _error('$', 'cannot read UTF-8 workflow bundle') from exc
-    data = _bundle_yaml_data(text)
+    return workflow_bundle_from_data(_bundle_yaml_data(text))
+
+
+def workflow_bundle_from_data(data) -> WorkflowBundle:
+    """Validate a normalized V2 mapping without filesystem or provider operations."""
     _fields(data, {'version', 'profiles', 'roles', 'flows'}, {'artifacts'}, '')
     if type(data['version']) is not int or data['version'] != 2:
         raise _error('version', 'expected workflow bundle version 2 (integer, excluding bool)')

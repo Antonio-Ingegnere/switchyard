@@ -1,5 +1,8 @@
 # Workflow bundle v2
 
+For normal project configuration use [`.switchyard/config.yaml`](../configuration.md).
+This document describes the advanced/internal lowering target, still supported for compatibility.
+
 A bundle is a project-facing description, not an executable flow. The only loader is
 `switchyard.workflow_bundle.load_workflow_bundle(path) -> WorkflowBundle`.
 It reads UTF-8 YAML, validates all definitions and references, and returns immutable

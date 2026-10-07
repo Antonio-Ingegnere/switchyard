@@ -314,6 +314,23 @@ def _validate_capabilities(binding):
             f'provider {binding.provider} cannot represent capabilities {list(caps)!r}: unsupported combination')
 
 
+def validate_provider_configuration(binding, resolved_model=None):
+    """Validate permissions/model policy without resolving or launching executables."""
+    _validate_capabilities(binding)
+    if binding.effort not in (None, 'low', 'medium', 'high'):
+        raise ProviderResolutionError('unsupported generic effort')
+    if binding.provider == 'command':
+        if binding.effort is not None:
+            raise ProviderResolutionError('invalid command binding')
+        return
+    if binding.provider not in ('claude', 'codex'):
+        raise ProviderResolutionError('unsupported provider')
+    _model_name(binding.model)
+    resolved = binding.model if resolved_model is None else resolved_model
+    if binding.provider == 'claude' and binding.effort is not None and resolved not in _HAIKU + _SONNET:
+        raise ProviderResolutionError('Claude effort translation is not audited for resolved model')
+
+
 def _same_binding(expected, invocation):
     if invocation.binding != expected:
         raise ProviderExecutionError('stage invocation binding differs from resolved binding')
@@ -518,20 +535,13 @@ class ProviderStageExecutorResolver:
         profile=self.profiles.get(binding.profile_name)
         if profile is None or (profile.provider,profile.model)!=(binding.provider,binding.model):
             raise ProviderResolutionError('binding/profile mismatch')
-        _validate_capabilities(binding)
         config=self.runtime_config
-        if binding.effort not in (None,'low','medium','high'):
-            raise ProviderResolutionError('unsupported generic effort')
+        resolved = config.model_aliases.get(binding.provider, {}).get(binding.model, binding.model)
+        validate_provider_configuration(binding, resolved)
         if profile.provider=='command':
-            if binding.effort is not None or profile.command is None:
+            if profile.command is None:
                 raise ProviderResolutionError('invalid command binding')
             return CommandStageExecutor(binding,_executable(profile.command.argv[0],config),profile.command,config)
-        if profile.provider not in ('claude','codex'):
-            raise ProviderResolutionError('unsupported provider')
-        _model_name(binding.model)
-        resolved = config.model_aliases.get(binding.provider, {}).get(binding.model, binding.model)
         if profile.provider=='claude':
-            if binding.effort is not None and resolved not in _HAIKU + _SONNET:
-                raise ProviderResolutionError('Claude effort translation is not audited for resolved model')
             return ClaudeStageExecutor(binding,_executable(config.claude_executable,config),config,resolved)
         return CodexStageExecutor(binding,_executable(config.codex_executable,config),config,resolved)
