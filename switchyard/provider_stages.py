@@ -520,7 +520,16 @@ class CommandStageExecutor:
 
     def run(self, invocation):
         _same_binding(self.binding,invocation)
-        output=execute(self.executable,self.command.argv[1:],self.config,capture=self.command.capture)
+        with TemporaryDirectory(prefix='switchyard-artifacts-') as directory:
+            # Declared consumed artifacts as read-only files <name>, outside the worktree.
+            environment=None
+            if invocation.artifacts:
+                for snapshot in invocation.artifacts:
+                    path=Path(directory)/snapshot.record.name
+                    path.write_text(snapshot.content,encoding='utf-8');path.chmod(0o400)
+                environment={**self.config.environment,'SWITCHYARD_ARTIFACTS':directory}
+            output=execute(self.executable,self.command.argv[1:],self.config,capture=self.command.capture,
+                           environment=environment)
         outcome=self.command.outcomes.exit_codes.get(output.returncode,self.command.outcomes.default)
         artifacts=() if self.command.capture is None else (ProducedArtifact(self.command.capture.artifact,output.evidence),)
         return StageResult(outcome,artifacts)

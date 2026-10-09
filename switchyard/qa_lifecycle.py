@@ -283,8 +283,10 @@ def create_qa_candidate(target, source_workspace: WorkWorkspace, source_result: 
         raise LifecycleError('source must be a READY_FOR_MANUAL_QA delivery')
     starts = [e for e in source_result.events if e.kind == 'run_started']
     ends = [e for e in source_result.events if e.kind == 'run_finished']
-    if (len(starts) != 1 or len(ends) != 1 or ends[0].run_id != starts[0].run_id
-            or ends[0].state != 'READY_FOR_MANUAL_QA'):
+    # Earlier terminals are allowed only when an explicit recovery continued the same run.
+    recoveries = [e for e in source_result.events if e.kind == 'run_resumed' and e.target is not None]
+    if (len(starts) != 1 or len(ends) != 1 + len(recoveries) or source_result.events[-1] is not ends[-1]
+            or any(e.run_id != starts[0].run_id for e in ends) or ends[-1].state != 'READY_FOR_MANUAL_QA'):
         raise LifecycleError('source run provenance is incomplete')
     root, target = Path(work_root).absolute(), Path(target).resolve()
     if root.exists() or root.resolve().is_relative_to(target):

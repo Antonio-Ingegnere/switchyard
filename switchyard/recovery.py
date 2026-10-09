@@ -18,7 +18,7 @@ import time
 from runtime import WorkUnit, run, Event, ExecutionError
 from runtime.recording import JsonlRecorder
 from .observability import read_events, summarize_runs
-from .simple_config import simple_config_from_text
+from .simple_config import simple_config_from_text, HUMAN_TERMINALS
 from .workflow_bundle import ArtifactSpec
 from .work_contract import WorkWorkspace
 from .workflow_compiler import compile_workflow
@@ -222,7 +222,7 @@ def _compiled(project,flow,workspace,config,store,repo,root):
         lambda binding:_CheckpointExecutor(provider(binding),store,repo,root)))
 
 
-def _drive(project,flow,request,root,config,store,repo,history=None):
+def _drive(project,flow,request,root,config,store,repo,history=None,recover_to=None):
     workspace=WorkWorkspace.open(root,project.bundle.artifacts);workspace.initialize_request(request)
     try:
         def observe(event,pid):
@@ -232,7 +232,7 @@ def _drive(project,flow,request,root,config,store,repo,history=None):
         config=replace(config,process_observer=observe)
         compiled=_compiled(project,flow,workspace,config,store,repo,root)
         result=run(WorkUnit(request),compiled.flow,compiled.executors,
-                   recorder=_Recorder(Path(root)/'events.jsonl',store,compiled,root),resume_from=history)
+                   recorder=_Recorder(Path(root)/'events.jsonl',store,compiled,root),resume_from=history,recover_to=recover_to)
     except BaseException as exc:
         reason='execution_interrupted';cause=exc
         while cause is not None:
@@ -268,22 +268,48 @@ def execute_recoverable_v2_work(config_text,flow_name,request,work_root,provider
         return _drive(project,flow_name,request,root,provider_runtime_config,store,repo)
 
 
-def _capacity(compiled,history):
-    state=compiled.flow.states[history[-1].state]
+def _capacity(compiled,history,enter=None):
+    """Remaining budget for the interrupted visit, or for a new visit of state `enter`."""
+    state=compiled.flow.states[enter or history[-1].state]
     inv=[e for e in history if e.kind=='invocation_started']
     if compiled.flow.max_invocations_per_run is not None and len(inv)>=compiled.flow.max_invocations_per_run:return False
+    if enter is not None and state.max_state_visits_per_run is not None:
+        if sum(e.kind=='state_entered' and e.state==enter for e in history)>=state.max_state_visits_per_run:return False
     for scope in state.invocation_budgets:
         used=sum(any(s.name==scope.name for s in compiled.flow.states[e.state].invocation_budgets) for e in inv)
         if used>=scope.limit:return False
     return True
 
 
-def resume_v2_work(work_root,config_text,provider_runtime_config):
-    """Human-requested continuation of one interrupted visit; no budget reset."""
+class _Projection:
+    def run(self,request):raise AssertionError('projection only')
+
+
+def _route(config_text,flow,terminal):
+    """The workflow-declared recovery target of a human terminal; never derived from human text."""
+    if terminal not in HUMAN_TERMINALS:return None
+    spec=simple_config_from_text(config_text).bundle.flow(flow).states.get(terminal)
+    return None if spec is None or not spec.terminal else spec.resume_to
+
+
+def resume_v2_work(work_root,config_text,provider_runtime_config,reason=''):
+    """Human-requested continuation of the same run; no budget reset.
+
+    An interrupted visit is re-entered. A human terminal (NEEDS_HUMAN/NEEDS_REDIAGNOSIS)
+    continues only into the state its frozen workflow declares with `resume_to`.
+    `reason` is bounded recovery metadata and never influences routing.
+    """
+    if type(reason) is not str or len(reason.encode('utf-8'))>4096:
+        raise RecoveryBlocked('RESUME_BLOCKED','reason_too_large')
     root=Path(work_root).resolve()
     with _lock(root):
         store=_store(root);baseline=_read(store,'baseline');op=_read(store,'operation')
-        if op['phase']!='interrupted' or not op.get('resume_safe'):
+        target=None
+        if op['phase']=='delivery_done':
+            target=_route(baseline['config'],baseline['flow'],op.get('terminal'))
+            if target is None or store.versions('qa_reference'):
+                raise RecoveryBlocked('RESUME_BLOCKED','no_declared_recovery_route')
+        elif op['phase']!='interrupted' or not op.get('resume_safe'):
             raise RecoveryBlocked('RESUME_BLOCKED','not_a_resumable_interruption')
         try:project=simple_config_from_text(config_text)
         except ValueError as exc:
@@ -291,17 +317,25 @@ def resume_v2_work(work_root,config_text,provider_runtime_config):
         if _semantic(config_text)!=_semantic(baseline['config']):
             raise RecoveryBlocked('RESUME_BLOCKED','semantic_configuration_changed_new_delivery_required')
         repo=_Repo(provider_runtime_config.working_directory);snap,_=repo.snapshot()
-        _drift(_read(store,'checkpoint')['snapshot'],snap,'RESUME_BLOCKED',ignore=(CONFIG_PATH,))
+        checkpoint=_read(store,'checkpoint')
+        _drift(checkpoint['snapshot'],snap,'RESUME_BLOCKED',ignore=(CONFIG_PATH,))
         history=tuple(read_events(root/'events.jsonl'));summarize_runs(history)
-        if not history or history[-1].kind!='run_error':raise RecoveryBlocked('RESUME_BLOCKED','incomplete_event_history')
-        class Projection:
-            def run(self,request):raise AssertionError('projection only')
-        compiled=compile_workflow(project.bundle,baseline['flow'],lambda b:Projection())
-        if not _capacity(compiled,history):raise RecoveryBlocked('RESUME_BLOCKED','invocation_budget_exhausted')
+        end=('run_finished',op.get('terminal')) if target else ('run_error',)
+        if not history or (history[-1].kind,history[-1].state)[:len(end)]!=end:
+            raise RecoveryBlocked('RESUME_BLOCKED','incomplete_event_history')
+        compiled=compile_workflow(project.bundle,baseline['flow'],lambda b:_Projection())
+        enter=compiled.entry_states[target] if target else None
+        if not _capacity(compiled,history,enter):raise RecoveryBlocked('RESUME_BLOCKED','invocation_budget_exhausted')
         workspace=WorkWorkspace.open(root)
-        if _manifest(root)!=op['manifest_before']:raise RecoveryBlocked('RESUME_BLOCKED','artifact_history_changed')
-        _operation(store,'running')
-        return _drive(project,baseline['flow'],workspace.read_artifact('request'),root,provider_runtime_config,store,repo,history)
+        if _manifest(root)!=(checkpoint['manifest'] if target else op['manifest_before']):
+            raise RecoveryBlocked('RESUME_BLOCKED','artifact_history_changed')
+        if target:
+            missing=[a for a in project.bundle.flow(baseline['flow']).states[target].consumes if not workspace.versions(a)]
+            if missing:raise RecoveryBlocked('RESUME_BLOCKED','recovery_inputs_missing',missing)
+            _operation(store,'running',recovery=dict(from_terminal=op['terminal'],resume_to=target,reason=reason))
+        else:
+            _operation(store,'running',**({'recovery':dict(reason=reason)} if reason else {}))
+        return _drive(project,baseline['flow'],workspace.read_artifact('request'),root,provider_runtime_config,store,repo,history,enter)
 
 
 def recovery_status(work_root):
@@ -328,16 +362,17 @@ def recovery_status(work_root):
             raise RecoveryBlocked('RECOVERY_BLOCKED','qa_workspace_unavailable')
         qa=WorkWorkspace.open(ref['workspace'])
         if qa.versions('qa_decision'):terminal=_read(qa,'qa_decision')['terminal']
-    resumable=False
-    if phase=='interrupted' and op.get('resume_safe'):
-        try:
-            class P:
-                def run(self,r):raise AssertionError()
-            compiled=compile_workflow(simple_config_from_text(base['config']).bundle,base['flow'],lambda b:P())
-            resumable=_capacity(compiled,tuple(read_events(Path(work_root)/'events.jsonl')))
-        except Exception:pass
+    resumable=False;route=None
+    try:
+        if phase=='delivery_done' and not store.versions('qa_reference'):
+            route=_route(base['config'],base['flow'],terminal)
+        if route or (phase=='interrupted' and op.get('resume_safe')):
+            compiled=compile_workflow(simple_config_from_text(base['config']).bundle,base['flow'],lambda b:_Projection())
+            resumable=_capacity(compiled,tuple(read_events(Path(work_root)/'events.jsonl')),
+                                compiled.entry_states[route] if route else None)
+    except Exception:pass
     return dict(work_id=Path(work_root).name,target=base['snapshot']['identity']['target'],flow=base['flow'],phase=phase,terminal=terminal,
-                state=op.get('state'),reason=op.get('reason'),diagnostic=op.get('diagnostic'),resume_allowed=resumable,
+                state=op.get('state'),reason=op.get('reason'),diagnostic=op.get('diagnostic'),resume_allowed=resumable,resume_to=route,
                 rollback_allowed=phase in ('interrupted','delivery_done','rollback_running') and not op.get('checkpoint_uncertain',False) and terminal!='ACCEPTED')
 
 

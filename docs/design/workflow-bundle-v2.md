@@ -40,7 +40,7 @@ Unknown fields are errors at every level; no metadata escape hatch exists.
 | Each `escalation` item | **kind**, **on**, **profile**, **context**, `effort`, `budget` |
 | `flows.<name>` | **entry**, **run_budget**, **states** |
 | Normal state | **role**, **on**, `consumes`, `produces`, `budget`, **escalation_exhausted when the role has a ladder** |
-| Terminal state | **terminal: true**, and nothing else |
+| Terminal state | **terminal: true**; optional `resume_to: <nonterminal state>` names the only target of an explicit human recovery (recovery honors it for NEEDS_HUMAN/NEEDS_REDIAGNOSIS) |
 
 `profiles`, `roles`, `flows` and each flow's `states` are nonempty mappings. Normal
 state `on` is a nonempty mapping of project-defined outcome labels to state names.

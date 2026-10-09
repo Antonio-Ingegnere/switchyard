@@ -111,6 +111,7 @@ class WorkflowStateSpec:
     budget: BudgetSpec | None = None
     escalation_exhausted: str | None = None
     capabilities: tuple[str, ...] | None = None
+    resume_to: str | None = None  # Terminal only: the sole state an explicit human recovery may enter.
 
     def __post_init__(self):
         object.__setattr__(self, 'on', MappingProxyType(dict(self.on)))
@@ -364,8 +365,14 @@ def _workflow(data, roles, artifacts, path):
         if 'terminal' in state:
             if state['terminal'] is not True:
                 raise _error(here + '.terminal', 'only terminal: true is permitted; normal states omit terminal')
-            _fields(state, {'terminal'}, set(), here)
-            states[name] = WorkflowStateSpec(terminal=True)
+            _fields(state, {'terminal'}, {'resume_to'}, here)
+            resume_to = None
+            if 'resume_to' in state:
+                resume_to = _name(state['resume_to'], here + '.resume_to')
+                target = data['states'].get(resume_to)
+                if type(target) is not dict or 'terminal' in target:
+                    raise _error(here + '.resume_to', f'expected a nonterminal state of this flow, got {resume_to!r}')
+            states[name] = WorkflowStateSpec(terminal=True, resume_to=resume_to)
             continue
         _fields(state, {'role', 'on'}, {'consumes', 'produces', 'budget', 'escalation_exhausted', 'capabilities'}, here)
         role = _name(state['role'], here + '.role')

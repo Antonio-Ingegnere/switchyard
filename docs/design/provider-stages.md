@@ -123,6 +123,10 @@ stream. Incremental UTF-8 replacement decoding precedes tail retention. The evid
 starts with '=' for complete output or '!' for truncated output; the marker is included
 in max_bytes. Even a one-byte cap reports truncation. No command output is interpreted
 as LLM JSON, and no transport failure is turned into the default semantic outcome.
+Consumed artifact snapshots, already integrity-checked by the context boundary, are
+written read-only (0400) as `<name>` into a fresh temporary directory outside the
+worktree; `SWITCHYARD_ARTIFACTS` names it only when the state consumes something.
+The directory is removed after the process. Switchyard assigns no meaning to them.
 
 Structured stdout aborts on overflow; Codex's separate result file is monitored and
 read with a limit. Diagnostic retention is 4096 bytes. Capture limits bound retained

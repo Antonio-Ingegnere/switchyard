@@ -317,7 +317,8 @@ def validate(flow: Flow, executors: Mapping[str, Executor]) -> None:
 def run(work_unit: WorkUnit, flow: Flow, executors: Mapping[str, Executor],
         *, recorder: EventRecorder | None = None,
         context: RunContext | None = None,
-        resume_from: tuple[Event, ...] | None = None) -> RunResult:
+        resume_from: tuple[Event, ...] | None = None,
+        recover_to: str | None = None) -> RunResult:
     executors = dict(executors)
     validate(flow, executors)
     if type(work_unit) is not WorkUnit:
@@ -330,11 +331,19 @@ def run(work_unit: WorkUnit, flow: Flow, executors: Mapping[str, Executor],
         context = RunContext(context.correlation_id, context.parent_run_id)
     run_id = f"run:{uuid4()}"
     events: list[Event] = []
+    if recover_to is not None:
+        # Human recovery from a finished terminal into one declared, admitted state.
+        if (resume_from is None or type(recover_to) is not str or recover_to not in flow.states
+                or flow.states[recover_to].terminal or not resume_from or resume_from[-1].kind != 'run_finished'
+                or not flow.states.get(resume_from[-1].state, State()).terminal):
+            raise ValueError('recovery requires a finished terminal history and a nonterminal target')
     if resume_from is not None:
+        end = resume_from[-1].kind if resume_from else None
         if (not resume_from or resume_from[0].kind != 'run_started'
-            or resume_from[-1].kind != 'run_error' or resume_from[-1].invocation_id is None
-            or resume_from[-1].outcome is not None
-            or any(e.kind == 'run_finished' for e in resume_from)):
+            or (recover_to is None and (end != 'run_error' or resume_from[-1].invocation_id is None
+                                        or resume_from[-1].outcome is not None))
+            or any(e.kind in ('run_finished', 'run_error') and resume_from[i+1].kind != 'run_resumed'
+                   for i, e in enumerate(resume_from[:-1]))):
             raise ValueError('resume requires an interrupted invocation history')
         run_id = resume_from[0].run_id
         if any(e.run_id != run_id or (e.state is not None and e.state not in flow.states) for e in resume_from):
@@ -392,8 +401,8 @@ def run(work_unit: WorkUnit, flow: Flow, executors: Mapping[str, Executor],
     admitted_visits = dict.fromkeys(flow.states, 0)
     scope_usage = {scope.name: 0 for state in flow.states.values() for scope in state.invocation_budgets}
     pending: DiagnosticInput | None = None
-    resuming_visit = resume_from is not None
-    if resuming_visit:
+    resuming_visit = resume_from is not None and recover_to is None
+    if resume_from is not None:
         current = events[-1].state
         visit_id = events[-1].state_visit_id
         for event in events:
@@ -405,7 +414,12 @@ def run(work_unit: WorkUnit, flow: Flow, executors: Mapping[str, Executor],
                 for scope in flow.states[event.state].invocation_budgets:
                     scope_usage[scope.name] += 1
         # Durations across process clocks cannot be reconstructed honestly.
-        emit(Event('run_resumed', run_id, current, visit_id))
+        if recover_to is None:
+            emit(Event('run_resumed', run_id, current, visit_id))
+        else:
+            # The terminal visit stays closed; the target is admitted like any other visit.
+            emit(Event('run_resumed', run_id, current, target=recover_to))
+            current = recover_to
     while True:
         state = flow.states[current]
         if resuming_visit:

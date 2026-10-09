@@ -1,0 +1,54 @@
+id: VERIFICATION-RECOVERY-001
+goal: Let a human continue NEEDS_* work through a workflow-declared route, and let deterministic command stages read durable evidence such as a verification baseline.
+status: complete
+scope:
+  - Optional resume_to on NEEDS_HUMAN/NEEDS_REDIAGNOSIS terminals in the one-file configuration (and Workflow Bundle V2 terminals).
+  - resume_v2_work continues a finished human terminal into its declared target in the same work and run, with an optional bounded human reason.
+  - Runtime recover_to re-admits the target as a new visit from reconstructed counters; observability and QA provenance accept the recovered run.
+  - Command stages receive their declared consumed artifacts as read-only files in a private SWITCHYARD_ARTIFACTS directory.
+  - Package switchyard-runtime 2.2.0.
+constraints:
+  - No project-specific verifier knowledge, test names or ignore lists in Switchyard.
+  - No automatic resume, goto/rewind/--state or caller-selected state; routing is frozen workflow data.
+  - Budgets, drift checks, semantic-config freeze and checkpoint rules of RECOVERY-001 stay authoritative.
+  - Escalation ladders keep their documented sequential semantics; no runtime change to compensate for a declaration.
+acceptance:
+  - A NEEDS_REDIAGNOSIS run stays stopped until resume_v2_work is called, then re-enters only the declared target.
+  - Same work ID, run ID, artifacts, handoffs and event prefix; successful earlier states are not rerun.
+  - Visit, rung, state and run budgets continue from history; an exhausted target refuses before launch.
+  - Without a declaration, after semantic config change, on worktree drift or with moved artifacts resume refuses with RESUME_BLOCKED and changes nothing.
+  - READY_FOR_MANUAL_QA and other terminals cannot declare recovery; a recovered READY run yields an ordinary QA candidate.
+  - Consumed artifacts reach a command read-only, outside the worktree, and are removed afterwards.
+verification:
+  - tests/test_terminal_recovery.py with real fake-provider processes, real command verifier and disposable Git.
+  - Full TERM=dumb unittest discovery.
+non_goals:
+  - Retrofitting routes or baselines onto historical work, crash recovery, automatic retry, rewinds, push or project/epic orchestration.
+audit:
+  routing_bug: Adeo's DIAGNOSE_FAILURE ladder listed verification_same_failure only on rung 2. Ladders are sequential (configuration.md "No rung skipping"), so rung 0 sent it to on_exhausted=NEEDS_REDIAGNOSIS. This is a declaration error; the docs now spell the rule out. examples/simple/config.yaml has the same latent shape but is pinned equal to the historical workflows-v2.yaml graph used to project V2-009 runs, so it is unchanged here.
+  historical_work: Adeo work 4f0cf1a693204792a2ccf982c14d6f08 has no declared route in its frozen configuration and no baseline evidence; a scratch copy refuses with RESUME_BLOCKED no_declared_recovery_route. The original was not touched.
+implementation:
+  config: "flows.<flow>.states.NEEDS_REDIAGNOSIS: {terminal: true, resume_to: VERIFY}"
+  api: resume_v2_work(work_root, config_text, provider_runtime_config, reason='')
+  status: recovery_status adds resume_to and reports resume_allowed for declared terminals.
+  runtime: run(..., resume_from=history, recover_to=state) emits run_resumed(state=terminal, target=state); Event fields unchanged.
+  recovery_metadata: operation record recovery={from_terminal, resume_to, reason}; reason <= 4096 UTF-8 bytes, never routing.
+  command_inputs: SWITCHYARD_ARTIFACTS=<private temp dir>/<artifact name>, mode 0400, only when the state consumes artifacts.
+results:
+  focused: 7 terminal-recovery tests passed.
+  full_switchyard: 580 tests; 578 passed; unchanged test_codex_repair exact-prompts failure and unchanged platform skip; zero new failures; no live provider calls.
+changed_files:
+  - docs/configuration.md
+  - docs/design/delivery-recovery.md
+  - docs/design/provider-stages.md
+  - docs/design/workflow-bundle-v2.md
+  - docs/plans/verification-recovery-001.yaml
+  - pyproject.toml
+  - runtime/__init__.py
+  - switchyard/observability.py
+  - switchyard/provider_stages.py
+  - switchyard/qa_lifecycle.py
+  - switchyard/recovery.py
+  - switchyard/simple_config.py
+  - switchyard/workflow_bundle.py
+  - tests/test_terminal_recovery.py

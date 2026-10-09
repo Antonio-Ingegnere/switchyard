@@ -103,6 +103,10 @@ Optional `success` maps exit zero (default `pass`); `failure` maps all other exi
 (default `fail`). Optional `capture` names a declared text/markdown output; combined
 stdout/stderr is bounded to 32768 bytes. Command agents do not take model permissions
 or effort: the command itself is deterministic code authorized by this file.
+A command state's `consumes` reach the process as read-only files named after each
+artifact in the private directory `$SWITCHYARD_ARTIFACTS` (outside the worktree,
+removed after the process). A verifier can thereby compare against durable evidence,
+such as a baseline produced by an earlier command state.
 
 Each flow requires `start` and `states`. Optional `limits` has `run_invocations`
 (default sum of state invocation budgets) and `on_exceeded` (default `NEEDS_HUMAN`).
@@ -119,6 +123,9 @@ limits), `visits` (default 1), `on_exceeded` (default `NEEDS_HUMAN`). Limits are
 integers. Every invocation, state visit and run retains the exact V2 accounting rules.
 `READY_FOR_MANUAL_QA`, `NEEDS_HUMAN`, `NEEDS_REDIAGNOSIS` are implicit terminals when
 referenced; other terminals use `name: {terminal: true}`. Unknown targets fail.
+Only `NEEDS_HUMAN` and `NEEDS_REDIAGNOSIS` may additionally declare
+`resume_to: <nonterminal state>`, the single state an explicit human resume may enter
+(see [recovery](design/delivery-recovery.md#human-recovery-from-needs_-terminals)).
 `ACCEPTED`, `REOPENED`, `COMMIT_BLOCKED` are lifecycle results, not agent transitions.
 
 ## Escalation: one explicit ladder syntax
@@ -147,6 +154,9 @@ Triggers are V2's existing `inconclusive`, `budget_exceeded`, `diagnosis_disprov
 `verification_same_failure`. `budget_exceeded` is runtime-only, never a model outcome.
 Omitted `outcomes` uses the existing V2 routable outcome set. Omitted `on_exhausted`
 uses `NEEDS_HUMAN`. No rung skipping, retries, coercion or native session continuation.
+A ladder is strictly sequential: rung N escalates only on rung N+1's `when`. A trigger
+listed only on a later rung is unreachable from earlier rungs; there it exhausts the
+ladder (`on_exhausted`) unless `on` routes it. List it on every intermediate rung.
 Fresh excludes the previous handoff while retaining durable factual inputs.
 
 ## Human QA and consumers

@@ -2,7 +2,8 @@
 
 Recovery wraps the existing V2 compiler, context transport and runtime. It does
 not retry automatically, fabricate a StageResult or restore a provider session.
-New operations use the installed `switchyard-runtime` package, version 2.1.0.
+New operations use the installed `switchyard-runtime` package, version 2.2.0 (declared
+terminal recovery since VERIFICATION-RECOVERY-001).
 The advanced `execute_v2_workflow` API remains available without recovery.
 
 ## Public API
@@ -15,7 +16,8 @@ execution = execute_recoverable_v2_work(
 # A known provider failure raises after recording an interruption.
 status = recovery_status(work_root)
 # Only on explicit human request:
-execution = resume_v2_work(work_root, current_config_text, provider_runtime_config)
+execution = resume_v2_work(work_root, current_config_text, provider_runtime_config,
+                           reason="optional bounded human annotation")
 status = rollback_v2_work(work_root, reason="Wrong direction")
 ```
 
@@ -47,6 +49,41 @@ holds the original semantic configuration; normalized YAML comparison removes on
 `timeout`. Provider, model, effort, permissions, topology, artifacts, lifecycle and
 budgets remain frozen. A semantic change requires a new delivery. Config is still
 the one editable project file; baseline/config snapshots are immutable evidence.
+
+## Human recovery from NEEDS_* terminals
+
+`NEEDS_HUMAN` and `NEEDS_REDIAGNOSIS` stop automation. A run there stays stopped until
+a human calls `resume_v2_work`. It continues only if the work's frozen configuration
+declares the target on that terminal:
+
+```yaml
+flows:
+  feature:
+    states:
+      VERIFY:
+        run: [{agent: tests, budget: {invocations: 2}}]
+        budget: {visits: 2}
+        # ...
+      NEEDS_REDIAGNOSIS: {terminal: true, resume_to: VERIFY}
+```
+
+No other terminal may declare `resume_to`; READY_FOR_MANUAL_QA belongs to QA. Callers
+cannot name a state: there is no goto, rewind or `--state`. Without a declaration,
+resume refuses with `RESUME_BLOCKED: no_declared_recovery_route` and changes nothing.
+
+Recovery continues the same work and run. `run_resumed` records the terminal and the
+runtime target; the closed terminal visit remains in history. The target is entered as
+a new admitted visit, so visit, rung, state and run budgets apply from the reconstructed
+counts and are never reset. Reserve capacity explicitly, as above. Completed states,
+artifacts and handoffs remain; nothing before the target reruns. Resume refuses before
+launch when capacity is exhausted, a consumed input of the target is missing, the
+artifact manifest moved since the final checkpoint, the configuration changed beyond
+timeouts or the worktree drifted from the checkpoint (`RESUME_BLOCKED`); human edits
+are never overwritten. The optional `reason` (at most 4096 UTF-8 bytes) is stored on the
+operation record with the terminal and target. It never affects routing. A run that
+reaches READY_FOR_MANUAL_QA after recovery yields an ordinary QA candidate.
+`recovery_status` reports `resume_to` and `resume_allowed`. Work whose baseline
+configuration declared no route, including all earlier work, is not recoverable this way.
 
 ## Durable state and interruption
 

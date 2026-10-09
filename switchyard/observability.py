@@ -24,7 +24,7 @@ _VISIT = {'state', 'state_visit_id'}
 _INVOCATION = _VISIT | {'invocation_id'}
 _SHAPES = {
     'run_started': [set()],
-    'run_resumed': [_VISIT],
+    'run_resumed': [_VISIT, {'state', 'target'}],
     'state_entered': [_VISIT],
     'state_exited': [_VISIT],
     'invocation_started': [_INVOCATION],
@@ -156,10 +156,18 @@ class _RunShape:
         self.budget_target = None
         self.budget_visit = None
         self.closed_terminal = None
+        self.finished = None
         self.context = (None, None)
 
     def consume(self, event):
         kind = event.kind
+        if kind == 'run_resumed' and event.target is not None:
+            # Explicit human recovery from a finished terminal; the target visit is entered next.
+            _check(self.context == (event.correlation_id,event.parent_run_id),'inconsistent run correlation')
+            _check(self.ended and self.finished == event.state, 'recovery without a finished terminal')
+            self.ended = False
+            self.finished = self.closed_terminal = None
+            return
         if kind == 'run_resumed':
             _check(self.context == (event.correlation_id,event.parent_run_id),'inconsistent run correlation')
             _check(self.ended and self.interrupted_invocation and self.active == (event.state,event.state_visit_id),
@@ -232,6 +240,7 @@ class _RunShape:
             _check(self.active is None and self.budget is None
                    and self.closed_terminal == event.state, 'completion without closed terminal visit')
             self.ended = True
+            self.finished = event.state
         elif kind == 'run_error':
             self.interrupted_invocation = self.active is not None and self.invocation is not None and self.outcome is None
             if self.active is not None:
@@ -303,6 +312,8 @@ def _summarize_run(events: tuple[Event, ...]) -> RunSummary:
             run_duration = event.duration_ns
             if event.kind == 'run_finished':
                 terminal = event.state
+        elif event.kind == 'run_resumed':
+            terminal = None  # A recovered terminal no longer ends the run.
     count = sum(invocations.values())
     total = (invocation_duration if timed_invocations == count
              and (count > 0 or events[0].occurred_at_unix_ns is not None) else None)

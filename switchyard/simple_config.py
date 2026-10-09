@@ -11,6 +11,9 @@ from .workflow_bundle import (WorkflowBundle, workflow_bundle_from_data, _name, 
 from .workflow_compiler import ExecutionBinding, compile_workflow, WorkflowCompileError
 from .provider_stages import validate_provider_configuration, ProviderResolutionError
 
+# Human-intervention terminals; only these may declare an explicit human recovery target.
+HUMAN_TERMINALS = ('NEEDS_HUMAN', 'NEEDS_REDIAGNOSIS')
+
 
 @dataclass(frozen=True)
 class AgentConfig:
@@ -62,7 +65,7 @@ class SimpleConfig:
                  states={key: dict(terminal=state.terminal, on=dict(state.on),
                      budget=None if state.budget is None else dict(invocations=state.budget.max_invocations,
                          visits=state.budget.max_state_visits, on_exceeded=state.budget.on_exceeded),
-                     on_exhausted=state.escalation_exhausted) for key,state in flow.states.items()})
+                     on_exhausted=state.escalation_exhausted, resume_to=state.resume_to) for key,state in flow.states.items()})
                  for name,flow in self.bundle.flows.items()}
         return dict(invocations=rows, flows=flows, lifecycle=asdict(self.lifecycle))
 
@@ -167,10 +170,14 @@ def simple_config_from_text(text: str) -> SimpleConfig:
             _name(state_name, path)
             _mapping(state, path)
             if 'terminal' in state:
-                _fields(state, {'terminal'}, set(), path)
+                _fields(state, {'terminal'}, {'resume_to'}, path)
                 if state['terminal'] is not True:
                     raise _error(path+'.terminal', 'expected true')
                 states[state_name] = {'terminal': True}
+                if 'resume_to' in state:
+                    if state_name not in HUMAN_TERMINALS:
+                        raise _error(path+'.resume_to', 'only NEEDS_HUMAN and NEEDS_REDIAGNOSIS may declare human recovery')
+                    states[state_name]['resume_to'] = state['resume_to']
                 continue
             _fields(state, {'on'}, {'agent','run','consumes','produces','budget','on_exhausted'}, path)
             if ('agent' in state) == ('run' in state):
