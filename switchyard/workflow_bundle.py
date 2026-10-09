@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 import os
 from pathlib import Path
 import re
+import math
 from types import MappingProxyType
 from typing import Literal, Mapping
 
@@ -65,6 +66,7 @@ class ExecutionProfile:
     provider: Provider
     model: str | None = None
     command: CommandSpec | None = None
+    timeout_seconds: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -456,18 +458,21 @@ def workflow_bundle_from_data(data) -> WorkflowBundle:
     profiles = {}
     for name, definition in data['profiles'].items():
         here = _at('profiles', name)
-        _fields(definition, {'provider'}, {'model', 'command'}, here)
+        _fields(definition, {'provider'}, {'model', 'command', 'timeout_seconds'}, here)
         provider = _enum(definition['provider'], {'claude', 'codex', 'command'}, here + '.provider')
         if provider == 'command':
             if 'model' in definition:
                 raise _error(here + '.model', 'command profile must omit model')
-            _fields(definition, {'provider', 'command'}, set(), here)
+            _fields(definition, {'provider', 'command'}, {'timeout_seconds'}, here)
             model = None
         else:
-            _fields(definition, {'provider', 'model'}, set(), here)
+            _fields(definition, {'provider', 'model'}, {'timeout_seconds'}, here)
             model = _name(definition['model'], here + '.model')
         command = _command(definition['command'], artifacts, here + '.command') if provider == 'command' else None
-        profiles[name] = ExecutionProfile(provider, model, command)
+        timeout = definition.get('timeout_seconds')
+        if 'timeout_seconds' in definition and (type(timeout) not in (int, float) or not math.isfinite(timeout) or timeout <= 0):
+            raise _error(here+'.timeout_seconds', 'expected finite positive seconds')
+        profiles[name] = ExecutionProfile(provider, model, command, timeout)
     roles = {name: _role(definition, profiles, _at('roles', name)) for name, definition in data['roles'].items()}
     flows = {name: _workflow(definition, roles, artifacts, _at('flows', name)) for name, definition in data['flows'].items()}
     for name, flow in flows.items():

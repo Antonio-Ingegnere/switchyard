@@ -4,6 +4,7 @@ import codecs
 import os
 from pathlib import Path
 import subprocess
+import signal
 from tempfile import TemporaryFile
 from time import monotonic, sleep
 
@@ -61,13 +62,16 @@ def execute(executable, argv, config, *, input_bytes=b'', capture=None,
             process = subprocess.Popen([executable, *argv], shell=False,
                                        cwd=config.working_directory, env=dict(environment or config.environment),
                                        stdin=stdin, stdout=subprocess.PIPE,
-                                       stderr=subprocess.STDOUT if combined else subprocess.PIPE, bufsize=0)
+                                       stderr=subprocess.STDOUT if combined else subprocess.PIPE, bufsize=0,
+                                       start_new_session=(os.name == 'posix'))
         except OSError as exc:
             raise ProviderExecutionError(f'cannot start executable {executable!r}') from exc
         streams = {process.stdout: 'stdout'}
         if process.stderr is not None:
             streams[process.stderr] = 'stderr'
         try:
+            if config.process_observer is not None:
+                config.process_observer('started', process.pid)
             for stream in streams:
                 os.set_blocking(stream.fileno(), False)
             pending = dict(streams)
@@ -104,7 +108,14 @@ def execute(executable, argv, config, *, input_bytes=b'', capture=None,
             raise ProviderExecutionError('process I/O failure', _diagnostic(diagnostic, 4096)) from exc
         finally:
             try:
+                # Reap the leader first: a zombie-only group can reject killpg
+                # with EPERM on macOS. Remaining tool children retain the group.
                 _stop_and_wait(process)
+                if os.name == 'posix':
+                    try:os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:pass
+                if config.process_observer is not None:
+                    config.process_observer('terminated', process.pid)
             finally:
                 for stream in streams:
                     stream.close()

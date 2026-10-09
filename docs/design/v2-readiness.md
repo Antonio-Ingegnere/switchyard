@@ -9,6 +9,10 @@ context, manual QA, safe acceptance and reopen. No known internal prerequisite
 remains before consumer migration within this scope. Consumer integration still
 supplies project configuration, human authorization and repository ownership.
 
+RECOVERY-001 adds [explicit resume/rollback](delivery-recovery.md) for newly baselined
+delivery and the installed `switchyard-runtime` 2.1.0 package. This is separate from
+arbitrary crash recovery; the limitations below for incomplete publication still apply.
+
 ## Supported entry points
 
 Use the existing named modules; no package-root façade or new wrapper is needed.
@@ -17,6 +21,7 @@ Use the existing named modules; no package-root façade or new wrapper is needed
 | --- | --- |
 | `switchyard.workflow_bundle` | `load_workflow_bundle`, immutable `WorkflowBundle`, profile/role/state/artifact definitions; strict V2 loading |
 | `switchyard.workflow_compiler` | `compile_workflow`, `CompiledWorkflow`, `CompiledStatePlan`, `ExecutionBinding`; inspection and custom executor resolution |
+| `switchyard.recovery` | `execute_recoverable_v2_work`, `resume_v2_work`, `rollback_v2_work`, `recovery_status`, `attach_qa_candidate`, `RecoveryBlocked`; explicit human recovery |
 | `switchyard.workflow_execution` | `execute_v2_workflow`, `WorkflowExecution`; ordinary loader-to-runtime composition |
 | `switchyard.provider_stages` | `ProviderRuntimeConfig`, `ProviderStageExecutorResolver`; machine-local executables/environment/model aliases |
 | `switchyard.context_transport` | `workspace_resolver`, `StageExecutor`, `StageInvocation`, `StageResult`, `ProducedArtifact`, `StageHandoff`, `ArtifactSnapshot`, output-contract records; custom stage integration |

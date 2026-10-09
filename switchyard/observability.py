@@ -24,6 +24,7 @@ _VISIT = {'state', 'state_visit_id'}
 _INVOCATION = _VISIT | {'invocation_id'}
 _SHAPES = {
     'run_started': [set()],
+    'run_resumed': [_VISIT],
     'state_entered': [_VISIT],
     'state_exited': [_VISIT],
     'invocation_started': [_INVOCATION],
@@ -143,6 +144,7 @@ class _RunShape:
 
     def __init__(self):
         self.started = False
+        self.interrupted_invocation = False
         self.ended = False
         self.visit_ids = set()
         self.invocation_ids = set()
@@ -158,6 +160,13 @@ class _RunShape:
 
     def consume(self, event):
         kind = event.kind
+        if kind == 'run_resumed':
+            _check(self.context == (event.correlation_id,event.parent_run_id),'inconsistent run correlation')
+            _check(self.ended and self.interrupted_invocation and self.active == (event.state,event.state_visit_id),
+                   'resume without an interrupted invocation')
+            self.ended = self.interrupted_invocation = False
+            self.invocation = self.outcome = None
+            return
         _check(not self.ended, 'event after run end')
         if not self.started:
             _check(kind == 'run_started', 'run must begin with run_started')
@@ -224,6 +233,7 @@ class _RunShape:
                    and self.closed_terminal == event.state, 'completion without closed terminal visit')
             self.ended = True
         elif kind == 'run_error':
+            self.interrupted_invocation = self.active is not None and self.invocation is not None and self.outcome is None
             if self.active is not None:
                 _check(self.active == (event.state, event.state_visit_id)
                        and self.invocation == event.invocation_id

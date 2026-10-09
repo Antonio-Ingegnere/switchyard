@@ -1,5 +1,6 @@
 """One project file, lowered deterministically to the existing V2 engine."""
 from dataclasses import dataclass
+import math
 from pathlib import Path
 from types import MappingProxyType
 from typing import Mapping
@@ -19,6 +20,7 @@ class AgentConfig:
     workspace: str | None
     shell: bool | None
     capabilities: tuple[str, ...] | None
+    timeout: float = 600
 
 
 @dataclass(frozen=True)
@@ -50,7 +52,7 @@ class SimpleConfig:
                 command = self.bundle.profiles[b.profile_name].command
                 rows.append(dict(flow=flow, state=b.logical_state, rung=b.rung_index,
                     agent=b.profile_name, provider=b.provider, model=b.model, effort=b.effort,
-                    workspace=agent.workspace, shell=agent.shell, context=b.context_mode,
+                    workspace=agent.workspace, shell=agent.shell, timeout=agent.timeout, context=b.context_mode,
                     escalation=b.escalation_kind, outcomes=list(b.executor_allowed_outcomes),
                     consumes=list(plan.declaration.consumes), produces=list(plan.declaration.produces),
                     command=list(command.argv) if command else None))
@@ -120,10 +122,10 @@ def simple_config_from_text(text: str) -> SimpleConfig:
             _name(name, _at(collection, name))
     for name, value in data['agents'].items():
         here = _at('agents', name)
-        _fields(value, {'provider'}, {'model','effort','workspace','shell','command','capture','success','failure'}, here)
+        _fields(value, {'provider'}, {'model','effort','workspace','shell','command','capture','success','failure','timeout'}, here)
         provider = _enum(value['provider'], {'claude','codex','command'}, here+'.provider')
         if provider == 'command':
-            _fields(value, {'provider','command'}, {'capture','success','failure'}, here)
+            _fields(value, {'provider','command'}, {'capture','success','failure','timeout'}, here)
             command = dict(argv=value['command'], outcomes=dict(exit_codes={0:value.get('success','pass')}, default=value.get('failure','fail')))
             if 'capture' in value:
                 _name(value['capture'], here+'.capture')
@@ -131,7 +133,7 @@ def simple_config_from_text(text: str) -> SimpleConfig:
             profiles[name] = dict(provider=provider, command=command)
             agent = AgentConfig(provider, None, None, None, None, None)
         else:
-            _fields(value, {'provider','model','workspace','shell'}, {'effort'}, here)
+            _fields(value, {'provider','model','workspace','shell'}, {'effort','timeout'}, here)
             model = _name(value['model'], here+'.model')
             effort = _enum(value['effort'], {'low','medium','high'}, here+'.effort') if 'effort' in value else None
             workspace = _enum(value['workspace'], {'none','read','write'}, here+'.workspace')
@@ -146,7 +148,12 @@ def simple_config_from_text(text: str) -> SimpleConfig:
                     raise _error(here, f'provider {provider} cannot represent workspace={workspace}, shell={str(shell).lower()}') from None
                 raise _error(here, str(exc)) from None
             profiles[name] = dict(provider=provider, model=model)
-        agents[name] = agent
+        timeout = value.get('timeout',600)
+        if type(timeout) not in (int,float) or not math.isfinite(timeout) or timeout <= 0:
+            raise _error(here+'.timeout','expected finite positive seconds')
+        from dataclasses import replace
+        agents[name] = replace(agent,timeout=timeout)
+        profiles[name]['timeout_seconds'] = timeout
         locations[_at('profiles', name)] = here
     for flow_name, flow in data['flows'].items():
         here = _at('flows', flow_name)

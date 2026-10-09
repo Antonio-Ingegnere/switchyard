@@ -323,7 +323,10 @@ manual pre-staging, approval digest, public API, behavior and runtime events.
 Capture and accept require a born local branch at the repository root. In-progress
 merge, rebase, cherry-pick, revert, bisect or sequencer state, unmerged entries,
 submodules, sparse/skip-worktree or assume-unchanged entries block. Changed paths
-must be regular files or deletions; symlinks and `.git`/`.switchyard` paths block.
+must be regular files or deletions; symlinks and `.git`/`.switchyard` paths block,
+except the exact project configuration path `.switchyard/config.yaml`. RECOVERY-001
+allows that file as ordinary fingerprinted QA content so a reviewed timeout retune
+can accompany resumed implementation. All runtime state remains protected.
 Non-UTF-8 pathnames block. All nonignored untracked files are part of scope;
 ignored files are outside the documented Git cleanliness policy and never staged.
 The snapshot is checked twice at capture. As with DELIVERY-001, cooperating callers

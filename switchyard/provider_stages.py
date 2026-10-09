@@ -1,5 +1,5 @@
 """Provider-specific V2 stage boundaries below durable context transport."""
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 import json
 import os
 from pathlib import Path
@@ -235,6 +235,7 @@ class ProviderRuntimeConfig:
     timeout_seconds: float = 600
     max_result_bytes: int = 1048576
     model_aliases: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
+    process_observer: object = field(default=None, repr=False, compare=False)
 
     def __post_init__(self):
         try:
@@ -245,6 +246,8 @@ class ProviderRuntimeConfig:
             raise ProviderResolutionError('working_directory does not exist')
         if type(self.max_result_bytes) is not int or self.max_result_bytes <= 0:
             raise ProviderResolutionError('max_result_bytes must be a positive integer')
+        if self.process_observer is not None and not callable(self.process_observer):
+            raise ProviderResolutionError('process_observer must be callable')
         env = dict(os.environ if self.environment is None else self.environment)
         if any(type(k) is not str or type(v) is not str or not k or '=' in k or '\0' in k+v for k,v in env.items()):
             raise ProviderResolutionError('invalid environment')
@@ -536,6 +539,8 @@ class ProviderStageExecutorResolver:
         if profile is None or (profile.provider,profile.model)!=(binding.provider,binding.model):
             raise ProviderResolutionError('binding/profile mismatch')
         config=self.runtime_config
+        if profile.timeout_seconds is not None:
+            config=replace(config, timeout_seconds=profile.timeout_seconds)
         resolved = config.model_aliases.get(binding.provider, {}).get(binding.model, binding.model)
         validate_provider_configuration(binding, resolved)
         if profile.provider=='command':

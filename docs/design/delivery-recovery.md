@@ -1,0 +1,138 @@
+# Explicit delivery recovery (RECOVERY-001)
+
+Recovery wraps the existing V2 compiler, context transport and runtime. It does
+not retry automatically, fabricate a StageResult or restore a provider session.
+New operations use the installed `switchyard-runtime` package, version 2.1.0.
+The advanced `execute_v2_workflow` API remains available without recovery.
+
+## Public API
+
+All recovery entry points live in `switchyard.recovery`:
+
+```python
+execution = execute_recoverable_v2_work(
+    config_text, "feature", human_request, fresh_work_root, provider_runtime_config)
+# A known provider failure raises after recording an interruption.
+status = recovery_status(work_root)
+# Only on explicit human request:
+execution = resume_v2_work(work_root, current_config_text, provider_runtime_config)
+status = rollback_v2_work(work_root, reason="Wrong direction")
+```
+
+After a successful delivery, the consumer creates the usual external QA candidate
+and calls `attach_qa_candidate(work_root, qa_root)`. Accept/reopen remain separate
+human decisions through the existing lifecycle APIs. Recovery owns no commit.
+
+## Timeouts and budgets
+
+`agents.<name>.timeout` is seconds: a finite positive number, never a boolean or
+string. Its default is 600 for compatibility; projects should set it explicitly.
+SimpleConfig lowers it to the selected execution profile's `timeout_seconds`.
+The resolver applies that deadline to the actual model or command process. Advanced
+profiles without a deadline retain `ProviderRuntimeConfig.timeout_seconds` fallback.
+`config show` displays the effective timeout without launching providers.
+
+A failed invocation consumes its ordinary run/state/rung budgets. Resume re-enters
+the interrupted invocation's already-admitted visit, with a new invocation identity
+and cumulative counters reconstructed from the same event history. It never repeats
+successful states. `run_resumed` follows the retained `run_error`; Event fields,
+routing and budget admission rules are unchanged. Cross-process elapsed durations
+are not invented. The recovery controller rejects exhausted budgets before launch.
+Reserve capacity explicitly, for example a single `run` entry with
+`budget: {invocations: 2}` and sufficient flow/state limits. This enables one human
+resume after a timeout, not an automatic retry or a second state visit.
+
+Only agent timeouts may change between initial execution and resume. The baseline
+holds the original semantic configuration; normalized YAML comparison removes only
+`timeout`. Provider, model, effort, permissions, topology, artifacts, lifecycle and
+budgets remain frozen. A semantic change requires a new delivery. Config is still
+the one editable project file; baseline/config snapshots are immutable evidence.
+
+## Durable state and interruption
+
+The delivery workspace retains its request, manifest, artifacts, handoffs and
+events. A nested `recovery/` WorkWorkspace stores versioned JSON baseline,
+checkpoint, operation, QA reference and rollback intent records. Content-addressed
+SHA-256 objects store binary baseline bytes and the original Git index. They are
+recovery data, not provider transcripts or event payloads. Access requires normal
+worktree confidentiality: pre-existing Git-visible files may contain private data.
+
+The baseline precedes every provider invocation and captures canonical target/Git
+directory, branch, base HEAD, Git-visible paths, existence, SHA-256, Git mode, file
+permissions and semantic index fingerprint. Clean tracked bytes refer to immutable
+Git blobs; dirty and untracked bytes are stored verbatim. Deletions are represented
+by absence. Symlink targets are stored without following them; symlink parents,
+submodules, conflicts and unsupported index flags fail closed using existing Git
+guards. Ignored untracked files are outside the recovery contract.
+
+The controller holds a work lock during execution/recovery. Provider transport
+starts a POSIX process group, kills that group on completion/failure and waits for
+the direct child before publishing termination. This prevents ordinary tool children
+from continuing to write after timeout. Detached/escaped processes are not a supported
+provider contract; this is not general process supervision or a cancel operation.
+Each completed invocation gets a worktree checkpoint, including abnormal termination.
+Partial source edits remain; rejected or absent StageResult outputs are not committed.
+
+Known failures record `interrupted`, logical state/rung and bounded reason:
+`provider_timeout`, `provider_failure` or `execution_interrupted`. The consumer's
+navigation pointer reflects this authoritative state. No raw stderr goes into that
+pointer. Status reports resume/rollback eligibility; those flags are advisory and
+each operation revalidates. Resume verifies repository/HEAD/index, checkpoint bytes
+and unchanged artifact manifest before rebuilding normal durable context.
+The tracked config file may differ only by validated timeout edits. Other worktree
+drift blocks resume; conflicting paths are bounded, never merged or overwritten.
+
+## Rollback and QA
+
+Rollback is permitted for interrupted or completed pre-accept work, including
+READY_FOR_MANUAL_QA, REOPENED and COMMIT_BLOCKED. Active controllers/providers refuse.
+ACCEPTED refuses with guidance to use ordinary Git revert or corrective delivery.
+Base HEAD movement also refuses; no history is reset.
+
+Owned paths are the difference between baseline and last checkpoint. Each must
+still match that checkpoint before restoration. Human edits to those paths produce
+ROLLBACK_BLOCKED. Unrelated later files are preserved. Restoration uses verified
+baseline bytes/modes: clean tracked Git blobs, exact pre-existing dirty/untracked
+bytes, restored deletions and removal of delivery-created paths. Binary files,
+symlinks and permissions are preserved. Original staged content is restored through
+an exclusively owned index lock only when delivery changed the index; unexpected
+later staging blocks. There is no reset-hard, clean, checkout-all or restore-all.
+
+Pending QA is durably finalized ROLLED_BACK before source restoration via
+`withdraw_qa_candidate`. Existing finalized reopen/blocked decisions remain immutable.
+Candidate history survives and cannot later be accepted. The operation appends
+ROLLED_BACK with timestamp, work identity through workspace, prior state, optional
+bounded reason and restored-path count. No history or baseline is deleted. Adeo
+retires the current work logically; its pointer can display the last result while
+allowing a new work ID immediately.
+
+Timeout retuning can change tracked `.switchyard/config.yaml` during the same run.
+QA permits precisely this configuration file as ordinary reviewed content; all
+other protected state paths remain rejected. Candidate paths/fingerprints, drift
+checks, private-index commit and human acceptance authority are unchanged. Review
+the config change too. Pre-existing staging still blocks candidate creation; rollback
+remains available if QA capture cannot complete.
+
+## Failure boundaries and limitations
+
+Recovery requires a POSIX host (flock) and exclusive cooperative worktree ownership
+while providers run. It cannot distinguish an unrelated concurrent human write from
+a provider write at checkpoint capture. The index lock excludes cooperating Git
+writers only during restoration; it is not a filesystem transaction.
+
+Manifest publication retains WorkWorkspace's fail-closed partial-write behavior.
+Baseline objects can precede a manifest entry; orphaned or incomplete records require
+inspection. A failed provider with durable `run_error`, unchanged output manifest
+and confirmed termination is resumable. An abrupt controller crash with uncertain
+output/checkpoint state is marked INTERRUPTED once its lock and recorded process
+are dead, but refuses automatic reconstruction or destructive rollback. Torn event
+logs or output publication ambiguity likewise require manual recovery. There is no
+claim of arbitrary crash-resume or automatic repair of historical work without a
+baseline. PID reuse conservatively keeps work active rather than racing a process.
+
+Rollback writes an intent before mutation. After interruption, it may continue only
+if each owned path still equals its checkpoint or exact baseline state. A partially
+written restoration, missing blobs or unresolved QA intent blocks for inspection.
+QA withdrawal can remain durable even if later restoration blocks; it must not be
+reversed into acceptability. Nothing automatically deletes recovery or QA history.
+No provider retries, push, scheduling or project/epic orchestration are introduced.

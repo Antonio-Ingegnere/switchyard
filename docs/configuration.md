@@ -11,12 +11,14 @@ agents:
     effort: high
     workspace: read
     shell: true
+    timeout: 600
   code:
     provider: claude
     model: sonnet
     effort: medium
     workspace: write
     shell: true
+    timeout: 1800
   tests:
     provider: command
     command: [python3, -m, unittest, discover, -s, tests]
@@ -173,3 +175,15 @@ and git/lifecycle safety are unchanged. Verbose Workflow Bundle V2 remains an ad
 compatibility format; advanced `ProviderRuntimeConfig.model_aliases` remains optional.
 Adeo's normal path uses neither. Runtime workspaces and immutable per-run config snapshots
 are evidence, not additional editable configuration. No push or automatic provider retry.
+
+## Invocation deadlines and explicit recovery
+
+Set `agents.<name>.timeout` to a finite positive number of seconds (default 600).
+Booleans, strings, zero, negative numbers, NaN and infinity fail validation at that
+agent field. Command agents accept the same key. `config show` includes the effective
+timeout. No separate runtime or consumer override is needed.
+
+For resumable delivery, use the [recovery API](design/delivery-recovery.md). A timeout
+uses one invocation; reserve extra rung/state/run capacity if human resume is desired.
+Resume permits timeout-only edits and retains every prior budget charge. It never
+automatically retries or repeats completed stages.

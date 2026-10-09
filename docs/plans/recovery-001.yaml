@@ -1,0 +1,79 @@
+id: RECOVERY-001
+goal: Make single-work-item delivery operable with explicit interruption, resume, safe rollback and an installed dependency.
+status: complete
+scope:
+  - Add finite positive per-agent timeout to SimpleConfig and selected V2 execution profiles.
+  - Persist a Git-visible recovery baseline before providers and checkpoints after confirmed process termination.
+  - Reconstruct the same interrupted V2 run from durable events and artifacts without resetting budgets.
+  - Restore only checkpoint-owned paths and preserve original dirty bytes, index and QA history.
+  - Package Switchyard as switchyard-runtime 2.1.0 and let Adeo consume it through ordinary pinned pip requirements.
+constraints:
+  - No live providers, automatic retry or resume, provider-session authority, cancellation or project orchestration.
+  - Keep StageInvocation, StageResult, context contracts, compiler routing, capability policy and deterministic acceptance ownership.
+  - Preserve unrelated Adeo metrics/report changes and all historical records.
+acceptance:
+  - Agent timeout controls the actual process and config show reports it with simple-key validation diagnostics.
+  - A timed-out writer is terminated, partial edits checkpointed and durable state becomes INTERRUPTED without fabricated output.
+  - Explicit resume retains work/run identity, artifacts, handoffs, events and all budget charges while skipping successful states.
+  - Timeout-only retuning works; semantic configuration changes, checkpoint drift and exhausted budgets block before invocation.
+  - Rollback restores exact pre-delivery clean or dirty Git-visible bytes, deletions, new paths, binary data, symlinks, modes and staging.
+  - Active work, later human edits and accepted history refuse rollback; pending QA is permanently withdrawn before restoration.
+  - Adeo retires rolled-back navigation state and can immediately start a fresh delivery without pointer surgery.
+  - Installed-package CLI delivery, status and rollback work with SWITCHYARD_ROOT and PYTHONPATH unset.
+verification:
+  - Real fake-process timeout/resume and real disposable Git rollback tests in tests/test_recovery.py.
+  - Existing SimpleConfig, providers, runtime, workspace, lifecycle, observability and legacy tests through full TERM=dumb discovery.
+  - Adeo installed-package delivery and recovery integration plus existing legacy and UI verifier checks.
+non_goals:
+  - Generic crash transaction engine, detached-process supervisor, automatic cleanup or historical baseline fabrication.
+  - Push, release publishing, model tuning, project/epic scheduling or a second configuration file.
+audit:
+  timeout: ProviderRuntimeConfig.timeout_seconds retains the historical hidden 600-second fallback. The audited Adeo HEAD also contained a hardcoded 1800-second workaround; it is removed so selected YAML agent timeout is authoritative.
+  bootstrap: Adeo previously required checkout injection and Git-reference checks; normal operation now imports an installed pinned package and checks package metadata.
+  budgets: Existing one-invocation write rungs cannot resume after consuming their budget; Adeo explicitly reserves two for new work without altering accounting or old histories.
+  qa_config: Timeout retuning requires admitting precisely tracked .switchyard/config.yaml as reviewed candidate content; all other protected state paths and fingerprint checks remain unchanged.
+implementation:
+  public_module: switchyard.recovery
+  api:
+    - execute_recoverable_v2_work
+    - resume_v2_work
+    - rollback_v2_work
+    - recovery_status
+    - attach_qa_candidate
+    - RecoveryBlocked
+  storage: Nested WorkWorkspace recovery records plus verified SHA-256 baseline byte objects; clean tracked bytes refer to immutable base Git blobs.
+  runtime_extension: Optional validated event prefix reconstructs counters and the admitted interrupted visit; run_resumed appends to the same run and Event schema is unchanged.
+  process_boundary: POSIX process group cleanup plus direct-child wait precedes checkpoint publication; optional observer records process liveness without tool telemetry.
+  rollback: Verify owned paths/index/HEAD; withdraw pending QA; persist intent; restore exact baseline under index lock; verify; append ROLLED_BACK; retain all evidence.
+  safety_limits: POSIX and cooperative exclusive worktree access; ignored untracked files excluded; uncertain controller crash, torn publication and partial restoration fail closed for inspection.
+  docs: docs/design/delivery-recovery.md
+results:
+  focused: 23 recovery tests passed, including actual deadlines, cumulative run/state/rung budgets, binary/index restoration and provider-child cleanup.
+  provider_confirmation: 16 provider tests cover transport failures; final cleanup reaps a zombie leader before group signalling to avoid masking an oversized-result failure with macOS EPERM.
+  full_switchyard: 573 tests; 571 passed; unchanged synthetic SIGKILL failure; unchanged Windows-only skip; zero new failures. Final process cleanup also passed in the sandbox.
+  adeo: 26 delivery integration, 9 recovery integration and 20 legacy tests passed with installed package and no source override.
+  full_adeo: 20 checks; 18 passed; unchanged board-selftest and task-delete-selftest failures; zero new failures.
+  logs:
+    - /tmp/recovery-focused-final3.log
+    - /tmp/recovery-provider-final.log
+    - /tmp/recovery-switchyard-release-check.log
+    - /tmp/recovery-adeo-full.log
+changed_files:
+  - .gitignore
+  - README.md
+  - docs/configuration.md
+  - docs/design/delivery-recovery.md
+  - docs/design/provider-stages.md
+  - docs/design/v2-readiness.md
+  - docs/design/work-contract.md
+  - docs/plans/recovery-001.yaml
+  - pyproject.toml
+  - runtime/__init__.py
+  - switchyard/observability.py
+  - switchyard/provider_process.py
+  - switchyard/provider_stages.py
+  - switchyard/qa_lifecycle.py
+  - switchyard/recovery.py
+  - switchyard/simple_config.py
+  - switchyard/workflow_bundle.py
+  - tests/test_recovery.py

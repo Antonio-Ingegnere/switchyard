@@ -314,3 +314,16 @@ still pass transport and fail work validation. Neither Claude's wire projection
 nor normalization (V2-004E), Codex transport, provider retries or tool policy changes.
 See [the work contract](work-contract.md#handoff-diagnostics-and-identifier-contract-v2-003e)
 for the complete field, identifier, rejection and publication rules.
+
+## Configured deadlines and termination (RECOVERY-001)
+
+SimpleConfig agent `timeout` lowers to profile `timeout_seconds`. The selected
+profile overrides the runtime fallback for every real invocation, including command
+providers. Advanced profiles without this optional field keep the 600-second runtime
+default. Positive finite numeric validation is identical at both boundaries.
+
+The transport now starts a POSIX process group and terminates remaining group members
+before publishing direct-child termination to an optional process observer. This
+bounded callback supports safe recovery checkpointing, not tool telemetry. Failed
+cleanup leaves recovery active/blocked. StageResult, capability policy and structured
+output normalization are unchanged. See [recovery limits](delivery-recovery.md).

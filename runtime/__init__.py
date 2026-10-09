@@ -179,9 +179,9 @@ class _EventTiming:
         if event.kind in ('run_started', 'state_entered', 'invocation_started'):
             self.starts[event.kind] = monotonic
         elif event.kind in ('run_finished', 'run_error'):
-            duration = monotonic - self.starts['run_started']
+            duration = monotonic - self.starts['run_started'] if 'run_started' in self.starts else None
         elif event.kind == 'state_exited':
-            duration = monotonic - self.starts.pop('state_entered')
+            duration = monotonic - self.starts.pop('state_entered') if 'state_entered' in self.starts else None
         elif event.kind == 'invocation_finished':
             duration = monotonic - self.starts.pop('invocation_started')
         return replace(event, occurred_at_unix_ns=wall, duration_ns=duration)
@@ -316,7 +316,8 @@ def validate(flow: Flow, executors: Mapping[str, Executor]) -> None:
 
 def run(work_unit: WorkUnit, flow: Flow, executors: Mapping[str, Executor],
         *, recorder: EventRecorder | None = None,
-        context: RunContext | None = None) -> RunResult:
+        context: RunContext | None = None,
+        resume_from: tuple[Event, ...] | None = None) -> RunResult:
     executors = dict(executors)
     validate(flow, executors)
     if type(work_unit) is not WorkUnit:
@@ -329,6 +330,17 @@ def run(work_unit: WorkUnit, flow: Flow, executors: Mapping[str, Executor],
         context = RunContext(context.correlation_id, context.parent_run_id)
     run_id = f"run:{uuid4()}"
     events: list[Event] = []
+    if resume_from is not None:
+        if (not resume_from or resume_from[0].kind != 'run_started'
+            or resume_from[-1].kind != 'run_error' or resume_from[-1].invocation_id is None
+            or resume_from[-1].outcome is not None
+            or any(e.kind == 'run_finished' for e in resume_from)):
+            raise ValueError('resume requires an interrupted invocation history')
+        run_id = resume_from[0].run_id
+        if any(e.run_id != run_id or (e.state is not None and e.state not in flow.states) for e in resume_from):
+            raise ValueError('resume history does not match flow')
+        context = RunContext(resume_from[0].correlation_id, resume_from[0].parent_run_id)
+        events = list(resume_from)
     timing = _EventTiming()
 
     def emit(event: Event, failure: ExecutionError | None = None) -> None:
@@ -372,32 +384,50 @@ def run(work_unit: WorkUnit, flow: Flow, executors: Mapping[str, Executor],
             emit(Event("state_exited", run_id, current, visit_id))
         return target
 
-    emit(Event("run_started", run_id))
+    if resume_from is None:
+        emit(Event("run_started", run_id))
     current = flow.initial
     visit = 0
     invocation = 0
     admitted_visits = dict.fromkeys(flow.states, 0)
     scope_usage = {scope.name: 0 for state in flow.states.values() for scope in state.invocation_budgets}
     pending: DiagnosticInput | None = None
+    resuming_visit = resume_from is not None
+    if resuming_visit:
+        current = events[-1].state
+        visit_id = events[-1].state_visit_id
+        for event in events:
+            if event.kind == 'state_entered':
+                visit += 1
+                admitted_visits[event.state] += 1
+            elif event.kind == 'invocation_started':
+                invocation += 1
+                for scope in flow.states[event.state].invocation_budgets:
+                    scope_usage[scope.name] += 1
+        # Durations across process clocks cannot be reconstructed honestly.
+        emit(Event('run_resumed', run_id, current, visit_id))
     while True:
         state = flow.states[current]
-        limit = state.max_state_visits_per_run
-        observed = admitted_visits[current]
-        if limit is not None and observed >= limit:
-            current = route_refusal(_BudgetRefusal("max_state_visits_per_run", limit, observed,
-                                                   state.state_visit_budget_exceeded))
-            continue
-        input_limit = state.diagnostics_from_previous_max_bytes
-        if input_limit is None or state.terminal:
-            pending = None
-        elif pending is not None and len(pending.payload.utf8) > input_limit:
-            pending = None
-            fail("diagnostic input exceeds target byte limit", Event("run_error", run_id, current))
-        # Commit the visit after visit-limit and diagnostic admission checks.
-        admitted_visits[current] += 1
-        visit += 1
-        visit_id = f"{run_id}:visit:{visit}"
-        emit(Event("state_entered", run_id, current, visit_id))
+        if resuming_visit:
+            resuming_visit = False
+        else:
+            limit = state.max_state_visits_per_run
+            observed = admitted_visits[current]
+            if limit is not None and observed >= limit:
+                current = route_refusal(_BudgetRefusal("max_state_visits_per_run", limit, observed,
+                                                       state.state_visit_budget_exceeded))
+                continue
+            input_limit = state.diagnostics_from_previous_max_bytes
+            if input_limit is None or state.terminal:
+                pending = None
+            elif pending is not None and len(pending.payload.utf8) > input_limit:
+                pending = None
+                fail("diagnostic input exceeds target byte limit", Event("run_error", run_id, current))
+            # Commit the visit after visit-limit and diagnostic admission checks.
+            admitted_visits[current] += 1
+            visit += 1
+            visit_id = f"{run_id}:visit:{visit}"
+            emit(Event("state_entered", run_id, current, visit_id))
         if state.terminal:
             emit(Event("state_exited", run_id, current, visit_id))
             emit(Event("run_finished", run_id, current))

@@ -6,6 +6,7 @@ or BUGFIX work item through verified delivery, human QA, safe acceptance or reop
 
 Start here:
 
+- [Explicit resume / rollback and installed package](docs/design/delivery-recovery.md)
 - [One-file project configuration](docs/configuration.md) — start with `.switchyard/config.yaml`
 - [Complete FEATURE / BUGFIX project config](examples/simple/config.yaml)
 - [V2 readiness and supported Python APIs](docs/design/v2-readiness.md)
@@ -15,7 +16,11 @@ Start here:
 - [Offline delivery → QA → accept/reopen example](examples/delivery/offline_lifecycle.py)
 - [QA safety and durable work contract](docs/design/work-contract.md)
 
-From the source checkout, use Python 3.10+ with PyYAML installed:
+Install into your Python 3.10+ environment with `python -m pip install .`. Consumers
+can pin `switchyard-runtime` to a Git revision using ordinary pip requirements.
+No source-checkout environment variable is needed.
+
+From the source checkout:
 
 ```sh
 TERM=dumb python3 -m unittest discover -s tests -v

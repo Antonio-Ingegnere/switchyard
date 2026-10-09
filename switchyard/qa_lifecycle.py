@@ -147,7 +147,7 @@ class _Git(GitRepository):
         for path in paths:
             _require(not path.startswith('/') and all(p not in ('', '.', '..') for p in path.split('/')),
                      'unsupported_path')
-            _require(not any(p.lower() in ('.git', '.switchyard') for p in path.split('/')), 'unsupported_path')
+            _require(path == '.switchyard/config.yaml' or not any(p.lower() in ('.git', '.switchyard') for p in path.split('/')), 'unsupported_path')
         return paths
 
     def fingerprint(self, relative):
@@ -381,3 +381,20 @@ def accept_v2_work(target, work_root, *, git_executable=None) -> QaDecision:
 def reopen_v2_work(target, work_root, feedback: str) -> QaDecision:
     """Explicit human REOPEN; preserve target/index/HEAD and persist rework input."""
     return _decision(target, work_root, 'reopen', feedback)
+
+
+def withdraw_qa_candidate(work_root, candidate_identity):
+    """Permanently retire pre-accept QA for explicit delivery rollback; retain audit."""
+    workspace, candidate, identity = _load(work_root)
+    with _exclusive(workspace.root/'.lifecycle.lock'):
+        if identity != candidate_identity:
+            raise LifecycleError('candidate identity differs from rollback reference')
+        if workspace.versions('qa_decision'):
+            decision = json.loads(workspace.read_artifact('qa_decision'))
+            if decision['terminal'] == 'ACCEPTED':
+                raise LifecycleError('ACCEPTED history cannot be rolled back; use Git revert or corrective delivery')
+            return  # Already permanently finalized (REOPENED/COMMIT_BLOCKED/ROLLED_BACK).
+        if workspace.versions('qa_intent'):
+            raise LifecycleError('unresolved QA intent; inspect before rollback')
+        workspace.write_artifact('qa_intent', _json(dict(candidate_identity=identity, decision='rollback', phase='started')))
+        workspace.write_artifact('qa_decision', _json(asdict(QaDecision(identity,'rollback','ROLLED_BACK'))))
