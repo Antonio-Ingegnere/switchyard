@@ -110,11 +110,14 @@ class RecoveryTests(unittest.TestCase):
         self.assertTrue(summarize_runs(events)[0].completed_normally)
 
     def test_exhausted_budget_does_not_reset(self):
+        # A timeout without StageResult is not charged; the charged retry then exhausts the rung.
         self.data['flows']['feature']['states']['IMPLEMENT']['run'][0]['budget']['invocations']=1
-        self.text=self.save_config();self.interrupt();before=self.log.read_bytes()
-        with self.assertRaisesRegex(RecoveryBlocked,'invocation_budget_exhausted'):self.resume()
-        self.assertEqual(self.log.read_bytes(),before)
-        self.assertFalse(recovery_status(self.work)['resume_allowed'])
+        self.data['flows']['feature']['states']['VERIFY']['on']['pass']='IMPLEMENT'
+        self.data['flows']['feature']['states']['IMPLEMENT']['budget']={'visits':2}
+        self.text=self.save_config();self.interrupt()
+        self.assertEqual(self.resume().result.terminal_state,'NEEDS_HUMAN')
+        exceeded=[e for e in read_events(self.work/'events.jsonl') if e.kind=='budget_exceeded']
+        self.assertEqual([(e.observed,e.limit) for e in exceeded],[(1,1)])
 
     def test_semantic_mutations_block_before_execution(self):
         self.interrupt();original=json.loads(json.dumps(self.data));before=self.log.read_bytes()
@@ -210,14 +213,21 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(op['returncode'],7)
 
     def test_run_budget_not_reset_on_resume(self):
+        # SPECIFY and the resumed IMPLEMENT are charged; the run cannot admit VERIFY.
         self.data['flows']['feature']['limits']['run_invocations']=2
         self.text=self.save_config();self.interrupt()
-        with self.assertRaisesRegex(RecoveryBlocked,'invocation_budget_exhausted'):self.resume()
+        self.assertEqual(recovery_status(self.work)['semantic_budgets'][0],dict(scope='run',used=1,limit=2))
+        self.assertEqual(self.resume().result.terminal_state,'NEEDS_HUMAN')
+        exceeded=[e for e in read_events(self.work/'events.jsonl') if e.kind=='budget_exceeded']
+        self.assertEqual([(e.metric,e.observed) for e in exceeded],[('max_invocations_per_run',2)])
 
     def test_state_budget_not_reset_on_resume(self):
-        self.data['flows']['feature']['states']['IMPLEMENT']['budget']={'invocations':1}
+        self.data['flows']['feature']['states']['IMPLEMENT']['budget']={'invocations':1,'visits':2}
+        self.data['flows']['feature']['states']['VERIFY']['on']['pass']='IMPLEMENT'
         self.text=self.save_config();self.interrupt()
-        with self.assertRaisesRegex(RecoveryBlocked,'invocation_budget_exhausted'):self.resume()
+        self.assertEqual(self.resume().result.terminal_state,'NEEDS_HUMAN')
+        exceeded=[e for e in read_events(self.work/'events.jsonl') if e.kind=='budget_exceeded']
+        self.assertEqual([(e.metric.startswith('invocation_scope:'),e.observed,e.limit) for e in exceeded],[(True,1,1)])
 
     def test_commit_blocked_can_rollback_preserving_unrelated_work(self):
         self.ready();(self.target/'human-extra.txt').write_text('keep')

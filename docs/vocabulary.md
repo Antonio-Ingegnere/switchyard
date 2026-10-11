@@ -52,6 +52,12 @@ A provider/model-level interaction inside an invocation.
 
 Not every adapter can expose turns in the same way.
 
+## Infrastructure failure
+
+A provider process that ended before returning a valid StageResult (exit, signal,
+timeout, transport/start failure, invalid result). It is not an invocation charge:
+semantic budgets ignore it, and `agents.<name>.infrastructure_failures` bounds it.
+
 ## Attempt
 
 A semantic retry of a piece of work.

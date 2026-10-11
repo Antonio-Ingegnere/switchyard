@@ -318,7 +318,11 @@ def run(work_unit: WorkUnit, flow: Flow, executors: Mapping[str, Executor],
         *, recorder: EventRecorder | None = None,
         context: RunContext | None = None,
         resume_from: tuple[Event, ...] | None = None,
-        recover_to: str | None = None) -> RunResult:
+        recover_to: str | None = None,
+        void_invocations: frozenset[str] = frozenset()) -> RunResult:
+    """`void_invocations`: resumed-history invocations that ended in run_error without
+    any executor result (caller-proven infrastructure failures). They keep their events
+    and ids but are not charged to reconstructed run/scope invocation budgets."""
     executors = dict(executors)
     validate(flow, executors)
     if type(work_unit) is not WorkUnit:
@@ -350,6 +354,15 @@ def run(work_unit: WorkUnit, flow: Flow, executors: Mapping[str, Executor],
             raise ValueError('resume history does not match flow')
         context = RunContext(resume_from[0].correlation_id, resume_from[0].parent_run_id)
         events = list(resume_from)
+    void_invocations = frozenset(void_invocations)
+    if void_invocations:
+        # Only an invocation whose executor produced nothing may be voided.
+        unfinished = {e.invocation_id for i, e in enumerate(events) if e.kind == 'run_error'
+                      and e.invocation_id is not None and e.outcome is None
+                      and (i + 1 == len(events) or events[i+1].kind == 'run_resumed')}
+        unfinished -= {e.invocation_id for e in events if e.kind == 'invocation_finished'}
+        if resume_from is None or not void_invocations <= unfinished:
+            raise ValueError('void invocations must be unfinished interrupted invocations of the resumed history')
     timing = _EventTiming()
 
     def emit(event: Event, failure: ExecutionError | None = None) -> None:
@@ -397,7 +410,8 @@ def run(work_unit: WorkUnit, flow: Flow, executors: Mapping[str, Executor],
         emit(Event("run_started", run_id))
     current = flow.initial
     visit = 0
-    invocation = 0
+    invocation = 0  # Charged invocations (run budget).
+    sequence = 0  # Invocation ids, including voided ones; never reused.
     admitted_visits = dict.fromkeys(flow.states, 0)
     scope_usage = {scope.name: 0 for state in flow.states.values() for scope in state.invocation_budgets}
     pending: DiagnosticInput | None = None
@@ -410,6 +424,9 @@ def run(work_unit: WorkUnit, flow: Flow, executors: Mapping[str, Executor],
                 visit += 1
                 admitted_visits[event.state] += 1
             elif event.kind == 'invocation_started':
+                sequence += 1
+                if event.invocation_id in void_invocations:
+                    continue
                 invocation += 1
                 for scope in flow.states[event.state].invocation_budgets:
                     scope_usage[scope.name] += 1
@@ -467,9 +484,10 @@ def run(work_unit: WorkUnit, flow: Flow, executors: Mapping[str, Executor],
         # Invocation capacity is committed before invocation_started, never rolled
         # back for executor or recorder failure. The visit is already committed.
         invocation += 1
+        sequence += 1
         for scope in state.invocation_budgets:
             scope_usage[scope.name] += 1
-        invocation_id = f"{run_id}:invocation:{invocation}"
+        invocation_id = f"{run_id}:invocation:{sequence}"
         emit(Event("invocation_started", run_id, current, visit_id, invocation_id))
         request = InvocationRequest(work_unit, pending)
         pending = None

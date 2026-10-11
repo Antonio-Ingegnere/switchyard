@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import stat
 import subprocess
@@ -209,6 +210,11 @@ class _CheckpointExecutor:
     def __init__(self,stage,store,repo,root):self.stage,self.store,self.repo,self.root=stage,store,repo,root
     def run(self,invocation):
         try:return self.stage.run(invocation)
+        except ProviderExecutionError as exc:
+            # Semantic boundary: the adapter returned no StageResult. Anything raised after
+            # it returns (contract checks, artifact writes, transitions) stays charged.
+            exc.before_stage_result=True
+            raise
         finally:
             # Adapter transport waits for provider termination before returning/raising.
             op=_read(self.store,'operation')
@@ -222,8 +228,34 @@ def _compiled(project,flow,workspace,config,store,repo,root):
         lambda binding:_CheckpointExecutor(provider(binding),store,repo,root)))
 
 
-def _drive(project,flow,request,root,config,store,repo,history=None,recover_to=None):
+_PROVIDER_REASONS=('provider_failure','provider_timeout')
+_TAIL_BYTES=1024
+_CLASSES=((re.compile(r'api_error_status=429|\brate[ _-]?limit',re.I),'rate_limit'),
+          (re.compile(r'api_error_status=40[13]|authenticat|unauthori[sz]ed|not logged in|invalid api key|please run /login|\blogin\b',re.I),'authentication'),
+          (re.compile(r'api_error_status=5\d\d|overloaded|service unavailable|temporarily unavailable',re.I),'provider_unavailable'))
+
+
+def _classify(cause):
+    message=str(cause)
+    if message=='process timeout':return 'timeout'
+    if message.startswith('cannot start executable'):return 'provider_unavailable'
+    if message=='process I/O failure':return 'transport_failure'
+    if cause.returncode is None and not message.startswith('process terminated by signal'):return 'invalid_stage_result'
+    text=cause.diagnostics.utf8.decode('utf-8') if cause.diagnostics is not None else ''
+    return next((kind for pattern,kind in _CLASSES if pattern.search(text)),'provider_exit')
+
+
+def _provider_failure(cause,binding,started):
+    """Bounded infrastructure facts; the output tail is already credential-redacted by adapters."""
+    tail=cause.diagnostics.utf8[-_TAIL_BYTES:].decode('utf-8',errors='ignore') if cause.diagnostics is not None else None
+    return dict(classification=_classify(cause),provider=getattr(binding,'provider',None),model=getattr(binding,'model',None),
+                agent=getattr(binding,'profile_name',None),exit_code=cause.returncode,timed_out=str(cause)=='process timeout',
+                duration_ms=None if started is None else max(0,(time.time_ns()-started)//1_000_000),output_tail=tail or None)
+
+
+def _drive(project,flow,request,root,config,store,repo,history=None,recover_to=None,void=frozenset()):
     workspace=WorkWorkspace.open(root,project.bundle.artifacts);workspace.initialize_request(request)
+    compiled=None
     try:
         def observe(event,pid):
             old=_read(store,'operation')
@@ -232,7 +264,8 @@ def _drive(project,flow,request,root,config,store,repo,history=None,recover_to=N
         config=replace(config,process_observer=observe)
         compiled=_compiled(project,flow,workspace,config,store,repo,root)
         result=run(WorkUnit(request),compiled.flow,compiled.executors,
-                   recorder=_Recorder(Path(root)/'events.jsonl',store,compiled,root),resume_from=history,recover_to=recover_to)
+                   recorder=_Recorder(Path(root)/'events.jsonl',store,compiled,root),resume_from=history,recover_to=recover_to,
+                   void_invocations=void)
     except BaseException as exc:
         reason='execution_interrupted';cause=exc
         while cause is not None:
@@ -243,9 +276,19 @@ def _drive(project,flow,request,root,config,store,repo,history=None,recover_to=N
         if old.get('provider_pid') is not None:
             raise  # Cleanup could not prove termination; keep RUNNING and refuse destructive recovery.
         _checkpoint(store,repo,root)
+        safe=reason.startswith('provider_') and old.get('manifest_before')==_manifest(root)
+        last=getattr(exc,'events',())[-1:]
+        invocation=last[0].invocation_id if last and last[0].kind=='run_error' else None
+        # Infrastructure failure: no StageResult, no artifact change. It is charged to the
+        # agent's infrastructure_failures allowance, never to semantic invocation budgets.
+        infra=safe and invocation is not None and getattr(cause,'before_stage_result',False)
+        fields=dict(invocation_id=invocation,semantic_invocation=not infra)
+        if infra:
+            binding=compiled.plan[last[0].state].binding if compiled is not None else None
+            fields['provider_failure']=_provider_failure(cause,binding,old.get('timestamp'))
         _operation(store,'interrupted',reason=reason,state=old.get('state'),rung=old.get('rung'),
                    manifest_before=old.get('manifest_before'),diagnostic=str(cause or exc)[:2048],
-                   returncode=getattr(cause,'returncode',None),resume_safe=reason.startswith('provider_') and old.get('manifest_before')==_manifest(root))
+                   returncode=getattr(cause,'returncode',None),resume_safe=safe,**fields)
         raise
     _checkpoint(store,repo,root)
     _operation(store,'delivery_done',terminal=result.terminal_state)
@@ -268,17 +311,71 @@ def execute_recoverable_v2_work(config_text,flow_name,request,work_root,provider
         return _drive(project,flow_name,request,root,provider_runtime_config,store,repo)
 
 
-def _capacity(compiled,history,enter=None):
-    """Remaining budget for the interrupted visit, or for a new visit of state `enter`."""
-    state=compiled.flow.states[enter or history[-1].state]
-    inv=[e for e in history if e.kind=='invocation_started']
-    if compiled.flow.max_invocations_per_run is not None and len(inv)>=compiled.flow.max_invocations_per_run:return False
-    if enter is not None and state.max_state_visits_per_run is not None:
-        if sum(e.kind=='state_entered' and e.state==enter for e in history)>=state.max_state_visits_per_run:return False
+def _operations(store):
+    return [_read_version(store,'operation',r.version) for r in store.versions('operation')]
+
+
+def _read_version(store,name,version):return json.loads(store.read_artifact(name,version))
+
+
+def _legacy_interruption(op,history,compiled,root):
+    """Switchyard <=2.2 interruption records lack `semantic_invocation`. They set a provider_*
+    reason only for ProviderExecutionError, which adapters raise strictly before returning a
+    StageResult, and resume_safe only with an unchanged artifact manifest. With the retained
+    unfinished run_error that is sufficient proof that no semantic result existed."""
+    if op['phase']!='interrupted' or 'semantic_invocation' in op:return None
+    if op.get('reason') not in _PROVIDER_REASONS or op.get('resume_safe') is not True:return None
+    if not history or op.get('manifest_before')!=_manifest(root):return None
+    last=history[-1]
+    if last.kind!='run_error' or last.invocation_id is None or last.outcome is not None:return None
+    if any(e.kind=='invocation_finished' and e.invocation_id==last.invocation_id for e in history):return None
+    binding=compiled.plan[last.state].binding
+    if binding is None or (binding.logical_state,binding.rung_index)!=(op.get('state'),op.get('rung')):return None
+    return last.invocation_id
+
+
+def _void(ops,history,compiled,root):
+    """Invocation ids proven to have ended without a StageResult; append-only evidence."""
+    void=set()
+    for op in ops:
+        if op['phase']=='interrupted' and op.get('semantic_invocation') is False and op.get('invocation_id'):
+            void.add(op['invocation_id'])
+        inferred=op.get('inferred_interruption')
+        if op['phase']=='running' and type(inferred) is dict and inferred.get('semantic_invocation') is False:
+            void.add(inferred['invocation_id'])
+    legacy=_legacy_interruption(ops[-1],history,compiled,root) if ops else None
+    if legacy:void.add(legacy)
+    return frozenset(void)
+
+
+def _accounting(project,compiled,history,void,enter=None):
+    """Semantic budgets and infrastructure allowance for the visit that would execute next."""
+    name=enter or history[-1].state
+    state=compiled.flow.states[name]
+    inv=[e for e in history if e.kind=='invocation_started' and e.invocation_id not in void]
+    scopes=[]
+    if compiled.flow.max_invocations_per_run is not None:
+        scopes.append(dict(scope='run',used=len(inv),limit=compiled.flow.max_invocations_per_run))
     for scope in state.invocation_budgets:
-        used=sum(any(s.name==scope.name for s in compiled.flow.states[e.state].invocation_budgets) for e in inv)
-        if used>=scope.limit:return False
-    return True
+        scopes.append(dict(scope=scope.name,used=sum(any(s.name==scope.name for s in compiled.flow.states[e.state].invocation_budgets) for e in inv),limit=scope.limit))
+    tight=min(scopes,key=lambda s:(s['limit']-s['used'],s['limit']),default=None)
+    agent=compiled.plan[name].binding.profile_name
+    failures=sum(e.kind=='invocation_started' and e.invocation_id in void and compiled.plan[e.state].binding.profile_name==agent for e in history)
+    visits=None
+    if enter is not None and state.max_state_visits_per_run is not None:
+        visits=dict(used=sum(e.kind=='state_entered' and e.state==enter for e in history),limit=state.max_state_visits_per_run)
+    return dict(semantic_invocations_used=None if tight is None else tight['used'],
+                semantic_invocations_limit=None if tight is None else tight['limit'],
+                semantic_budgets=scopes,infrastructure_agent=agent,infrastructure_failures_used=failures,
+                infrastructure_failures_limit=project.agents[agent].infrastructure_failures,visits=visits)
+
+
+def _refusal(accounting):
+    """Why the interrupted visit, or a new visit of state `enter`, may not execute; None if it may."""
+    if accounting['visits'] and accounting['visits']['used']>=accounting['visits']['limit']:return 'invocation_budget_exhausted'
+    if any(s['used']>=s['limit'] for s in accounting['semantic_budgets']):return 'invocation_budget_exhausted'
+    if accounting['infrastructure_failures_used']>=accounting['infrastructure_failures_limit']:return 'infrastructure_budget_exhausted'
+    return None
 
 
 class _Projection:
@@ -325,7 +422,9 @@ def resume_v2_work(work_root,config_text,provider_runtime_config,reason=''):
             raise RecoveryBlocked('RESUME_BLOCKED','incomplete_event_history')
         compiled=compile_workflow(project.bundle,baseline['flow'],lambda b:_Projection())
         enter=compiled.entry_states[target] if target else None
-        if not _capacity(compiled,history,enter):raise RecoveryBlocked('RESUME_BLOCKED','invocation_budget_exhausted')
+        ops=_operations(store);void=_void(ops,history,compiled,root)
+        refusal=_refusal(_accounting(project,compiled,history,void,enter))
+        if refusal:raise RecoveryBlocked('RESUME_BLOCKED',refusal)
         workspace=WorkWorkspace.open(root)
         if _manifest(root)!=(checkpoint['manifest'] if target else op['manifest_before']):
             raise RecoveryBlocked('RESUME_BLOCKED','artifact_history_changed')
@@ -334,8 +433,12 @@ def resume_v2_work(work_root,config_text,provider_runtime_config,reason=''):
             if missing:raise RecoveryBlocked('RESUME_BLOCKED','recovery_inputs_missing',missing)
             _operation(store,'running',recovery=dict(from_terminal=op['terminal'],resume_to=target,reason=reason))
         else:
-            _operation(store,'running',**({'recovery':dict(reason=reason)} if reason else {}))
-        return _drive(project,baseline['flow'],workspace.read_artifact('request'),root,provider_runtime_config,store,repo,history,enter)
+            legacy=_legacy_interruption(op,history,compiled,root)
+            # Persist the historical inference append-only; earlier records are never edited.
+            _operation(store,'running',**({'recovery':dict(reason=reason)} if reason else {}),
+                       **({'inferred_interruption':dict(invocation_id=legacy,semantic_invocation=False,
+                           basis='switchyard<=2.2 provider interruption without StageResult')} if legacy else {}))
+        return _drive(project,baseline['flow'],workspace.read_artifact('request'),root,provider_runtime_config,store,repo,history,enter,void)
 
 
 def recovery_status(work_root):
@@ -362,17 +465,27 @@ def recovery_status(work_root):
             raise RecoveryBlocked('RECOVERY_BLOCKED','qa_workspace_unavailable')
         qa=WorkWorkspace.open(ref['workspace'])
         if qa.versions('qa_decision'):terminal=_read(qa,'qa_decision')['terminal']
-    resumable=False;route=None
+    resumable=False;route=None;accounting={};blocked=None
     try:
         if phase=='delivery_done' and not store.versions('qa_reference'):
             route=_route(base['config'],base['flow'],terminal)
         if route or (phase=='interrupted' and op.get('resume_safe')):
-            compiled=compile_workflow(simple_config_from_text(base['config']).bundle,base['flow'],lambda b:_Projection())
-            resumable=_capacity(compiled,tuple(read_events(Path(work_root)/'events.jsonl')),
-                                compiled.entry_states[route] if route else None)
+            project=simple_config_from_text(base['config'])
+            compiled=compile_workflow(project.bundle,base['flow'],lambda b:_Projection())
+            history=tuple(read_events(Path(work_root)/'events.jsonl'))
+            void=_void(_operations(store),history,compiled,Path(work_root).resolve())
+            enter=compiled.entry_states[route] if route else None
+            accounting=_accounting(project,compiled,history,void,enter)
+            if not route:
+                accounting['semantic_invocation_charged']=history[-1].invocation_id not in void
+            blocked=_refusal(accounting);del accounting['visits']
+            resumable=blocked is None
+            route=route or (op.get('state') if resumable else None)
     except Exception:pass
     return dict(work_id=Path(work_root).name,target=base['snapshot']['identity']['target'],flow=base['flow'],phase=phase,terminal=terminal,
                 state=op.get('state'),reason=op.get('reason'),diagnostic=op.get('diagnostic'),resume_allowed=resumable,resume_to=route,
+                **accounting,**({'resume_blocked':blocked} if blocked else {}),
+                **({'provider_failure':op['provider_failure']} if phase=='interrupted' and 'provider_failure' in op else {}),
                 rollback_allowed=phase in ('interrupted','delivery_done','rollback_running') and not op.get('checkpoint_uncertain',False) and terminal!='ACCEPTED')
 
 

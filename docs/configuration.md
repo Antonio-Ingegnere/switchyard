@@ -193,7 +193,10 @@ Booleans, strings, zero, negative numbers, NaN and infinity fail validation at t
 agent field. Command agents accept the same key. `config show` includes the effective
 timeout. No separate runtime or consumer override is needed.
 
-For resumable delivery, use the [recovery API](design/delivery-recovery.md). A timeout
-uses one invocation; reserve extra rung/state/run capacity if human resume is desired.
+For resumable delivery, use the [recovery API](design/delivery-recovery.md). A provider
+failure or timeout before any StageResult is an infrastructure failure: it uses none of
+the semantic `budget.invocations`, only the agent's `infrastructure_failures` allowance
+(positive integer, default 2; resume refuses once the agent reaches it). It is frozen
+with the rest of the semantic configuration.
 Resume permits timeout-only edits and retains every prior budget charge. It never
 automatically retries or repeats completed stages.

@@ -34,15 +34,39 @@ The resolver applies that deadline to the actual model or command process. Advan
 profiles without a deadline retain `ProviderRuntimeConfig.timeout_seconds` fallback.
 `config show` displays the effective timeout without launching providers.
 
-A failed invocation consumes its ordinary run/state/rung budgets. Resume re-enters
-the interrupted invocation's already-admitted visit, with a new invocation identity
-and cumulative counters reconstructed from the same event history. It never repeats
+A semantic invocation is one whose stage adapter returned a parsed StageResult. It
+consumes its ordinary run/state/rung budgets, including when Switchyard later rejects
+the result or fails to persist it. An infrastructure failure is a provider process
+that ended before any StageResult: nonzero exit, signal, timeout, transport/start
+failure, or output that is not a valid StageResult. It changes no artifact, is
+recorded on the interruption (`semantic_invocation: false`, `invocation_id`, bounded
+`provider_failure` facts: classification, provider, model, agent, exit code, timeout
+flag, duration, redacted output tail) and is never charged to semantic budgets.
+Classification is `timeout`, `provider_exit`, `rate_limit`, `authentication`,
+`provider_unavailable`, `transport_failure` or `invalid_stage_result`.
+
+Infrastructure failures have their own bound: `agents.<name>.infrastructure_failures`
+(positive integer, default 2) per agent per work. Resume refuses with
+`RESUME_BLOCKED: infrastructure_budget_exhausted` once that agent has reached it, so
+the default tolerates one failed provider run and refuses after the second. There is
+no automatic retry; every further provider process still needs a human resume.
+
+Resume re-enters the interrupted invocation's already-admitted visit, with a new
+invocation identity and cumulative counters reconstructed from the same event history,
+excluding proven infrastructure failures (`run(..., void_invocations=...)`; the runtime
+accepts only unfinished invocations that ended in `run_error`). It never repeats
 successful states. `run_resumed` follows the retained `run_error`; Event fields,
 routing and budget admission rules are unchanged. Cross-process elapsed durations
 are not invented. The recovery controller rejects exhausted budgets before launch.
-Reserve capacity explicitly, for example a single `run` entry with
-`budget: {invocations: 2}` and sufficient flow/state limits. This enables one human
-resume after a timeout, not an automatic retry or a second state visit.
+
+Histories written by Switchyard 2.2 have no `semantic_invocation` field. Their
+`provider_failure`/`provider_timeout` interruption with `resume_safe: true` is proof
+of an infrastructure failure: 2.2 raised that class only inside stage adapters before
+a StageResult, and `resume_safe` required an unchanged artifact manifest. Together with
+the retained unfinished `run_error` of the same state/rung, the latest such record is
+read as uncharged. Resume appends the inference as `inferred_interruption` on its new
+operation record; history is never edited. Earlier 2.2 interruptions that were
+already resumed stay charged.
 
 Only agent timeouts may change between initial execution and resume. The baseline
 holds the original semantic configuration; normalized YAML comparison removes only
@@ -111,7 +135,10 @@ Each completed invocation gets a worktree checkpoint, including abnormal termina
 Partial source edits remain; rejected or absent StageResult outputs are not committed.
 
 Known failures record `interrupted`, logical state/rung and bounded reason:
-`provider_timeout`, `provider_failure` or `execution_interrupted`. The consumer's
+`provider_timeout`, `provider_failure` or `execution_interrupted`. Status adds
+`semantic_invocations_used`/`_limit` (tightest scope of the visit to run next),
+`semantic_budgets`, `infrastructure_failures_used`/`_limit`, `resume_to` (the
+interrupted logical state when resumable), `resume_blocked` and `provider_failure`. The consumer's
 navigation pointer reflects this authoritative state. No raw stderr goes into that
 pointer. Status reports resume/rollback eligibility; those flags are advisory and
 each operation revalidates. Resume verifies repository/HEAD/index, checkpoint bytes
