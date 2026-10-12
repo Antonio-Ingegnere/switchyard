@@ -230,7 +230,10 @@ def _compiled(project,flow,workspace,config,store,repo,root):
 
 _PROVIDER_REASONS=('provider_failure','provider_timeout')
 _TAIL_BYTES=1024
-_CLASSES=((re.compile(r'api_error_status=429|\brate[ _-]?limit',re.I),'rate_limit'),
+# First match wins. A provider that answered but exhausted StageOutputContract repair produced
+# no StageResult: invalid_stage_result, still an infrastructure (non-semantic) failure.
+_CLASSES=((re.compile(r'subtype=error_max_structured_output_retries|terminal_reason=structured_output_retry_exhausted'),'invalid_stage_result'),
+          (re.compile(r'api_error_status=429|\brate[ _-]?limit',re.I),'rate_limit'),
           (re.compile(r'api_error_status=40[13]|authenticat|unauthori[sz]ed|not logged in|invalid api key|please run /login|\blogin\b',re.I),'authentication'),
           (re.compile(r'api_error_status=5\d\d|overloaded|service unavailable|temporarily unavailable',re.I),'provider_unavailable'))
 

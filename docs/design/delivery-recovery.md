@@ -44,6 +44,9 @@ recorded on the interruption (`semantic_invocation: false`, `invocation_id`, bou
 flag, duration, redacted output tail) and is never charged to semantic budgets.
 Classification is `timeout`, `provider_exit`, `rate_limit`, `authentication`,
 `provider_unavailable`, `transport_failure` or `invalid_stage_result`.
+`invalid_stage_result` also covers a provider that answered but exhausted StageOutputContract
+repair (Claude `error_max_structured_output_retries`); its output tail ends with the
+machine-readable `stage_result_errors` records.
 
 Infrastructure failures have their own bound: `agents.<name>.infrastructure_failures`
 (positive integer, default 2) per agent per work. Resume refuses with

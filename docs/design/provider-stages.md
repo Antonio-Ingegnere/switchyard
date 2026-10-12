@@ -70,7 +70,7 @@ between Haiku and Sonnet reasoning or a native Haiku effort flag. See the offici
 Inherited conflicting effort/thinking and default-model overrides are removed for
 this invocation. Managed/server policy may still constrain a deployment; these tests
 prove requested transport configuration, not remote policy or model quality.
-`MAX_STRUCTURED_OUTPUT_RETRIES=1` disables the CLI's additional schema-repair attempts.
+`MAX_STRUCTURED_OUTPUT_RETRIES=3` bounds the CLI's in-process schema repair (STRUCTURED-OUTPUT-001).
 
 Codex uses exact `--model`, `-c model_reasoning_effort="low|medium|high"`, stdin `-`,
 `--output-schema <temporary schema>`, and `--output-last-message <temporary result>`.
@@ -331,3 +331,33 @@ before publishing direct-child termination to an optional process observer. This
 bounded callback supports safe recovery checkpointing, not tool telemetry. Failed
 cleanup leaves recovery active/blocked. StageResult, capability policy and structured
 output normalization are unchanged. See [recovery limits](delivery-recovery.md).
+
+## Bounded StageOutputContract correction (STRUCTURED-OUTPUT-001)
+
+Evidence: Adeo work `52c939b8...` IMPLEMENT (Claude 2.1.282, sonnet) ran 11 minutes, then
+exited `error_max_structured_output_retries`: `/produced_artifacts/0: must NOT have
+additional properties ('content_name' is not allowed)`. The CLI validates with Ajv
+`allErrors`, so that was the only violation: `name` and `content` were present and valid.
+`content_name` appears in no Switchyard or Adeo prompt, schema, example or document; the
+prompt and schema agreed. It was a model-only violation. The defect was the correction
+path. With `MAX_STRUCTURED_OUTPUT_RETRIES=1` the CLI ends the run at the first rejection
+("after 1 attempts"), so the model never saw the error and no correction turn ran.
+`--no-session-persistence` keeps no raw invalid output.
+
+- One derivation: `result_field_map(result_schema(contract))` lists the allowed fields per
+  object path. The prompt renders it as `STRUCTURED OUTPUT FIELDS`, with an explicit rule:
+  resubmit the same result with only the named path corrected, without repeating the work.
+- Correction stays inside ONE invocation through the CLI's StructuredOutput repair: each
+  rejected call returns the exact path to the model, at most `STRUCTURED_OUTPUT_ATTEMPTS`
+  (3) calls. It is not a Switchyard re-invocation and adds no adapter retry loop.
+- `parse_stage_result` first runs `stage_result_errors`, a structural check against the
+  same schema. A violation raises `StageResultContractError` (a ProviderExecutionError
+  with no returncode), whose diagnostics are one bounded line:
+  `stage_result_errors: [{"path","error","allowed_fields"}]`. Values are never echoed.
+  Only an unexpected key name is shown, clipped. The handoff body keeps its V2-003E
+  diagnostics, which never echo rejected keys.
+- When Claude exhausts repair, the adapter translates the CLI's Ajv text into the same
+  records and appends them to the failure diagnostic.
+- Recovery classifies both cases as `invalid_stage_result`. It is still an infrastructure
+  failure before any StageResult: INTERRUPTED, no semantic charge, and resume is explicit.
+

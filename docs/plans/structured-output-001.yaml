@@ -1,0 +1,23 @@
+id: STRUCTURED-OUTPUT-001
+goal: Make the IMPLEMENT final-report StageOutputContract failure correctable within its invocation and classify exhaustion precisely, without loosening validation.
+status: complete
+diagnosis:
+  observed: Adeo work 52c939b8d2874485850b029832e36d35 IMPLEMENT (claude sonnet, 660809 ms) exited 1 with subtype=error_max_structured_output_retries; "/produced_artifacts/0: must NOT have additional properties ('content_name' is not allowed)" after 1 attempts.
+  schema: produced_artifacts items are exactly {name (enum implementation_handoff), content}, additionalProperties false; four top-level keys.
+  prompt: "List of {name, content} objects" plus the schema JSON. No produced_artifacts example or template exists anywhere.
+  content_name_origin: Not present in any Switchyard or Adeo prompt, schema, doc or example. Ajv allErrors reported only the extra key, so name and content were valid. Model-only schema violation.
+  raw_invalid_result: Not durable. --no-session-persistence and the failure envelope carries no structured_output.
+  correction_loop_defect: MAX_STRUCTURED_OUTPUT_RETRIES=1 makes the CLI stop at the first rejected StructuredOutput call, so no correction attempt was made and no corrected result exists.
+  classification_defect: The exit-1 envelope fell through to provider_exit, although no valid StageResult was produced.
+scope:
+  - Schema-derived per-path allowed-field map rendered in every provider prompt with an explicit correction rule.
+  - Structural stage_result_errors and StageResultContractError with bounded {path, error, allowed_fields} records.
+  - Claude in-process StructuredOutput repair bounded to STRUCTURED_OUTPUT_ATTEMPTS=3; exhausted CLI text translated into the same records.
+  - Recovery classifies structured-output exhaustion as invalid_stage_result.
+constraints:
+  - No accepted extra fields; schema, enums and semantic checks unchanged; handoff V2-003E diagnostics unchanged.
+  - No Switchyard re-invocation or automatic resume; PROVIDER-RECOVERY-001 accounting unchanged.
+  - Version stays 2.2.0 so the fix installs by commit under live interrupted Adeo work.
+verification:
+  - tests/test_structured_output_correction.py (offline fake CLI emulating Claude 2.1.282 repair).
+  - Full TERM=dumb unittest discovery.

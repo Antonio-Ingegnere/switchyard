@@ -43,8 +43,8 @@ class ResultField:
 # Single provider-facing StageResult shape shared by schema, parser and renderer.
 RESULT_FIELDS = (
     ResultField('outcome', False, None, 'Exactly one allowed semantic outcome string'),
-    ResultField('produced_artifacts', False, '[]', 'List of {name, content} objects; '
-                'not every declared artifact must be returned'),
+    ResultField('produced_artifacts', False, '[]', 'List of objects with exactly the fields name and content '
+                '(no other field); not every declared artifact must be returned'),
     ResultField('handoff', True, 'null', 'Otherwise an object of exactly the handoff body_fields; '
                 'always null when the contract does not support a handoff'),
     ResultField('diagnostics', True, 'null', 'Otherwise a diagnostic string; null is the normal '
@@ -100,6 +100,126 @@ def _json(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False)
 
 
+# Provider-native schema repair inside ONE invocation (Claude StructuredOutput tool turns):
+# the CLI returns its schema error to the model, which resubmits. Never a Switchyard re-invocation.
+STRUCTURED_OUTPUT_ATTEMPTS = 3
+MAX_STAGE_RESULT_ERRORS = 8
+_ERROR_KEY_CHARS = 64
+
+
+def _path(parent, key):
+    return key if not parent else f'{parent}.{key}'
+
+
+def result_field_map(schema=None):
+    """Allowed fields per object path ('[]' = every list item), derived from result_schema.
+
+    The prompt, validation errors and correction guidance all read this one derivation.
+    """
+    fields = {}
+    def walk(node, path):
+        for option in node.get('anyOf', ()):
+            walk(option, path)
+        if node.get('type') == 'object':
+            fields[path or '$'] = list(node['properties'])
+            for key, child in node['properties'].items():
+                walk(child, _path(path, key))
+        elif node.get('type') == 'array':
+            walk(node['items'], path+'[]')
+    walk(result_schema() if schema is None else schema, '')
+    return fields
+
+
+def _shape(path):
+    return re.sub(r'\[\d+\]', '[]', path) or '$'
+
+
+_TYPES = {'object': dict, 'array': list, 'string': str}
+
+
+def stage_result_errors(value, schema=None):
+    """Structural StageOutputContract violations as bounded machine-readable records.
+
+    Each record is {path, error[, allowed_fields]}; rejected values are never echoed,
+    only an unexpected key name, clipped. Semantic checks stay in parse_stage_result.
+    The handoff body keeps its V2-003E diagnostics, which never echo rejected keys.
+    """
+    errors = []
+    allowed = result_field_map(schema)
+    def add(path, error, owner=None):
+        if len(errors) < MAX_STAGE_RESULT_ERRORS:
+            record = {'path': path or '$', 'error': error}
+            if owner is not None:
+                record['allowed_fields'] = allowed[_shape(owner)]
+            errors.append(record)
+    def walk(node, item, path):
+        if path == 'handoff':
+            return
+        kinds = node['type'] if type(node['type']) is list else [node['type']]
+        if not any(item is None if kind == 'null' else type(item) is _TYPES[kind] for kind in kinds):
+            add(path, f'expected {" or ".join(kinds)}, got {_kind(item)}')
+        elif type(item) is dict:
+            for key in item:
+                if key not in node['properties']:
+                    shown = _clean(key, _ERROR_KEY_CHARS) if type(key) is str else '?'
+                    add(_path(path, shown), 'additional property is not allowed', path)
+            for key in node['required']:
+                if key not in item:
+                    add(_path(path, key), 'required property is missing', path)
+            for key, child in node['properties'].items():
+                if key in item:
+                    walk(child, item[key], _path(path, key))
+        elif type(item) is list:
+            for index, child in enumerate(item):
+                walk(node['items'], child, f'{path}[{index}]')
+    walk(result_schema() if schema is None else schema, value, '')
+    return errors
+
+
+def stage_result_error_text(errors):
+    """Deterministic JSON line within the diagnostic byte bound; drops trailing records first."""
+    errors = list(errors)
+    while True:
+        text = 'stage_result_errors: '+_json(errors)
+        if len(text.encode('utf-8')) <= MAX_DIAGNOSTIC_BYTES or len(errors) <= 1:
+            return _clip(text, MAX_DIAGNOSTIC_BYTES)
+        errors.pop()
+
+
+class StageResultContractError(ProviderExecutionError):
+    """A returned result violates StageOutputContract: no StageResult exists (invalid_stage_result)."""
+    def __init__(self, errors):
+        first = errors[0]
+        super().__init__(f'invalid structured object fields: {first["path"]}: {first["error"]}',
+                         DiagnosticPayload(stage_result_error_text(errors).encode('utf-8')))
+        self.errors = tuple(errors)
+
+
+_AJV_ADDITIONAL = re.compile(r"(\S+): must NOT have additional properties \('([^']*)' is not allowed\)")
+_AJV_REQUIRED = re.compile(r"(\S+): must have required property '([^']*)'")
+
+
+def _ajv_path(pointer):
+    if pointer == 'root':
+        return ''
+    return ''.join(f'[{part}]' if part.isdigit() else '.'+part for part in pointer.strip('/').split('/')).lstrip('.')
+
+
+def claude_schema_errors(messages):
+    """Translate Claude CLI StructuredOutput rejection text into the canonical error records."""
+    errors = []
+    allowed = result_field_map()
+    for message in messages:
+        for pattern, error in ((_AJV_ADDITIONAL, 'additional property is not allowed'),
+                               (_AJV_REQUIRED, 'required property is missing')):
+            for match in pattern.finditer(message):
+                owner = _ajv_path(match.group(1))
+                if _shape(owner) in allowed and len(errors) < MAX_STAGE_RESULT_ERRORS:
+                    errors.append({'path': _path(owner, _clean(match.group(2), _ERROR_KEY_CHARS)),
+                                   'error': error, 'allowed_fields': allowed[_shape(owner)]})
+    return errors
+
+
 def render_invocation(invocation: StageInvocation) -> str:
     parts = ['SWITCHYARD EXECUTION CONTRACT',
              'Perform exactly this bounded stage. Return the structured result; do not select transitions.',
@@ -135,6 +255,13 @@ def render_invocation(invocation: StageInvocation) -> str:
     parts.append(handoff_guidance(invocation.output_contract.handoff))
     parts.append('OUTPUT CONTRACT\n'+result_contract_text()+'\nMatch this schema. '
                  'Do not wrap it in prose or markdown. Handoff is bounded reasoning, not a transcript.\n'+_json(result_schema(invocation.output_contract)))
+    parts.append('STRUCTURED OUTPUT FIELDS\n'
+                 'Each object accepts exactly these fields at its JSON path ("[]" = every list item); '
+                 'any other field is rejected:\n'+_json(result_field_map(result_schema(invocation.output_contract)))+'\n'
+                 'If the result is rejected, the error names the exact path (for example '
+                 'produced_artifacts[0].unexpected_field). Resubmit the same result with only that '
+                 'path corrected: remove every field not listed for its object and add every missing listed field. '
+                 'Do not repeat the stage work.')
     return '\n\n'.join(parts)
 
 
@@ -185,6 +312,9 @@ def normalize_claude_transport(value):
 
 
 def parse_stage_result(value) -> StageResult:
+    errors = stage_result_errors(value)
+    if errors:
+        raise StageResultContractError(errors)
     _keys(value, RESULT_KEYS)
     _text(value['outcome'], True)
     _require('\0' not in value['outcome'] and value['outcome'] != 'budget_exceeded', 'invalid semantic outcome')
@@ -411,6 +541,18 @@ def _claude_failure_reason(stdout):
     return ('\n'.join(lines) or None), True
 
 
+def _claude_schema_exhaustion(stdout):
+    """Canonical error records when Claude exhausted StructuredOutput repair; else []."""
+    try:
+        envelope = json.loads(stdout.decode('utf-8', errors='replace'))
+    except (ValueError, RecursionError):
+        return []
+    if type(envelope) is not dict or envelope.get('subtype') != 'error_max_structured_output_retries':
+        return []
+    errors = envelope.get('errors')
+    return claude_schema_errors([e for e in errors[:16] if type(e) is str] if type(errors) is list else [])
+
+
 def _exit_failure(output, reason=None, raw_stdout=None):
     """Precedence: structured reason, stderr, raw stdout fallback, generic status."""
     status = f'provider exited with status {output.returncode}'
@@ -442,7 +584,7 @@ class ClaudeStageExecutor:
                     'CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING','ANTHROPIC_DEFAULT_HAIKU_MODEL',
                     'ANTHROPIC_DEFAULT_SONNET_MODEL'):
             env.pop(key,None)
-        env['MAX_STRUCTURED_OUTPUT_RETRIES'] = '1'
+        env['MAX_STRUCTURED_OUTPUT_RETRIES'] = str(STRUCTURED_OUTPUT_ATTEMPTS)
         argv = ['--print','--no-session-persistence','--output-format','json',
                 '--json-schema',_json(result_schema(invocation.output_contract,'claude')),'--model',self.resolved_model,
                 '--safe-mode','--restricted','--strict-mcp-config','--mcp-config','{"mcpServers":{}}',
@@ -462,6 +604,10 @@ class ClaudeStageExecutor:
         if output.returncode != 0:
             # Same documented envelope, decoded only for failure diagnostics, never a StageResult.
             reason, decodable = _claude_failure_reason(output.stdout)
+            exhausted = _claude_schema_exhaustion(output.stdout)
+            if exhausted:
+                # Last section: the recovery output tail keeps the end of the diagnostic.
+                reason = '\n'.join(filter(None, (reason, stage_result_error_text(exhausted))))
             raise _exit_failure(output, reason, None if decodable else output.stdout)
         envelope = _decode(output.stdout)
         _require(type(envelope) is dict and envelope.get('type')=='result' and

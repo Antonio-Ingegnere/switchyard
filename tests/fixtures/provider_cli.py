@@ -63,7 +63,30 @@ if mode=='malformed': raw='not JSON'
 if mode=='oversized': raw='x'*2000000
 if mode=='missing_outcome':
     del result['outcome']; raw=json.dumps(result)
-if provider=='claude':
+if provider=='claude' and os.environ.get('FAKE_SCHEMA_INVALID_ATTEMPTS'):
+    # Emulates Claude CLI StructuredOutput repair inside ONE process (observed in 2.1.282): each
+    # rejected call returns the Ajv error to the model; rejections reaching the cap end the run.
+    schema=json.loads(argv[argv.index('--json-schema')+1])
+    allowed=set(schema['properties']['produced_artifacts']['items']['properties'])
+    cap=int(os.environ.get('MAX_STRUCTURED_OUTPUT_RETRIES') or 5); invalid=int(os.environ['FAKE_SCHEMA_INVALID_ATTEMPTS'])
+    feedback=[]
+    for attempt in range(1,cap+1):
+        candidate=json.loads(json.dumps(result))
+        if attempt<=invalid: candidate['produced_artifacts'][0]['content_name']='handoff.md'
+        extra=[k for k in candidate['produced_artifacts'][0] if k not in allowed]
+        if not extra: break
+        feedback.append("Output does not match required schema: /produced_artifacts/0: must NOT have "
+                        f"additional properties ('{extra[0]}' is not allowed)")
+    if os.environ.get('FAKE_REPAIR_LOG'):
+        with open(os.environ['FAKE_REPAIR_LOG'],'a') as stream: stream.write(json.dumps({'attempts':attempt,'feedback':feedback})+'\n')
+    if extra:
+        print(json.dumps({'type':'result','subtype':'error_max_structured_output_retries','is_error':True,
+                          'terminal_reason':'structured_output_retry_exhausted',
+                          'errors':[f'Failed to provide valid structured output after {cap} attempts — '
+                                    f'last StructuredOutput error: {feedback[-1]}']}))
+        sys.exit(1)
+    print(json.dumps({'type':'result','subtype':'success','is_error':False,'structured_output':candidate}))
+elif provider=='claude':
     if mode in ('malformed','oversized'): print(raw)
     else: print(json.dumps({'type':'result','subtype':'success','is_error':False,
                            'structured_output':result,'result':'operational prose must not be parsed'}))

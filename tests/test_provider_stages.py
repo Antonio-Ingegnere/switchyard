@@ -15,7 +15,7 @@ from switchyard.work_contract import WorkWorkspace, HandoffRecord
 from switchyard.workflow_bundle import (load_workflow_bundle, ExecutionProfile, CommandSpec,
                                         CommandOutcomes, CommandCapture)
 from switchyard.workflow_compiler import compile_workflow, ExecutionBinding, WorkflowCompileError
-from switchyard.provider_stages import (ProviderRuntimeConfig, ProviderStageExecutorResolver,
+from switchyard.provider_stages import (STRUCTURED_OUTPUT_ATTEMPTS, ProviderRuntimeConfig, ProviderStageExecutorResolver,
                                         ProviderResolutionError, render_invocation,
                                         parse_stage_result, result_schema, _decode)
 from switchyard.provider_process import ProviderExecutionError
@@ -67,7 +67,7 @@ class ProviderStageTests(unittest.TestCase):
                     self.assertIn('--effort',call['argv']); self.assertIn('medium',call['argv'])
                 else:
                     self.assertEqual(call['thinking'],'8192'); self.assertNotIn('--effort',call['argv'])
-                if provider=='claude': self.assertEqual(call['retries'],'1')
+                if provider=='claude': self.assertEqual(call['retries'],str(STRUCTURED_OUTPUT_ATTEMPTS))
 
     def test_model_passthrough_and_aliases(self):
         cases = [

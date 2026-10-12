@@ -9,7 +9,7 @@ import unittest
 from runtime import DiagnosticPayload, InvocationRequest, WorkUnit
 from switchyard.context_transport import (StageInvocation, StageOutputContract, StageOutputArtifactContract,
                                           StageHandoffContract, StageHandoff, workspace_resolver)
-from switchyard.provider_stages import (RESULT_FIELDS, RESULT_KEYS, ProviderRuntimeConfig,
+from switchyard.provider_stages import (STRUCTURED_OUTPUT_ATTEMPTS, RESULT_FIELDS, RESULT_KEYS, ProviderRuntimeConfig,
                                         ProviderStageExecutorResolver, render_invocation, result_schema)
 from switchyard.provider_process import ProviderExecutionError
 from switchyard.work_contract import WorkWorkspace
@@ -51,7 +51,7 @@ class SchemaInstructionAlignmentTests(unittest.TestCase):
                     continue
                 binding = ExecutionBinding('f','S','worker',0,'p','claude','haiku','medium',None,('repo_read',))
                 rendered = render_invocation(StageInvocation(binding, (), output_contract=contract))
-                section = rendered.split('\n\nOUTPUT CONTRACT\n')[1]
+                section = rendered.split('\n\nOUTPUT CONTRACT\n')[1].split('\n\nSTRUCTURED OUTPUT FIELDS\n')[0]
                 self.assertIn('ALL of these top-level keys. Never omit any key.', section)
                 self.assertIn('"Nullable" means the KEY is mandatory and its VALUE may be null.', section)
                 for index, field in enumerate(RESULT_FIELDS, 1):
@@ -152,13 +152,13 @@ class FakeProviderShapeTests(unittest.TestCase):
                 self.assertEqual(result.handoff, StageHandoff(**HANDOFF))
                 self.assertEqual(result.diagnostics, DiagnosticPayload(b'tie order lost after pop'))
 
-    def test_shared_renderer_and_unchanged_retry_policy(self):
+    def test_shared_renderer_and_bounded_retry_policy(self):
         valid = {'outcome':'ready','produced_artifacts':[],'handoff':None,'diagnostics':None}
         self.run_provider('claude', valid); self.run_provider('codex', valid)
         claude, codex = self.calls()
         contract = lambda call: call['input'].split('\n\nSTAGE OUTPUT CONTRACT\n')[1]
         self.assertEqual(contract(claude), contract(codex))
-        self.assertEqual(claude['retries'], '1')
+        self.assertEqual(claude['retries'], str(STRUCTURED_OUTPUT_ATTEMPTS))
         schema = json.loads(claude['argv'][claude['argv'].index('--json-schema')+1])
         self.assertEqual(codex['schema'], result_schema(CONTRACTS[1]))
         self.assertEqual(codex['schema']['required'], list(RESULT_KEYS))

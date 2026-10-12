@@ -11,7 +11,7 @@ import unittest
 from runtime import DiagnosticPayload, InvocationRequest, WorkUnit
 from switchyard.context_transport import (StageInvocation, StageOutputContract, StageOutputArtifactContract,
                                           StageHandoffContract, StageHandoff, workspace_resolver)
-from switchyard.provider_stages import (RESULT_KEYS, CLAUDE_TRANSPORT_REQUIRED, ProviderRuntimeConfig,
+from switchyard.provider_stages import (STRUCTURED_OUTPUT_ATTEMPTS, RESULT_KEYS, CLAUDE_TRANSPORT_REQUIRED, ProviderRuntimeConfig,
                                         ProviderStageExecutorResolver, normalize_claude_transport,
                                         parse_stage_result, result_schema)
 from switchyard.provider_process import ProviderExecutionError
@@ -137,7 +137,7 @@ class ClaudeBoundaryTests(unittest.TestCase):
         call = self.calls()[-1]
         schema = json.loads(call['argv'][call['argv'].index('--json-schema')+1])
         self.assertEqual(schema, result_schema(CONTRACT, 'claude'))
-        self.assertEqual(call['retries'], '1')
+        self.assertEqual(call['retries'], str(STRUCTURED_OUTPUT_ATTEMPTS))
         # Only supported options: no internal structured-output feature gate is configured.
         self.assertFalse(any('tengu' in arg or 'structured_output_strict' in arg for arg in call['argv']))
 
