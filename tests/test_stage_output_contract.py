@@ -128,6 +128,7 @@ class StageOutputContractTests(unittest.TestCase):
         with self.assertRaisesRegex(WorkContractError, 'byte limit'):
             replace(contract, allowed_outcomes=('x'*MAX_OUTPUT_CONTRACT_BYTES,))
         payload = asdict(context); del payload['output_contract']; del payload['binding']['executor_allowed_outcomes']
+        del payload['sources']  # Empty optional sources preserve the legacy context byte budget.
         size = len(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode())
         replace(wrapper, max_context_bytes=size)._context(InvocationRequest(WorkUnit(REQUEST)))
         with self.assertRaisesRegex(WorkContractError, 'context exceeds'):

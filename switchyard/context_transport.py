@@ -6,6 +6,7 @@ from typing import Callable, Protocol
 
 from runtime import (DiagnosticInput, DiagnosticPayload, ExecutorResult,
                      InvocationRequest, InvocationResponse)
+from .source_resolution import prepare_sources
 from .workflow_compiler import ExecutionBinding
 from .work_contract import (ArtifactProducer, ArtifactRecord, HandoffRecord,
                             WorkContractError, WorkWorkspace, MicroSpecField, MICROSPEC_FIELDS,
@@ -113,9 +114,10 @@ class StageInvocation:
     previous_handoff: HandoffRecord | None = None
     diagnostics: DiagnosticInput | None = None
     output_contract: StageOutputContract = field(kw_only=True)
+    sources: tuple[ArtifactSnapshot, ...] = field(default=(), kw_only=True)
 
     def __post_init__(self):
-        _tuples(self, 'artifacts')
+        _tuples(self, 'artifacts', 'sources')
         _require(type(self.output_contract) is StageOutputContract, 'expected StageOutputContract')
 
 
@@ -145,6 +147,7 @@ class ContextualExecutor:
     stage_executor: StageExecutor
     output_contract: StageOutputContract
     max_context_bytes: int = 65536
+    source_workspace: WorkWorkspace | None = None
 
     def __post_init__(self):
         _require(type(self.max_context_bytes) is int and self.max_context_bytes > 0,
@@ -172,11 +175,18 @@ class ContextualExecutor:
                         if h.flow == self.binding.flow_name and h.rung_index == self.binding.rung_index - 1]
             _require(bool(matching), 'missing continuation handoff for preceding rung')
             previous = matching[-1]
+        sources = ()
+        if self.source_workspace is not None:
+            record = self.source_workspace.latest_artifact('resolved_sources')
+            _require(record is not None, 'missing resolved sources')
+            sources = (ArtifactSnapshot(record, self.source_workspace.read_artifact(record.name, record.version)),)
         context = StageInvocation(self.binding, tuple(snapshots), previous, request.diagnostics,
-                                  output_contract=self.output_contract)
+                                  output_contract=self.output_contract, sources=sources)
         # Canonical size accounting only, not a provider prompt format.
         input_data = asdict(context)
         del input_data['output_contract']
+        if not sources:
+            del input_data['sources']  # preserve legacy byte accounting
         del input_data['binding']['executor_allowed_outcomes']
         size = len(json.dumps(input_data, ensure_ascii=False, sort_keys=True,
                               separators=(',', ':'), default=lambda b: b.decode('utf-8')).encode('utf-8'))
@@ -227,10 +237,12 @@ class ContextualExecutor:
 
 
 def workspace_resolver(bundle: WorkflowBundle, flow_name: str, workspace: WorkWorkspace,
-                       stage_executor_resolver: StageExecutorResolver, *, max_context_bytes: int = 65536):
+                       stage_executor_resolver: StageExecutorResolver, *, max_context_bytes: int = 65536,
+                       source_resolvers=None):
     """Compose with compile_workflow; resolve each stage once during compilation."""
     flow = bundle.flow(flow_name)
     _require(workspace.artifacts == bundle.artifacts, 'workspace catalog differs from bundle')
+    sources = prepare_sources(workspace, source_resolvers)
 
     def resolve(binding: ExecutionBinding):
         _require(binding.flow_name == flow_name and binding.logical_state in flow.states,
@@ -245,5 +257,6 @@ def workspace_resolver(bundle: WorkflowBundle, flow_name: str, workspace: WorkWo
                   MICROSPEC_FIELDS if bundle.artifacts[name].schema == 'microspec' else ())
                   for name in declaration.produces),
             StageHandoffContract(binding.provider != 'command', tuple(sorted(bundle.artifacts))))
-        return ContextualExecutor(binding, declaration, workspace, stage, contract, max_context_bytes)
+        return ContextualExecutor(binding, declaration, workspace, stage, contract, max_context_bytes,
+                                  sources if binding.logical_state == flow.entry else None)
     return resolve

@@ -159,3 +159,18 @@ All returned artifacts and the handoff are still prevalidated before publication
 An invalid reference now reports `handoff.evidence[index]` with a safe category;
 no body value appears in the exception chain. Fresh/continue selection, output
 contracts, schema shape, persistence formats and runtime behavior are unchanged.
+
+## Resolved source transport
+
+`workspace_resolver` prepares supported request sources before returning its executor
+resolver. `StageInvocation.sources` is an optional tuple of `ArtifactSnapshot`s
+(default empty), separate from provider-consumable/produced workflow artifact names.
+Only entry-state bindings receive it. The snapshot is read and integrity-verified
+from the source workspace before invocation, and counted in the existing context
+byte bound. Empty sources preserve legacy context byte accounting.
+
+The shared model renderer includes a `RESOLVED REQUEST SOURCES` section with exact
+normalized content and its artifact record/provenance, identifying it as external
+material rather than execution instructions. Both model adapters receive identical
+source context. Provider output schemas and evidence-name catalogs are unchanged:
+source snapshots are control-plane inputs, not new provider output permissions.

@@ -390,3 +390,30 @@ are reused as provenance. It does not fabricate runtime Events for Git transacti
 steps. Runtime/Event and delivery graphs remain unchanged. The generic CLI handles
 V1 flow files and DELIVERY-001's CLI handles its pre-staged approval protocol; V2-007
 therefore exposes only the reusable Python API.
+
+## Resolved request sources (SOURCE-RESOLUTION-001)
+
+The original `request.md` stays byte-for-byte unchanged. Source preparation uses a
+normal child `WorkWorkspace` at `<work-root>/sources/`, following the existing
+separate-workspace lifecycle pattern rather than changing immutable bundle catalogs.
+Its fixed catalog contains `request` (exact text copy) and `resolved_sources` (JSON).
+The latter is published once, after every supported reference has resolved. It has
+no provider producer and is never a permitted provider output. Manifest versioning,
+verified reads, locks, immutable publication and crash rules remain unchanged.
+
+`resolved_sources` contains `schema_version: 1` and an ordered `sources` array.
+Each source records schema version, source type, first original reference, canonical
+URL, resolver identity/version, UTC retrieval timestamp, normalized content and
+`content_sha256`. Content includes repository, issue/PR number, canonical URL,
+title, body, state, comments and explicit truncation metadata. Canonical JSON uses
+sorted keys, compact separators and UTF-8 without ASCII escaping. The content hash
+is SHA-256 of **only the canonical `content` object**, including truncation. Retrieval
+time and original URL spelling do not affect that hash. The workspace artifact hash
+separately covers the entire persisted JSON, including retrieval provenance.
+
+Committed snapshots are reused on subsequent compilation/resume without network
+access; the immutable request copy and source artifact integrity are verified first.
+There is no refresh or cache expiry. Source content supplied to the stage is the
+exact stored JSON. A source batch that fails resolution is not published; the parent
+request remains available. Existing histories/catalogs require no new fields, no
+migration and no event rewriting. Old work remains readable without a source store.

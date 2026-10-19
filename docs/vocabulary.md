@@ -102,3 +102,12 @@ A check that must produce a normalized result before a transition can proceed.
 ## MicroSpec
 
 A small change contract with enough information to implement and verify one bounded unit of work.
+
+## Source Reference / Resolved Source
+
+A Source Reference is an explicitly supplied external URL recognized by a registered
+resolver, with a canonical identity. A Resolved Source is a durable normalized
+snapshot of its content and provenance, including retrieval time, content hash and
+truncation. The source resolver is a bounded control-plane input adapter, independent
+of agent drivers. Source resolution failure aborts input preparation before provider
+execution; it is neither a semantic agent outcome nor a provider infrastructure attempt.

@@ -456,3 +456,11 @@ and fingerprint checked; reopen only records feedback. Terminals are `ACCEPTED`,
 budget, fresh/continue behavior or provider contract changes. See the
 [work-contract lifecycle boundary](work-contract.md#human-qa-lifecycle-v2-007) for
 index safety, crash/replay rules, identity policy and post-commit non-rollback.
+
+### Control-plane source inputs (SOURCE-RESOLUTION-001)
+
+External request snapshots use a separate fixed-catalog child WorkWorkspace; bundle
+artifact catalogs and consumes/produces declarations do not change. The context
+composition layer supplies snapshots only to the flow's declared entry state, across
+its rungs. They cannot be produced by providers or named as workflow output artifacts.
+See [source transport](context-transport.md#resolved-source-transport).

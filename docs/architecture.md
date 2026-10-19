@@ -170,3 +170,11 @@ accept fix
 ```
 
 Presets must be removable without changing the runtime.
+
+### Source resolution
+
+Before V2 context/executor compilation, the application control plane resolves
+explicit supported request references through a small source resolver protocol.
+The GitHub REST edge is the first implementation; neither runtime/state-machine
+code nor provider adapters detect URLs or fetch sources. Immutable normalized source
+artifacts ground the workflow entry stage. See [source lifecycle and bounds](design/context-engine.md#external-request-sources-source-resolution-001).
