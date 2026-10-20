@@ -36,6 +36,7 @@ class RecoveryTests(unittest.TestCase):
             'code':dict(provider='claude',model='sonnet',workspace='write',shell=True,timeout=1),
             'tests':dict(provider='command',command=[sys.executable,'-c','from pathlib import Path; assert Path("source.py").read_text()=="finished"'],capture='verifier_evidence',timeout=2)},
             'flows':{'feature':{'start':'SPECIFY','limits':{'run_invocations':5},'states':{
+                'NEEDS_HUMAN':dict(terminal=True), 'READY_FOR_MANUAL_QA':dict(terminal=True),
                 'SPECIFY':dict(agent='spec',consumes=['request'],produces={'microspec':dict(format='yaml',schema='microspec')},on={'ready':'IMPLEMENT'}),
                 'IMPLEMENT':dict(run=[dict(agent='code',budget={'invocations':2})],consumes=['microspec'],produces={'implementation_handoff':dict(format='markdown')},on={'ready':'VERIFY'}),
                 'VERIFY':dict(agent='tests',consumes=['implementation_handoff'],produces={'verifier_evidence':dict(format='markdown')},on={'pass':'READY_FOR_MANUAL_QA','fail':'NEEDS_HUMAN'})}}}}
@@ -113,6 +114,7 @@ class RecoveryTests(unittest.TestCase):
         # A timeout without StageResult is not charged; the charged retry then exhausts the rung.
         self.data['flows']['feature']['states']['IMPLEMENT']['run'][0]['budget']['invocations']=1
         self.data['flows']['feature']['states']['VERIFY']['on']['pass']='IMPLEMENT'
+        del self.data['flows']['feature']['states']['READY_FOR_MANUAL_QA']  # This loop no longer reaches QA.
         self.data['flows']['feature']['states']['IMPLEMENT']['budget']={'visits':2}
         self.text=self.save_config();self.interrupt()
         self.assertEqual(self.resume().result.terminal_state,'NEEDS_HUMAN')
@@ -224,6 +226,7 @@ class RecoveryTests(unittest.TestCase):
     def test_state_budget_not_reset_on_resume(self):
         self.data['flows']['feature']['states']['IMPLEMENT']['budget']={'invocations':1,'visits':2}
         self.data['flows']['feature']['states']['VERIFY']['on']['pass']='IMPLEMENT'
+        del self.data['flows']['feature']['states']['READY_FOR_MANUAL_QA']  # This loop no longer reaches QA.
         self.text=self.save_config();self.interrupt()
         self.assertEqual(self.resume().result.terminal_state,'NEEDS_HUMAN')
         exceeded=[e for e in read_events(self.work/'events.jsonl') if e.kind=='budget_exceeded']

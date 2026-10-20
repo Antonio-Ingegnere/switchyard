@@ -117,6 +117,13 @@ class InvocationBudgetScope:
     per_visit_of: str | None = None
 
 
+def state_kind(terminal: bool, wait_for: str | None, resume_to: str | None) -> str:
+    """Normalized disposition of a validated state, independent of its name."""
+    if terminal:
+        return 'recoverable_terminal' if resume_to is not None else 'terminal'
+    return 'wait' if wait_for is not None else 'execution'
+
+
 @dataclass(frozen=True, slots=True)
 class State:
     executor: str | None = None
@@ -128,6 +135,10 @@ class State:
     state_visit_budget_exceeded: str | None = None
     wait_for: str | None = None
     resume_to: str | None = None
+
+    @property
+    def kind(self) -> str:
+        return state_kind(self.terminal, self.wait_for, self.resume_to)
 
     def __post_init__(self):
         object.__setattr__(self, "on", MappingProxyType(dict(self.on)))
@@ -267,11 +278,13 @@ def validate(flow: Flow, executors: Mapping[str, Executor]) -> None:
         if state.wait_for is not None:
             if (state.wait_for != 'human_input' or state.terminal or state.executor is not None or state.on
                     or state.invocation_budgets or input_limit is not None or limit is None
-                    or state.state_visit_budget_exceeded is None or state.resume_to not in flow.states
+                    or state.state_visit_budget_exceeded is None or type(state.resume_to) is not str or state.resume_to not in flow.states
                     or flow.states[state.resume_to].terminal or flow.states[state.resume_to].wait_for):
                 raise FlowValidationError(f'invalid bounded human wait: {name}')
         elif state.resume_to is not None:
-            raise FlowValidationError('resume_to requires a human wait')
+            if (not state.terminal or type(state.resume_to) is not str or state.resume_to not in flow.states
+                    or flow.states[state.resume_to].kind != 'execution'):
+                raise FlowValidationError(f'{name}: terminal recovery requires an executable resume target')
         if state.terminal:
             if state.executor is not None or state.on or limit is not None or input_limit is not None or state.invocation_budgets:
                 raise FlowValidationError(f"terminal state has executor, transitions, or limit: {name}")
@@ -365,8 +378,9 @@ def run(work_unit: WorkUnit, flow: Flow, executors: Mapping[str, Executor],
         # Human recovery from a finished terminal into one declared, admitted state.
         if (resume_from is None or type(recover_to) is not str or recover_to not in flow.states
                 or flow.states[recover_to].terminal or flow.states[recover_to].wait_for or not resume_from or resume_from[-1].kind != 'run_finished'
-                or not flow.states.get(resume_from[-1].state, State()).terminal):
-            raise ValueError('recovery requires a finished terminal history and a nonterminal target')
+                or not flow.states.get(resume_from[-1].state, State()).terminal
+                or flow.states[resume_from[-1].state].resume_to != recover_to):
+            raise ValueError('recovery requires a finished terminal history and its declared executable target')
     if resume_from is not None:
         end = resume_from[-1].kind if resume_from else None
         if (not resume_from or resume_from[0].kind != 'run_started'

@@ -40,7 +40,8 @@ Unknown fields are errors at every level; no metadata escape hatch exists.
 | Each `escalation` item | **kind**, **on**, **profile**, **context**, `effort`, `budget` |
 | `flows.<name>` | **entry**, **run_budget**, **states** |
 | Normal state | **role**, **on**, `consumes`, `produces`, `budget`, **escalation_exhausted when the role has a ladder** |
-| Terminal state | **terminal: true**; optional `resume_to: <nonterminal state>` names the only target of an explicit human recovery (recovery honors it for NEEDS_HUMAN/NEEDS_REDIAGNOSIS) |
+| Human wait state | **wait_for: human_input**, **resume_to: <execution state>**, **budget** with visit limit and exhaustion terminal; no role or executor |
+| Terminal state | **terminal: true**; optional `resume_to: <execution state>` makes this an explicitly recoverable terminal and names its only recovery target, independent of the state name |
 
 `profiles`, `roles`, `flows` and each flow's `states` are nonempty mappings. Normal
 state `on` is a nonempty mapping of project-defined outcome labels to state names.
@@ -52,7 +53,8 @@ Command argv is static project configuration; executable availability is resolve
 Providers are closed to `claude`, `codex`, and `command` for this first schema.
 Agent profiles require a model and reject command. Command profiles require command
 and must omit model, including null. See the command capability contract below.
-`human` is not a provider. Human boundaries are ordinary project terminal states.
+`human` is not a provider. Human clarification uses an explicit wait state; a terminal
+with a declared recovery target is a separate human-operated recovery boundary.
 Profiles cannot contain effort, roles, workflow semantics or budgets.
 
 Invocation effort, when supplied, is exactly `low`, `medium`, or `high`. Omission
@@ -203,7 +205,7 @@ admission; the V2 loader does not execute any of these declarations.
 ## Graph and YAML validation
 
 Entry and transition targets must exist within their own flow. All states must be
-reachable from entry through normal transitions, explicit escalation exhaustion or budget exhaustion edges. Terminal states have no role, transitions or artifact fields;
+reachable from entry through normal transitions, explicit escalation exhaustion, budget exhaustion or declared resume edges. Terminal states have no role, transitions or artifact fields;
 normal states require a known role and transitions. `terminal: false` is not accepted;
 normal states omit that key. A terminal-only flow is valid if it still has the required
 run budget. No static requirement for a path to a terminal is imposed beyond reachability.
@@ -486,3 +488,22 @@ Executable states may set `rung_budget_scope: visit` (default `run`). The compil
 uses the logical entry as the accounting epoch for their rung limits; shared state
 and run limits remain cumulative. A new answer enters that logical state anew.
 Legacy declarations compile to exactly their existing run-scoped budgets.
+
+## Explicit lifecycle (TERMINAL-CONTRACT-001)
+
+State names have no lifecycle semantics. The existing bundle v2 syntax already
+contains the necessary declarations, so its schema version remains 2:
+
+- `role` plus `on`: execution; compile each configured rung to an executor state.
+- `wait_for: human_input`, `resume_to`, bounded visit budget: wait; no executor and no run completion.
+- `terminal: true`: final terminal; no executor or recovery route.
+- `terminal: true` plus `resume_to`: recoverable terminal; finish the current execution boundary,
+  then continue only on an explicit recovery operation through that fixed route.
+
+Both `WorkflowStateSpec.kind` and compiled `State.kind` use one normalization rule.
+The compiler retains terminal `resume_to` as the compiled execution entry ID;
+the runtime rejects recovery to any other state. Loaders reject contradictory
+fields and require every target to exist. Resume targets must be execution states.
+Reachability includes declared recovery edges, without making them automatic transitions.
+No event format changes or budget resets are introduced. Project-config legacy
+inference is isolated to the [frozen-work reader](delivery-recovery.md#frozen-lifecycle-contract).

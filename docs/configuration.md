@@ -4,6 +4,7 @@ Save this complete configuration as `.switchyard/config.yaml`. It runs a bounded
 specification → implementation → deterministic verification flow:
 
 ```yaml
+version: 2
 agents:
   spec:
     provider: codex
@@ -46,6 +47,8 @@ flows:
         produces:
           verifier_evidence: {format: markdown}
         on: {pass: READY_FOR_MANUAL_QA, fail: NEEDS_HUMAN}
+      READY_FOR_MANUAL_QA: {terminal: true}
+      NEEDS_HUMAN: {terminal: true}
 lifecycle:
   manual_qa: true
   accept: {commit: true}
@@ -82,7 +85,9 @@ project model/flow configuration.
 
 ## Keys and defaults
 
-Only `agents`, `flows` and optional `lifecycle` exist at the top level.
+Top-level keys are `agents`, `flows`, optional `lifecycle`, and optional `version: 2`.
+Omitting version still uses the current explicit contract; version 1 is not accepted
+for new configuration. Historical frozen works use a separate compatibility reader.
 Unknown fields, duplicate keys, YAML anchors, aliases and merge keys fail validation.
 Logical names start with a letter and contain letters, digits, `_`, `.` or `-`.
 
@@ -121,11 +126,15 @@ identical format/schema. No global artifact catalog is needed.
 Optional state `budget` accepts `invocations` (default sum of run-rung invocation
 limits), `visits` (default 1), `on_exceeded` (default `NEEDS_HUMAN`). Limits are positive
 integers. Every invocation, state visit and run retains the exact V2 accounting rules.
-`READY_FOR_MANUAL_QA`, `NEEDS_HUMAN`, `NEEDS_REDIAGNOSIS` are implicit terminals when
-referenced; other terminals use `name: {terminal: true}`. Unknown targets fail.
-Only `NEEDS_HUMAN` and `NEEDS_REDIAGNOSIS` may additionally declare
-`resume_to: <nonterminal state>`, the single state an explicit human resume may enter
-(see [recovery](design/delivery-recovery.md#human-recovery-from-needs_-terminals)).
+Every target must be declared, including default budget targets such as `NEEDS_HUMAN`.
+State names have no lifecycle semantics. Declare a final terminal with
+`name: {terminal: true}`. Adding `resume_to: <execution state>` explicitly makes it
+a recoverable terminal, regardless of its name (see [recovery](design/delivery-recovery.md#workflow-terminal-recovery)).
+A `wait_for: human_input` state is a bounded, nonterminal wait with a fixed target.
+Execution states declare `agent` or `run`. Combining these classifications, omitting
+a required target, or targeting a missing/terminal/wait state for resume is invalid.
+`config show` exposes the normalized `state_kind` (`execution`, `wait`, `terminal`,
+`recoverable_terminal`), `terminal`, `wait_for` and `resume_to`.
 `ACCEPTED`, `REOPENED`, `COMMIT_BLOCKED` are lifecycle results, not agent transitions.
 
 ## Escalation: one explicit ladder syntax

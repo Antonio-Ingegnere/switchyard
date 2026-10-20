@@ -115,6 +115,11 @@ class WorkflowStateSpec:
     wait_for: str | None = None
     rung_budget_scope: str = "run"
 
+    @property
+    def kind(self) -> str:
+        from runtime import state_kind
+        return state_kind(self.terminal, self.wait_for, self.resume_to)
+
     def __post_init__(self):
         object.__setattr__(self, 'on', MappingProxyType(dict(self.on)))
         object.__setattr__(self, 'consumes', tuple(self.consumes))
@@ -454,7 +459,7 @@ def _workflow(data, roles, artifacts, path):
         if name not in seen:
             seen.add(name)
             pending.extend(states[name].on.values())
-            if states[name].wait_for:
+            if states[name].resume_to is not None:
                 pending.append(states[name].resume_to)
             if states[name].budget is not None:
                 pending.append(states[name].budget.on_exceeded)

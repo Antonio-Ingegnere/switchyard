@@ -127,3 +127,19 @@ and JSONL representation are unchanged; the strict reader recognizes the new kin
 Only the pending request identity authorizes continuation; answer callers cannot
 supply a destination. The full run history and run ID are retained. Pending waits
 have no executor invocation, and ordinary recovery cannot bypass a missing answer.
+
+## Explicit state disposition (TERMINAL-CONTRACT-001)
+
+State names have no lifecycle semantics. `State.kind` normalizes validated declarations
+into `execution`, `wait`, `terminal`, or `recoverable_terminal` without storing an
+independent potentially contradictory kind flag. Execution states invoke executors;
+wait states pause without invoking or finishing; terminals finish. A terminal with
+`resume_to` is recoverable only to that declared executable target. The compiler
+retains that route in the runtime State, and `run(recover_to=...)` rejects arbitrary goto.
+
+Wait != terminal; recoverable terminal != provider interruption. A provider/process
+failure is a runtime condition with retained event/checkpoint history, not a synthetic
+workflow state. Human answer != generic resume. Existing visit admission, semantic
+charges and infrastructure-failure recovery remain unchanged. Public status uses the
+[frozen contract](delivery-recovery.md#frozen-lifecycle-contract), with legacy inference
+confined to reading old frozen project configurations.

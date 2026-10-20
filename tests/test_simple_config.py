@@ -94,7 +94,7 @@ class SimpleConfigTests(unittest.TestCase):
                 for shell in (True,False):
                     with self.subTest(provider=provider,workspace=workspace,shell=shell):
                         d={'agents':{'a':dict(provider=provider,model='sonnet' if provider=='claude' else 'direct-model',workspace=workspace,shell=shell)},
-                           'flows':{'f':{'start':'go','states':{'go':{'agent':'a','on':{'ready':'READY_FOR_MANUAL_QA'}}}}}}
+                           'flows':{'f':{'start':'go','states':{'NEEDS_HUMAN': {'terminal':True}, 'READY_FOR_MANUAL_QA': {'terminal':True}, 'go':{'agent':'a','on':{'ready':'READY_FOR_MANUAL_QA'}}}}}}
                         allowed = (not shell if workspace=='none' else provider=='claude' or shell)
                         if allowed: parse(d)
                         else:
@@ -143,7 +143,7 @@ class SimpleConfigTests(unittest.TestCase):
 
     def test_singleton_outcome_ladder_and_runtime_adjacent_routing(self):
         from runtime import run,WorkUnit,ExecutorResult,InvocationResponse
-        d={'agents':{k:v for k,v in self.data['agents'].items() if k != 'tests'},'flows':{'proof':{'start':'go','states':{'go':{
+        d={'agents':{k:v for k,v in self.data['agents'].items() if k != 'tests'},'flows':{'proof':{'start':'go','states':{'NEEDS_HUMAN': {'terminal':True}, 'READY_FOR_MANUAL_QA': {'terminal':True}, 'go':{
             'run':[{'agent':'investigate','outcomes':['inconclusive']},
                    {'agent':'diagnose-deep','when':['inconclusive'],'context':'continue','outcomes':['diagnosis_disproved']},
                    {'agent':'independent','when':['diagnosis_disproved'],'context':'fresh','outcomes':['ready']}],

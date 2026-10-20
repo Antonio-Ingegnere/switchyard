@@ -112,7 +112,7 @@ def compile_workflow(bundle: WorkflowBundle, flow_name: str,
             plan[name] = CompiledStatePlan(name, None, spec, state)
             continue
         if spec.terminal:
-            state = State(terminal=True)
+            state = State(terminal=True, resume_to=entries[spec.resume_to] if spec.resume_to else None)
             states[name] = state
             plan[name] = CompiledStatePlan(name, None, spec, state)
             continue

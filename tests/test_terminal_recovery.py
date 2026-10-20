@@ -40,6 +40,7 @@ class TerminalRecoveryTests(unittest.TestCase):
             'code': dict(provider='claude', model='sonnet', workspace='write', shell=True, timeout=5),
             'tests': dict(provider='command', command=[sys.executable, '-c', VERIFIER], capture='verifier_evidence', timeout=5)},
             'flows': {'feature': {'start': 'SPECIFY', 'limits': {'run_invocations': 5}, 'states': {
+                'NEEDS_HUMAN': dict(terminal=True), 'READY_FOR_MANUAL_QA': dict(terminal=True),
                 'SPECIFY': dict(agent='spec', consumes=['request'], produces={'microspec': dict(format='yaml', schema='microspec')}, on={'ready': 'IMPLEMENT'}),
                 'IMPLEMENT': dict(agent='code', consumes=['microspec'], produces={'implementation_handoff': dict(format='markdown')}, on={'ready': 'VERIFY'}),
                 'VERIFY': dict(run=[dict(agent='tests', budget={'invocations': 2})], budget={'visits': 2},
@@ -120,7 +121,7 @@ class TerminalRecoveryTests(unittest.TestCase):
         self.assertEqual(len([e for e in before if e.kind == 'run_resumed']), 1)
 
     def test_refuses_without_declared_route(self):
-        del self.data['flows']['feature']['states']['NEEDS_REDIAGNOSIS']; self.text = self.save()
+        del self.data['flows']['feature']['states']['NEEDS_REDIAGNOSIS']['resume_to']; self.text = self.save()
         self.stopped(); before = self.events()
         self.assertEqual((recovery_status(self.work)['resume_allowed'], recovery_status(self.work)['resume_to']), (False, None))
         self.gate.write_text('ready')
@@ -140,10 +141,9 @@ class TerminalRecoveryTests(unittest.TestCase):
             resume_v2_work(self.work, self.save(), self.config)
         self.assertEqual(self.events(), before)
 
-    def test_ready_and_unknown_terminals_cannot_declare_recovery(self):
+    def test_terminal_recovery_requires_executable_target(self):
         states = self.data['flows']['feature']['states']
-        for name, target, message in (('READY_FOR_MANUAL_QA', 'VERIFY', 'only NEEDS_HUMAN and NEEDS_REDIAGNOSIS'),
-                                      ('NEEDS_REDIAGNOSIS', 'READY_FOR_MANUAL_QA', 'nonterminal state'),
+        for name, target, message in (('NEEDS_REDIAGNOSIS', 'READY_FOR_MANUAL_QA', 'nonterminal state'),
                                       ('NEEDS_REDIAGNOSIS', 'MISSING', 'nonterminal state')):
             data = json.loads(json.dumps(self.data)); data['flows']['feature']['states'][name] = dict(terminal=True, resume_to=target)
             with self.assertRaisesRegex(FlowConfigError, message):
@@ -162,7 +162,7 @@ class RuntimeRecoveryContract(unittest.TestCase):
 
     def flow(self):
         return Flow('A', {'A': State('a', {'fail': 'STOP', 'pass': 'DONE'}, max_state_visits_per_run=2),
-                          'STOP': State(terminal=True), 'DONE': State(terminal=True)})
+                          'STOP': State(terminal=True, resume_to='A'), 'DONE': State(terminal=True)})
 
     def test_recover_to_requires_finished_history_and_nonterminal_target(self):
         first = run(WorkUnit('w'), self.flow(), {'a': self.Fixed('fail')})

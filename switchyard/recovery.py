@@ -19,7 +19,7 @@ import time
 from runtime import WorkUnit, run, Event, ExecutionError
 from runtime.recording import JsonlRecorder
 from .observability import read_events, summarize_runs
-from .simple_config import simple_config_from_text, HUMAN_TERMINALS
+from .simple_config import simple_config_from_text
 from .workflow_bundle import ArtifactSpec
 from .work_contract import WorkWorkspace
 from .workflow_compiler import compile_workflow
@@ -155,7 +155,7 @@ def _baseline(repo,store,config,flow):
         else:sources[name]={'blob':_blob(store,data)}
     index=repo.index_path().read_bytes()
     if repo.snapshot()[0]!=snap:raise RecoveryBlocked('RECOVERY_BLOCKED','worktree_moved_during_baseline')
-    _put(store,'baseline',dict(snapshot=snap,sources=sources,index_blob=_blob(store,index),config=config,flow=flow))
+    _put(store,'baseline',dict(snapshot=snap,sources=sources,index_blob=_blob(store,index),config=config,flow=flow,lifecycle_contract_version=2))
     _put(store,'checkpoint',dict(snapshot=snap,manifest=None))
 
 
@@ -401,17 +401,37 @@ class _Projection:
     def run(self,request):raise AssertionError('projection only')
 
 
-def _route(config_text,flow,terminal):
-    """The workflow-declared recovery target of a human terminal; never derived from human text."""
-    if terminal not in HUMAN_TERMINALS:return None
-    spec=simple_config_from_text(config_text).bundle.flow(flow).states.get(terminal)
-    return None if spec is None or not spec.terminal else spec.resume_to
+def _frozen_project(baseline, config_text=None):
+    """Version dispatch is selected by immutable baseline, never current project text."""
+    version = baseline.get('lifecycle_contract_version', 1)
+    if type(version) is not int or version not in (1, 2):
+        raise RecoveryBlocked('RECOVERY_BLOCKED', 'unsupported_lifecycle_contract_version')
+    text = baseline['config'] if config_text is None else config_text
+    if version == 1:
+        from .legacy_config import read_legacy_project
+        return read_legacy_project(text)
+    return simple_config_from_text(text)
+
+
+def _route(project, flow, terminal):
+    """Only a frozen, explicitly recoverable workflow terminal supplies a route."""
+    spec = project.bundle.flow(flow).states.get(terminal)
+    return spec.resume_to if spec is not None and spec.kind == 'recoverable_terminal' else None
+
+
+def _state_status(project, flow, state):
+    spec = project.bundle.flow(flow).states.get(state)
+    return dict(state_kind=None if spec is None else spec.kind,
+                workflow_terminal=False if spec is None else spec.terminal,
+                waiting=False if spec is None else spec.kind == 'wait',
+                wait_for=None if spec is None else spec.wait_for,
+                declared_resume_to=None if spec is None else spec.resume_to)
 
 
 def resume_v2_work(work_root,config_text,provider_runtime_config,reason=''):
     """Human-requested continuation of the same run; no budget reset.
 
-    An interrupted visit is re-entered. A human terminal (NEEDS_HUMAN/NEEDS_REDIAGNOSIS)
+    An interrupted visit is re-entered. A recoverable workflow terminal
     continues only into the state its frozen workflow declares with `resume_to`.
     `reason` is bounded recovery metadata and never influences routing.
     """
@@ -424,12 +444,12 @@ def resume_v2_work(work_root,config_text,provider_runtime_config,reason=''):
         if op['phase']=='waiting_for_human':
             return _continue_human(root,store,config_text,provider_runtime_config)
         if op['phase']=='delivery_done':
-            target=_route(baseline['config'],baseline['flow'],op.get('terminal'))
+            target=_route(_frozen_project(baseline),baseline['flow'],op.get('terminal'))
             if target is None or store.versions('qa_reference'):
                 raise RecoveryBlocked('RESUME_BLOCKED','no_declared_recovery_route')
         elif op['phase']!='interrupted' or not op.get('resume_safe'):
             raise RecoveryBlocked('RESUME_BLOCKED','not_a_resumable_interruption')
-        try:project=simple_config_from_text(config_text)
+        try:project=_frozen_project(baseline,config_text)
         except ValueError as exc:
             raise RecoveryBlocked('RESUME_BLOCKED','invalid_configuration: '+str(exc)[:512]) from None
         if _semantic(config_text)!=_semantic(baseline['config']):
@@ -490,12 +510,15 @@ def recovery_status(work_root):
             raise RecoveryBlocked('RECOVERY_BLOCKED','qa_workspace_unavailable')
         qa=WorkWorkspace.open(ref['workspace'])
         if qa.versions('qa_decision'):terminal=_read(qa,'qa_decision')['terminal']
+    project=_frozen_project(base)
+    workflow_state=op.get('terminal') if phase=='delivery_done' else op.get('state')
+    lifecycle=_state_status(project,base['flow'],workflow_state)
+    recovery_source='runtime_interruption' if phase=='interrupted' else ('workflow' if phase=='delivery_done' else None)
     resumable=False;route=None;accounting={};blocked=None
     try:
         if phase=='delivery_done' and not store.versions('qa_reference'):
-            route=_route(base['config'],base['flow'],terminal)
+            route=_route(project,base['flow'],terminal)
         if route or (phase=='interrupted' and op.get('resume_safe')):
-            project=simple_config_from_text(base['config'])
             compiled=compile_workflow(project.bundle,base['flow'],lambda b:_Projection())
             history=tuple(read_events(Path(work_root)/'events.jsonl'))
             void=_void(_operations(store),history,compiled,Path(work_root).resolve())
@@ -513,7 +536,8 @@ def recovery_status(work_root):
         human_history = dict(human_input_pending=False, human_input_request_id=question['request_id'],
                              human_input_round=question['round'], human_input_answered=answer is not None)
     return dict(work_id=Path(work_root).name,target=base['snapshot']['identity']['target'],flow=base['flow'],phase=phase,terminal=terminal,
-                state=op.get('state'),reason=op.get('reason'),diagnostic=op.get('diagnostic'),resume_allowed=resumable,resume_to=route,
+                state=op.get('state'),workflow_state=workflow_state,reason=op.get('reason'),diagnostic=op.get('diagnostic'),resume_allowed=resumable,resume_to=route,
+                recovery_source=recovery_source,**lifecycle,
                 **accounting,**human_history,**({'resume_blocked':blocked} if blocked else {}),
                 **({'provider_failure':op['provider_failure']} if phase=='interrupted' and 'provider_failure' in op else {}),
                 rollback_allowed=phase in ('interrupted','delivery_done','rollback_running') and not op.get('checkpoint_uncertain',False) and terminal!='ACCEPTED')
@@ -624,7 +648,10 @@ def _restore_wait(root, store):
 def _human_status(root, store):
     base = _read(store,'baseline')
     question, answer = active_request(WorkWorkspace.open(root))
-    project = simple_config_from_text(base['config'])
+    project = _frozen_project(base)
+    declaration = project.bundle.flow(base['flow']).states.get(question['wait_state'])
+    if declaration is None or declaration.kind != 'wait' or declaration.resume_to != question['resume_to']:
+        raise RecoveryBlocked('RECOVERY_BLOCKED','human_wait_contract_mismatch')
     compiled = compile_workflow(project.bundle,base['flow'],lambda b:_Projection())
     history = tuple(read_events(Path(root)/'events.jsonl'))
     void = _void(_operations(store),history,compiled,Path(root).resolve())
@@ -633,9 +660,10 @@ def _human_status(root, store):
     del accounting['visits']
     return dict(work_id=Path(root).name,target=base['snapshot']['identity']['target'],flow=base['flow'],
         phase='waiting_for_human' if answer is None else 'human_answer_ready', terminal=None,
-        state=question['wait_state'],human_input_pending=answer is None,
+        state=question['wait_state'],workflow_state=question['wait_state'],human_input_pending=answer is None,
+        **_state_status(project,base['flow'],question['wait_state']),recovery_source='human_input',
         human_input_request_id=question['request_id'],human_input_round=question['round'],
-        question=question['question'],blockers=question['blockers'],resume_to=question['resume_to'],
+        question=question['question'],blockers=question['blockers'],resume_to=declaration.resume_to,
         answer_allowed=answer is None and blocked is None,resume_allowed=answer is not None and blocked is None,
         resume_blocked=blocked or ('human_input_required' if answer is None else None),
         next_action='answer required' if answer is None else 'resume',rollback_allowed=True,**accounting)
@@ -651,7 +679,7 @@ def _continue_human(root,store,config_text,config,request_id=None,answer_text=No
     if request_id is not None and (request_id != question['request_id'] or answer is not None):
         raise RecoveryBlocked('ANSWER_BLOCKED','stale_or_already_answered_request')
     base = _read(store,'baseline')
-    project = simple_config_from_text(config_text)
+    project = _frozen_project(base,config_text)
     if _semantic(config_text) != _semantic(base['config']):
         raise RecoveryBlocked('RESUME_BLOCKED','semantic_configuration_changed_new_delivery_required')
     history = tuple(read_events(root/'events.jsonl'));summarize_runs(history)

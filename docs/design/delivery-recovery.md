@@ -77,11 +77,11 @@ holds the original semantic configuration; normalized YAML comparison removes on
 budgets remain frozen. A semantic change requires a new delivery. Config is still
 the one editable project file; baseline/config snapshots are immutable evidence.
 
-## Human recovery from NEEDS_* terminals
+## Workflow terminal recovery
 
-`NEEDS_HUMAN` and `NEEDS_REDIAGNOSIS` stop automation. A run there stays stopped until
+A terminal stops automation regardless of its name. A run there stays stopped until
 a human calls `resume_v2_work`. It continues only if the work's frozen configuration
-declares the target on that terminal:
+explicitly makes it recoverable by declaring a target:
 
 ```yaml
 flows:
@@ -94,7 +94,8 @@ flows:
       NEEDS_REDIAGNOSIS: {terminal: true, resume_to: VERIFY}
 ```
 
-No other terminal may declare `resume_to`; READY_FOR_MANUAL_QA belongs to QA. Callers
+Any terminal name may declare `resume_to`; once a QA candidate is attached, QA still
+owns its decision and ordinary workflow recovery is refused. Callers
 cannot name a state: there is no goto, rewind or `--state`. Without a declaration,
 resume refuses with `RESUME_BLOCKED: no_declared_recovery_route` and changes nothing.
 
@@ -251,3 +252,38 @@ published before execution likewise survives restart. Existing fail-closed limit
 still apply to torn manifests/events or a controller dying midway through runtime
 resume events without a reconstructible provider checkpoint; this is not arbitrary
 crash repair. Waiting status and answering require no provider session memory.
+
+## Frozen lifecycle contract
+
+New recovery baselines store `lifecycle_contract_version: 2` alongside the exact
+original project config. That immutable pair defines lifecycle semantics for status,
+answering, compilation and recovery. Optional project `version: 2` documents the
+current syntax; omission also means explicit semantics for new deliveries. Only
+validated timeout changes are permitted during continuation. Editing a terminal or
+wait declaration in the target project never changes status for existing work.
+
+Baselines without the marker belong to the previous contract. Only this frozen-work
+path invokes `legacy_config.read_legacy_project`, which reproduces the former
+implicit known terminals and restricted recovery declarations in memory. Existing
+human waits stay explicit. It never rewrites old config, artifacts, manifests or
+events. The same ambiguous config passed to new delivery or `config validate` fails;
+there is no public legacy switch for starting new work. Unknown frozen versions fail
+closed. The advanced bundle stays at version 2 because its existing schema already
+requires explicit state declarations; the change needing version dispatch is the
+project-config interpretation stored in recovery baselines.
+
+Status adds `workflow_state`, `state_kind`, `workflow_terminal`, `waiting`, `wait_for`,
+and `declared_resume_to`, all derived from the frozen state. Existing `state` and
+`terminal` fields retain their previous meanings; `terminal` is the operation result
+(e.g. `INTERRUPTED`, a workflow terminal, or an external QA decision).
+`recovery_source` distinguishes `workflow`, `human_input`, and
+`runtime_interruption`; ordinary active/rollback operations have no recovery source.
+Runtime interruptions do not create YAML states. `resume_allowed` still combines
+the declared route or proven interruption with existing budget/recovery guards.
+
+Wait != terminal. Recoverable terminal != provider interruption. Human answer !=
+generic resume: only a durable answer satisfies an unanswered human wait.
+Semantic clarification charges, per-visit epochs, cumulative budgets, source snapshots,
+and provider infrastructure accounting are unchanged. Existing events continue to
+express pauses (`human_input_requested`), terminal completion (`run_finished`), and
+runtime failure (`run_error`); no historical event is reclassified or rewritten.

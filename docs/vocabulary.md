@@ -120,3 +120,13 @@ or retrying a provider. A human input request records the originating handoff qu
 and invocation provenance; its answer is a separate immutable human record. One
 question/answer pair is a clarification round. Answering starts a new logical visit,
 never an arbitrary transition, and never refunds a semantic invocation.
+
+## State Disposition / Recoverable Terminal / Runtime Interruption
+
+A validated state is execution (invokes an executor), wait (pauses for declared input),
+terminal (finishes with no resume path), or recoverable terminal (finishes with a fixed
+explicit recovery target). State names have no lifecycle semantics. A human wait is
+nonterminal; a human answer satisfies that wait and is not a generic resume operation.
+A runtime interruption is an execution/process failure represented by durable recovery
+evidence, not a workflow terminal kind. Recoverable workflow terminals and provider
+interruptions use distinct recovery evidence without refunding semantic work.

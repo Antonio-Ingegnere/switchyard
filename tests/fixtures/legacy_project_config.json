@@ -1,0 +1,20 @@
+{
+  "agents": {
+    "worker": {"provider": "codex", "model": "offline", "workspace": "none", "shell": false}
+  },
+  "flows": {
+    "feature": {
+      "start": "STEP",
+      "limits": {"run_invocations": 3},
+      "states": {
+        "STEP": {
+          "run": [{"agent": "worker", "budget": {"invocations": 3}}],
+          "budget": {"visits": 3},
+          "consumes": ["request"],
+          "on": {"stop": "NEEDS_REDIAGNOSIS", "ready": "READY_FOR_MANUAL_QA"}
+        },
+        "NEEDS_REDIAGNOSIS": {"terminal": true, "resume_to": "STEP"}
+      }
+    }
+  }
+}

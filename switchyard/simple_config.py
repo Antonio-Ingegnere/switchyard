@@ -11,9 +11,6 @@ from .workflow_bundle import (WorkflowBundle, workflow_bundle_from_data, _name, 
 from .workflow_compiler import ExecutionBinding, compile_workflow, WorkflowCompileError
 from .provider_stages import validate_provider_configuration, ProviderResolutionError
 
-# Human-intervention terminals; only these may declare an explicit human recovery target.
-HUMAN_TERMINALS = ('NEEDS_HUMAN', 'NEEDS_REDIAGNOSIS')
-
 
 @dataclass(frozen=True)
 class AgentConfig:
@@ -64,7 +61,7 @@ class SimpleConfig:
         from dataclasses import asdict
         flows = {name: dict(start=flow.entry,
                  limits=dict(run_invocations=flow.run_budget.max_invocations, on_exceeded=flow.run_budget.on_exceeded),
-                 states={key: dict(terminal=state.terminal, on=dict(state.on),
+                 states={key: dict(state_kind=state.kind, terminal=state.terminal, on=dict(state.on),
                      budget=None if state.budget is None else dict(invocations=state.budget.max_invocations,
                          visits=state.budget.max_state_visits, on_exceeded=state.budget.on_exceeded),
                      on_exhausted=state.escalation_exhausted, resume_to=state.resume_to,
@@ -116,8 +113,13 @@ def compile_simple_config(config: SimpleConfig) -> WorkflowBundle:
 
 
 def simple_config_from_text(text: str) -> SimpleConfig:
-    data = _yaml_data(text)
-    _fields(data, {'agents', 'flows'}, {'lifecycle'}, '')
+    return _simple_config_from_data(_yaml_data(text))
+
+
+def _simple_config_from_data(data):
+    _fields(data, {'agents', 'flows'}, {'lifecycle', 'version'}, '')
+    if type(data.get('version', 2)) is not int or data.get('version', 2) != 2:
+        raise _error('version', 'new project configurations require version 2; declare every target state explicitly')
     lifecycle = _lifecycle(data.get('lifecycle', {}))
     profiles, agents, roles, flows = {}, {}, {}, {}
     artifacts = {'request': {'format': 'markdown', 'source': 'request'}}
@@ -187,8 +189,6 @@ def simple_config_from_text(text: str) -> SimpleConfig:
                     raise _error(path+'.terminal', 'expected true')
                 states[state_name] = {'terminal': True}
                 if 'resume_to' in state:
-                    if state_name not in HUMAN_TERMINALS:
-                        raise _error(path+'.resume_to', 'only NEEDS_HUMAN and NEEDS_REDIAGNOSIS may declare human recovery')
                     states[state_name]['resume_to'] = state['resume_to']
                 continue
             _fields(state, {'on'}, {'agent','run','consumes','produces','budget','on_exhausted','rung_budget_scope'}, path)
@@ -256,7 +256,7 @@ def simple_config_from_text(text: str) -> SimpleConfig:
             states[state_name] = normalized
         run_budget = dict(max_invocations=_positive(limits.get('run_invocations',sum(s.get('budget',{}).get('max_invocations',0) for s in states.values()) or 1),here+'.limits.run_invocations'),
                           on_exceeded=limits.get('on_exceeded','NEEDS_HUMAN'))
-        # Only known delivery terminals are implicit. Typos must not silently become terminals.
+        # Every target must have an explicit declaration; names carry no lifecycle meaning.
         targets = [run_budget['on_exceeded']]
         for s in states.values():
             _mapping(s.get('on',{}), here+'.states.on')
@@ -267,8 +267,6 @@ def simple_config_from_text(text: str) -> SimpleConfig:
             _name(target, here+'.states.on')
             if target in ('ACCEPTED','REOPENED','COMMIT_BLOCKED'):
                 raise _error(here, 'lifecycle results cannot be delivery transitions')
-            if target in ('READY_FOR_MANUAL_QA','NEEDS_HUMAN','NEEDS_REDIAGNOSIS'):
-                states.setdefault(target, {'terminal':True})
         flows[flow_name] = dict(entry=flow['start'],run_budget=run_budget,states=states)
     try:
         bundle = workflow_bundle_from_data(dict(version=2,profiles=profiles,roles=roles,flows=flows,artifacts=artifacts))

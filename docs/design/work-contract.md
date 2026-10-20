@@ -442,3 +442,12 @@ An answer commits before provider resolution/execution. Provider failure therefo
 cannot erase it or require a second answer. A committed answer awaiting execution
 can be continued with ordinary resume. The durable history retains all rounds;
 context selects only the latest answered pair relevant to the destination state.
+
+## Frozen lifecycle provenance
+
+Recovery's immutable `baseline` JSON now records `lifecycle_contract_version: 2`
+with the original config text. These bytes, rather than later project edits, are the
+authority for execution/wait/terminal/recoverable-terminal classification and routes.
+Absent markers select the previous contract's compatibility reader; unknown versions
+are refused. No existing manifest, config snapshot or event is migrated in place.
+See [frozen lifecycle recovery](delivery-recovery.md#frozen-lifecycle-contract).

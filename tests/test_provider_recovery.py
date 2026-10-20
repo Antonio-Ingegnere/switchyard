@@ -62,6 +62,8 @@ class ProviderRecoveryTests(unittest.TestCase):
         self.assertEqual((status['terminal'], status['state'], status['reason']), ('INTERRUPTED', 'IMPLEMENT', 'provider_failure'))
         self.assertEqual((status['semantic_invocations_used'], status['semantic_invocations_limit']), (0, 1))
         self.assertEqual((status['infrastructure_failures_used'], status['infrastructure_failures_limit']), (1, 2))
+        self.assertEqual((status['state_kind'],status['workflow_terminal'],status['waiting'],status['recovery_source']),
+                         ('execution',False,False,'runtime_interruption'))
         self.assertIs(status['semantic_invocation_charged'], False)
         self.assertEqual((status['resume_allowed'], status['resume_to']), (True, 'IMPLEMENT'))
         failure = status['provider_failure']
