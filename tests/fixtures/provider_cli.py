@@ -15,6 +15,8 @@ if provider!='python3':
     binding=json.loads(text.split('EXECUTION BINDING\n')[1].split('\n\n')[0])
 record={'provider':provider,'argv':argv,'cwd':os.getcwd(),'input':text,'binding':binding,
         'thinking':os.environ.get('MAX_THINKING_TOKENS'),
+        'controls':{k:v for k,v in os.environ.items()
+                    if k.startswith(('CLAUDE_CODE_','ANTHROPIC_','MAX_THINKING'))},
         'retries':os.environ.get('MAX_STRUCTURED_OUTPUT_RETRIES')}
 if '--output-schema' in argv:
     record['schema']=json.loads(Path(argv[argv.index('--output-schema')+1]).read_text())

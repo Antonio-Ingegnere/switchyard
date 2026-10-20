@@ -1,0 +1,23 @@
+id: PROVIDER-MODELS-001
+goal: Replace name-tuple Claude effort checks with one explicit audited model capability policy shared by validation and execution.
+status: complete
+diagnosis:
+  observed: "agents.diagnose-deep {provider: claude, model: opus, effort: medium} failed validation: Claude effort translation is not audited for resolved model."
+  root_cause: Effort support was encoded as membership in _HAIKU/_SONNET tuples. Validation checked the union; the executor separately chose thinking budgets for _HAIKU and --effort for anything else. opus was in neither tuple. The two code paths were independent, so a mismatch was possible.
+  cli_evidence: Local Claude Code 2.1.299 help and bundled model catalog. First-party alias targets haiku/sonnet/opus/fable are claude-haiku-5-5/claude-sonnet-5-5/claude-opus-5-5/claude-fable-5-1, all with the effort capability. claude-haiku-4-5 and claude-sonnet-4-5 are hard-coded without effort.
+  discrepancy: The 2.1.282 audit treated the haiku alias as thinking-budget only. In 2.1.299 the alias targets a native-effort model, so the haiku alias now uses --effort. Thinking budgets remain for explicit Haiku 4.5 IDs.
+scope:
+  - switchyard/claude_models.py exact selector -> ClaudeEffort {native_effort, thinking_token_budget, no_audited_effort} table.
+  - claude_effort_controls(model, effort) is the only lookup, used by validate_provider_configuration and ClaudeStageExecutor.
+  - Strip inherited opus/fable alias retargeting and capability/catalog overrides in addition to existing effort/thinking controls.
+constraints:
+  - No prefix/family matching, fallback model, substitution, auto-upgrade or network discovery.
+  - Unknown Claude model without effort passes through unchanged; with effort it fails closed.
+  - Workflow, budget, state machine, recovery, routing, Codex adapter and Adeo unchanged.
+verification:
+  - tests/test_claude_models.py (table-driven policy, simple config, fake-CLI execution consistency, env stripping, no substitution).
+  - tests/test_provider_stages.py haiku-alias expectations moved to native effort; thinking-budget coverage moved to explicit Haiku 4.5 IDs.
+  - Full unittest discovery.
+non_goals:
+  - Detecting third-party API providers whose alias table maps to older models; documented, use explicit IDs.
+  - xhigh/max effort levels; the generic contract remains low|medium|high.

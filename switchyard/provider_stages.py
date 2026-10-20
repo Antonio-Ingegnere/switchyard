@@ -18,6 +18,7 @@ from .work_contract import (microspec_guidance, handoff_guidance, HANDOFF_BODY_F
 from .workflow_bundle import ExecutionProfile, CommandSpec
 from .workflow_compiler import ExecutionBinding
 from .provider_process import ProviderExecutionError, execute
+from .claude_models import CLAUDE_POLICY_ENVIRONMENT, ClaudeEffortError, claude_effort_controls
 
 
 class ProviderResolutionError(ValueError):
@@ -409,10 +410,6 @@ def _model_name(value):
         raise ProviderResolutionError('model/provider/selector names must be nonempty strings without NUL')
 
 
-_HAIKU = ('haiku','claude-haiku-4-5','claude-haiku-4-5-20251001')
-_SONNET = ('sonnet','claude-sonnet-4-6')
-
-
 def _executable(value, config):
     if type(value) is not str or not value or '\0' in value:
         raise ProviderResolutionError('required executable is not configured')
@@ -466,8 +463,16 @@ def validate_provider_configuration(binding, resolved_model=None):
         raise ProviderResolutionError('unsupported provider')
     _model_name(binding.model)
     resolved = binding.model if resolved_model is None else resolved_model
-    if binding.provider == 'claude' and binding.effort is not None and resolved not in _HAIKU + _SONNET:
-        raise ProviderResolutionError('Claude effort translation is not audited for resolved model')
+    if binding.provider == 'claude':
+        _claude_effort(resolved, binding.effort)
+
+
+def _claude_effort(model, effort):
+    # The same audited lookup gates validation and builds the executed controls.
+    try:
+        return claude_effort_controls(model, effort)
+    except ClaudeEffortError as exc:
+        raise ProviderResolutionError(str(exc)) from None
 
 
 def _same_binding(expected, invocation):
@@ -586,9 +591,7 @@ class ClaudeStageExecutor:
         _same_binding(self.binding,invocation)
         env = dict(self.config.environment)
         # Prevent inherited control knobs from replacing the explicit invocation policy.
-        for key in ('CLAUDE_CODE_EFFORT_LEVEL','MAX_THINKING_TOKENS','CLAUDE_CODE_DISABLE_THINKING',
-                    'CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING','ANTHROPIC_DEFAULT_HAIKU_MODEL',
-                    'ANTHROPIC_DEFAULT_SONNET_MODEL'):
+        for key in CLAUDE_POLICY_ENVIRONMENT:
             env.pop(key,None)
         env['MAX_STRUCTURED_OUTPUT_RETRIES'] = str(STRUCTURED_OUTPUT_ATTEMPTS)
         argv = ['--print','--no-session-persistence','--output-format','json',
@@ -599,12 +602,9 @@ class ClaudeStageExecutor:
                 '--settings','{"alwaysThinkingEnabled":true,"switchModelsOnFlag":false,"fallbackModel":[]}']
         if self.binding.capabilities:
             argv += ['--allowedTools', _claude_tools(self.binding.capabilities)]
-        if self.binding.effort:
-            if self.resolved_model in _HAIKU:
-                env['MAX_THINKING_TOKENS'] = str({'low':1024,'medium':8192,'high':16384}[self.binding.effort])
-                env['CLAUDE_CODE_MAX_OUTPUT_TOKENS'] = '32768'
-            else:
-                argv += ['--effort',self.binding.effort]
+        effort_argv, effort_env = _claude_effort(self.resolved_model, self.binding.effort)
+        argv += effort_argv
+        env.update(effort_env)
         output = execute(self.executable,argv,self.config, input_bytes=render_invocation(invocation).encode('utf-8'),
                          result_stdout=True,environment=env)
         if output.returncode != 0:

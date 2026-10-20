@@ -50,7 +50,8 @@ class ProviderStageTests(unittest.TestCase):
         return [json.loads(line) for line in self.log.read_text().splitlines()]
 
     def test_provider_arguments_and_result_channels(self):
-        for provider,model in [('claude','sonnet'),('codex','codex'),('claude','haiku')]:
+        for provider,model in [('claude','sonnet'),('codex','codex'),('claude','haiku'),('claude','opus'),
+                               ('claude','claude-haiku-4-5')]:
             with self.subTest(provider=provider,model=model):
                 adapter,inv=self.adapter(provider,model)
                 result=adapter.run(inv)
@@ -63,10 +64,11 @@ class ProviderStageTests(unittest.TestCase):
                 if provider=='codex':
                     self.assertIn('model_reasoning_effort="medium"',call['argv'])
                     self.assertEqual(call['schema'],result_schema(inv.output_contract))
-                elif model=='sonnet':
-                    self.assertIn('--effort',call['argv']); self.assertIn('medium',call['argv'])
-                else:
+                elif model=='claude-haiku-4-5':
                     self.assertEqual(call['thinking'],'8192'); self.assertNotIn('--effort',call['argv'])
+                else:
+                    self.assertEqual(call['argv'][call['argv'].index('--effort')+1],'medium')
+                    self.assertIsNone(call['thinking'])
                 if provider=='claude': self.assertEqual(call['retries'],str(STRUCTURED_OUTPUT_ATTEMPTS))
 
     def test_model_passthrough_and_aliases(self):
@@ -78,6 +80,7 @@ class ProviderStageTests(unittest.TestCase):
             ('claude', 'haiku', {}, 'haiku'),
             ('claude', 'sonnet', {'claude': {'sonnet': 'claude-sonnet-4-6'}}, 'claude-sonnet-4-6'),
             ('claude', 'local-haiku', {'claude': {'local-haiku': 'haiku'}}, 'haiku'),
+            ('claude', 'small', {'claude': {'small': 'claude-haiku-4-5-20251001'}}, 'claude-haiku-4-5-20251001'),
         ]
         for provider, selector, aliases, concrete in cases:
             with self.subTest(provider=provider, selector=selector, aliases=aliases):
@@ -89,9 +92,13 @@ class ProviderStageTests(unittest.TestCase):
                 call = self.calls()[-1]
                 self.assertEqual(call['argv'][call['argv'].index('--model')+1], concrete)
                 self.assertEqual(call['binding']['model'], selector)
-                if concrete == 'haiku':
+                # Effort follows the concrete model, not the selector spelling.
+                if concrete == 'claude-haiku-4-5-20251001':
                     self.assertEqual(call['thinking'], '8192')
                     self.assertNotIn('--effort', call['argv'])
+                elif provider == 'claude':
+                    self.assertEqual(call['argv'][call['argv'].index('--effort')+1], 'medium')
+                    self.assertIsNone(call['thinking'])
         # Unknown Claude models are not an account allowlist violation. Effort still
         # requires a known translation, evaluated against the concrete model.
         adapter, invocation = self.adapter('claude', 'new-model', None)
@@ -155,10 +162,11 @@ class ProviderStageTests(unittest.TestCase):
 
     def test_all_effort_levels(self):
         for level,tokens in [('low','1024'),('medium','8192'),('high','16384')]:
-            for provider,model in [('claude','sonnet'),('claude','haiku'),('codex','codex')]:
+            for provider,model in [('claude','sonnet'),('claude','haiku'),('claude','opus'),
+                                   ('claude','claude-haiku-4-5'),('codex','codex')]:
                 adapter,inv=self.adapter(provider,model,level); adapter.run(inv)
                 call=self.calls()[-1]
-                if model=='haiku': self.assertEqual(call['thinking'],tokens)
+                if model=='claude-haiku-4-5': self.assertEqual(call['thinking'],tokens)
                 elif provider=='codex': self.assertIn('model_reasoning_effort='+json.dumps(level),call['argv'])
                 else: self.assertEqual(call['argv'][call['argv'].index('--effort')+1],level)
 
@@ -263,7 +271,8 @@ class ProviderStageTests(unittest.TestCase):
         calls=[c for c in self.calls() if c['binding'] and c['binding']['logical_state']=='DIAGNOSE']
         self.assertEqual([c['provider'] for c in calls],['claude','claude','codex'])
         self.assertEqual([c['binding']['model'] for c in calls],['haiku','sonnet','codex'])
-        self.assertEqual(calls[0]['thinking'],'8192')
+        self.assertEqual(calls[0]['argv'][calls[0]['argv'].index('--effort')+1],'medium')
+        self.assertIsNone(calls[0]['thinking'])
         self.assertIn('high',calls[1]['argv']); self.assertIn('model_reasoning_effort="high"',calls[2]['argv'])
         self.assertNotIn('PRIOR REASONING HANDOFF',calls[0]['input'])
         self.assertIn('PRIOR REASONING HANDOFF',calls[1]['input'])

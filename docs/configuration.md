@@ -99,8 +99,17 @@ provider's sandbox; it does not promise independent tool-use telemetry.
 
 Provider restrictions fail during configuration validation. Currently Codex supports
 `none/false`, `read/true`, `write/true`; Claude also supports `read/false` and
-`write/false`. Neither supports `none/true`. Claude effort translation remains audited
-for its existing Haiku/Sonnet model names; this front end does not expand adapter support.
+`write/false`. Neither supports `none/true`.
+
+Claude `effort` is validated against Switchyard's explicit, audited Claude model
+policy. The model is never discovered from the network, and names are never matched by
+prefix. The aliases `haiku`, `sonnet`, `opus` and `fable` pass to the Claude CLI
+unchanged and use native `--effort`. Audited explicit IDs pin one model and its
+mechanism; explicit Haiku 4.5 IDs use an extended-thinking budget instead. Any other
+Claude model may be used **without** `effort`. With `effort`, it fails validation:
+`Claude effort translation is not audited for resolved model`. No other model is
+substituted. See the audited table in
+[provider stages](design/provider-stages.md#claude-model-effort-policy-provider-models-001).
 
 Command agents require `provider: command` and `command: [executable, args...]`.
 They execute the explicit argv in the target directory with no shell interpolation.

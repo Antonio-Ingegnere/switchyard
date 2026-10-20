@@ -32,6 +32,7 @@ an explicit execution failure.
 ## Audited protocols
 
 Local inspection used Claude Code **2.1.282** and Codex CLI **0.157.0**, help/version only.
+The Claude model effort policy was re-audited against Claude Code **2.1.299** (below).
 
 Claude uses `--print --output-format json --json-schema <schema>` with stdin text and
 subprocess cwd. Only `structured_output` from a successful result envelope is parsed.
@@ -54,22 +55,61 @@ plan semantics change. Compilation still resolves every rung once, including unu
 branches; it validates local configuration and tooling, not authenticated entitlement.
 A provider rejecting a model is an execution failure, with no alternative model retry.
 
-Claude's direct `haiku`/`sonnet` selectors need no local mapping. Its audited effort
-translation set is `haiku`, `sonnet`, `claude-haiku-4-5`, `claude-haiku-4-5-20251001`,
-and `claude-sonnet-4-6`. Effort policy follows the resolved concrete model. Unknown
-Claude models pass through when no effort is requested; requested effort fails locally
-if its translation is not audited. This is not a model availability check.
+### Claude model effort policy (PROVIDER-MODELS-001)
 
-Sonnet generic low/medium/high maps identically to native `--effort`.
-Haiku lacks native effort. Its explicit adapter translation is an extended-thinking
-budget: low=1024, medium=8192, high=16384 via `MAX_THINKING_TOKENS`, with output tokens
-set to 32768 and thinking enabled. This is a configurable-depth policy, not equivalence
-between Haiku and Sonnet reasoning or a native Haiku effort flag. See the official
-[model effort capabilities](https://code.claude.com/docs/en/model-config) and
-[thinking-budget environment contract](https://code.claude.com/docs/en/env-vars).
-Inherited conflicting effort/thinking and default-model overrides are removed for
-this invocation. Managed/server policy may still constrain a deployment; these tests
-prove requested transport configuration, not remote policy or model quality.
+`switchyard/claude_models.py` holds one explicit table, `CLAUDE_MODELS`, from an exact
+Claude selector to how generic effort is represented. Configuration validation,
+resolved-model validation, argv construction and environment construction all call the
+same `claude_effort_controls(model, effort)`. A model therefore cannot pass preflight
+with one mechanism and execute with another. Lookup is exact: no prefix, family or
+case matching, no fallback model, no substitution and no network discovery.
+
+| Mechanism | Representation of `low`/`medium`/`high` | Audited selectors |
+|---|---|---|
+| `native_effort` | `--effort <level>` | aliases `haiku`, `sonnet`, `opus`, `fable`; `claude-haiku-5-5`; `claude-sonnet-4-6`, `claude-sonnet-5`, `claude-sonnet-5-5`; `claude-opus-4-6`, `claude-opus-4-7`, `claude-opus-4-8`, `claude-opus-5`, `claude-opus-5-5`; `claude-fable-5`, `claude-fable-5-1` |
+| `thinking_token_budget` | `MAX_THINKING_TOKENS` = 1024 / 8192 / 16384, `CLAUDE_CODE_MAX_OUTPUT_TOKENS=32768` | `claude-haiku-4-5`, `claude-haiku-4-5-20251001` |
+| `no_audited_effort` | effort rejected; the model runs only without effort | `claude-sonnet-4-5`, `claude-sonnet-4-5-20250929` |
+
+Effort follows the **resolved** model (after `model_aliases`), not the selector
+spelling. A Claude model not in the table is unreviewed: without `effort` it passes
+through unchanged, as before. With `effort` it fails closed during validation:
+`Claude effort translation is not audited for resolved model '<id>'`. This is an
+effort capability check, not a model availability or entitlement check.
+
+**Aliases versus explicit IDs.** Switchyard passes an alias such as `opus` to the CLI
+unchanged, and the CLI resolves it. With first-party API access, the audited
+CLI resolves `haiku`, `sonnet`, `opus` and `fable` to its current model of that family,
+and every such target declares native effort. An explicit ID pins one model and its
+mechanism, independent of the CLI's alias table. Use explicit IDs when exact
+reproducibility matters.
+
+**Audit evidence.** Local Claude Code **2.1.299**: `claude --help` (`--model` accepts
+an alias or full name, `--effort <level>`) and its bundled model catalog: alias
+targets, per-model `effort` capability, and the models it hard-codes as having no
+effort or adaptive thinking. No network or runtime discovery was used. This
+contradicts the earlier audit (2.1.282) on one point: the `haiku` alias now targets a
+model with native effort. So the `haiku` alias moved from thinking budgets to
+`--effort`. Budgets remain only for explicit Haiku 4.5 IDs. The CLI ignores `--effort`
+for those IDs, and still honours `MAX_THINKING_TOKENS` as an extended-thinking budget.
+That translation is a configurable-depth policy, not equivalence with native effort.
+
+**Known limit.** On third-party API providers (Bedrock, Vertex, Foundry, gateways),
+the CLI's alias table maps some aliases to older models. Some of those lack native
+effort; for example `sonnet` and `haiku` can resolve to 4.5-generation models. The
+CLI then does not apply `--effort`. Switchyard does not inspect the deployment
+environment to guess this. Select an explicit audited ID on those deployments.
+
+Inherited controls that could override this policy are removed for each invocation
+(`CLAUDE_POLICY_ENVIRONMENT`): effort/thinking knobs (`CLAUDE_CODE_EFFORT_LEVEL`,
+`MAX_THINKING_TOKENS`, `CLAUDE_CODE_DISABLE_THINKING`,
+`CLAUDE_CODE_DISABLE_ADAPTIVE_THINKING`, `CLAUDE_CODE_ALWAYS_ENABLE_EFFORT`), alias
+retargeting (`ANTHROPIC_DEFAULT_{HAIKU,SONNET,OPUS,FABLE}_MODEL` and their
+`_SUPPORTED_CAPABILITIES`), and capability/catalog overrides
+(`CLAUDE_CODE_MODEL_CAPABILITIES`, `CLAUDE_CODE_MODEL_CATALOG`,
+`CLAUDE_CODE_MODEL_CATALOG_URL`). Managed/server policy may still constrain a deployment;
+the tests prove the requested transport configuration, not remote policy or model quality.
+Refreshing the table is a reviewed code change, made against new local CLI evidence.
+
 `MAX_STRUCTURED_OUTPUT_RETRIES=3` bounds the CLI's in-process schema repair (STRUCTURED-OUTPUT-001).
 
 Codex uses exact `--model`, `-c model_reasoning_effort="low|medium|high"`, stdin `-`,
