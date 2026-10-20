@@ -7,6 +7,7 @@ from typing import Callable, Protocol
 from runtime import (DiagnosticInput, DiagnosticPayload, ExecutorResult,
                      InvocationRequest, InvocationResponse)
 from .source_resolution import prepare_sources
+from .human_input import clarification_snapshots
 from .workflow_compiler import ExecutionBinding
 from .work_contract import (ArtifactProducer, ArtifactRecord, HandoffRecord,
                             WorkContractError, WorkWorkspace, MicroSpecField, MICROSPEC_FIELDS,
@@ -115,9 +116,10 @@ class StageInvocation:
     diagnostics: DiagnosticInput | None = None
     output_contract: StageOutputContract = field(kw_only=True)
     sources: tuple[ArtifactSnapshot, ...] = field(default=(), kw_only=True)
+    human_clarification: tuple[ArtifactSnapshot, ...] = field(default=(), kw_only=True)
 
     def __post_init__(self):
-        _tuples(self, 'artifacts', 'sources')
+        _tuples(self, 'artifacts', 'sources', 'human_clarification')
         _require(type(self.output_contract) is StageOutputContract, 'expected StageOutputContract')
 
 
@@ -148,6 +150,8 @@ class ContextualExecutor:
     output_contract: StageOutputContract
     max_context_bytes: int = 65536
     source_workspace: WorkWorkspace | None = None
+    human_wait_outcomes: tuple[str, ...] = ()
+    entry_source_context: bool = True
 
     def __post_init__(self):
         _require(type(self.max_context_bytes) is int and self.max_context_bytes > 0,
@@ -175,16 +179,22 @@ class ContextualExecutor:
                         if h.flow == self.binding.flow_name and h.rung_index == self.binding.rung_index - 1]
             _require(bool(matching), 'missing continuation handoff for preceding rung')
             previous = matching[-1]
+        clarification = clarification_snapshots(self.workspace, self.binding.flow_name, self.binding.logical_state)
+        if clarification and not any(a.record.name == 'request' for a in snapshots):
+            record = self.workspace.latest_artifact('request')
+            snapshots.insert(0, ArtifactSnapshot(record, self.workspace.read_artifact('request', record.version)))
         sources = ()
-        if self.source_workspace is not None:
+        if self.source_workspace is not None and (self.entry_source_context or clarification):
             record = self.source_workspace.latest_artifact('resolved_sources')
             _require(record is not None, 'missing resolved sources')
             sources = (ArtifactSnapshot(record, self.source_workspace.read_artifact(record.name, record.version)),)
         context = StageInvocation(self.binding, tuple(snapshots), previous, request.diagnostics,
-                                  output_contract=self.output_contract, sources=sources)
+                                  output_contract=self.output_contract, sources=sources, human_clarification=clarification)
         # Canonical size accounting only, not a provider prompt format.
         input_data = asdict(context)
         del input_data['output_contract']
+        if not clarification:
+            del input_data['human_clarification']
         if not sources:
             del input_data['sources']  # preserve legacy byte accounting
         del input_data['binding']['executor_allowed_outcomes']
@@ -221,6 +231,8 @@ class ContextualExecutor:
             except WorkContractError as exc:
                 raise WorkContractError(f'artifact {artifact.name}: {exc}') from exc
             names.append(artifact.name)
+        _require(result.outcome not in self.human_wait_outcomes or result.handoff is not None,
+                 'human input outcome requires a question in the handoff summary or blockers')
         handoff = None
         if result.handoff is not None:
             handoff_check(type(result.handoff) is StageHandoff, '', 'StageHandoff body', _kind(result.handoff))
@@ -258,5 +270,8 @@ def workspace_resolver(bundle: WorkflowBundle, flow_name: str, workspace: WorkWo
                   for name in declaration.produces),
             StageHandoffContract(binding.provider != 'command', tuple(sorted(bundle.artifacts))))
         return ContextualExecutor(binding, declaration, workspace, stage, contract, max_context_bytes,
-                                  sources if binding.logical_state == flow.entry else None)
+                                  sources if binding.logical_state == flow.entry or any(
+                                      s.wait_for and s.resume_to == binding.logical_state for s in flow.states.values()) else None,
+                                  tuple(outcome for outcome, target in declaration.on.items() if flow.states[target].wait_for),
+                                  binding.logical_state == flow.entry)
     return resolve

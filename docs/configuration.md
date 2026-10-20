@@ -200,3 +200,29 @@ the semantic `budget.invocations`, only the agent's `infrastructure_failures` al
 with the rest of the semantic configuration.
 Resume permits timeout-only edits and retains every prior budget charge. It never
 automatically retries or repeats completed stages.
+
+## Bounded human clarification
+
+Opt in explicitly; an existing NEEDS_HUMAN terminal is not automatically a wait:
+
+```yaml
+# Inside a feature flow's states (keep its existing artifacts and other states):
+SPECIFY:
+  agent: spec
+  rung_budget_scope: visit
+  budget: {visits: 3, on_exceeded: NEEDS_HUMAN}
+  consumes: [request]
+  produces:
+    microspec: {format: yaml, schema: microspec}
+  on: {ready: IMPLEMENT, needs_clarification: DECISION}
+DECISION:
+  wait_for: human_input
+  resume_to: SPECIFY
+  budget: {visits: 2, on_exceeded: NEEDS_HUMAN}
+```
+
+This permits two clarification rounds and a third SPECIFY visit to finish, subject
+to the flow's existing run budget. It does not raise that budget or refund the first
+invocation. `budget.invocations`, when explicitly supplied on SPECIFY, remains a
+cumulative cap. Answers never choose the destination. See [answer API/CLI and
+restart behavior](design/delivery-recovery.md#answering-an-explicit-human-wait).

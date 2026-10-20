@@ -114,6 +114,7 @@ class InvocationBudgetScope:
     name: str
     limit: int
     on_exceeded: str | None = None
+    per_visit_of: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,6 +126,8 @@ class State:
     diagnostics_from_previous_max_bytes: int | None = None
     invocation_budgets: tuple[InvocationBudgetScope, ...] = ()
     state_visit_budget_exceeded: str | None = None
+    wait_for: str | None = None
+    resume_to: str | None = None
 
     def __post_init__(self):
         object.__setattr__(self, "on", MappingProxyType(dict(self.on)))
@@ -195,6 +198,7 @@ class EventRecorder(Protocol):
 class RunResult:
     terminal_state: str
     events: tuple[Event, ...]
+    paused: bool = False
 
 
 class FlowValidationError(ValueError):
@@ -249,6 +253,9 @@ def validate(flow: Flow, executors: Mapping[str, Executor]) -> None:
                 raise FlowValidationError(f"invalid invocation budget scope: {name}")
             if scope.name in seen_scopes:
                 raise FlowValidationError(f"duplicate invocation budget scope: {name}: {scope.name!r}")
+            if scope.per_visit_of is not None and (type(scope.per_visit_of) is not str or scope.per_visit_of not in flow.states or
+                    flow.states[scope.per_visit_of].terminal or flow.states[scope.per_visit_of].wait_for):
+                raise FlowValidationError('invalid per-visit scope entry')
             seen_scopes.add(scope.name)
             _validate_budget_target(scope.on_exceeded, flow, "invocation scope budget")
             if scope.name in scope_declarations and scope_declarations[scope.name] != scope:
@@ -257,10 +264,18 @@ def validate(flow: Flow, executors: Mapping[str, Executor]) -> None:
         input_limit = state.diagnostics_from_previous_max_bytes
         if input_limit is not None and (type(input_limit) is not int or not 0 <= input_limit <= MAX_DIAGNOSTIC_BYTES):
             raise FlowValidationError(f"invalid diagnostic input limit: {name}")
+        if state.wait_for is not None:
+            if (state.wait_for != 'human_input' or state.terminal or state.executor is not None or state.on
+                    or state.invocation_budgets or input_limit is not None or limit is None
+                    or state.state_visit_budget_exceeded is None or state.resume_to not in flow.states
+                    or flow.states[state.resume_to].terminal or flow.states[state.resume_to].wait_for):
+                raise FlowValidationError(f'invalid bounded human wait: {name}')
+        elif state.resume_to is not None:
+            raise FlowValidationError('resume_to requires a human wait')
         if state.terminal:
             if state.executor is not None or state.on or limit is not None or input_limit is not None or state.invocation_budgets:
                 raise FlowValidationError(f"terminal state has executor, transitions, or limit: {name}")
-        elif (not isinstance(state.executor, str)
+        elif state.wait_for is None and (not isinstance(state.executor, str)
               or state.executor not in executors
               or not callable(getattr(executors[state.executor], "run", None))):
             raise FlowValidationError(f"invalid executor reference: {name}")
@@ -288,6 +303,8 @@ def validate(flow: Flow, executors: Mapping[str, Executor]) -> None:
         targets = set()
         if state.max_state_visits_per_run is None:
             targets.update(state.on.values())
+            if state.wait_for:
+                targets.add(state.resume_to)
         elif "budget_exceeded" in state.on:
             targets.add(state.on["budget_exceeded"])
         if state.state_visit_budget_exceeded is not None:
@@ -319,7 +336,8 @@ def run(work_unit: WorkUnit, flow: Flow, executors: Mapping[str, Executor],
         context: RunContext | None = None,
         resume_from: tuple[Event, ...] | None = None,
         recover_to: str | None = None,
-        void_invocations: frozenset[str] = frozenset()) -> RunResult:
+        void_invocations: frozenset[str] = frozenset(),
+        human_input: str | None = None) -> RunResult:
     """`void_invocations`: resumed-history invocations that ended in run_error without
     any executor result (caller-proven infrastructure failures). They keep their events
     and ids but are not charged to reconstructed run/scope invocation budgets."""
@@ -335,16 +353,24 @@ def run(work_unit: WorkUnit, flow: Flow, executors: Mapping[str, Executor],
         context = RunContext(context.correlation_id, context.parent_run_id)
     run_id = f"run:{uuid4()}"
     events: list[Event] = []
+    human_resume = human_input is not None
+    if human_resume:
+        if (not resume_from or resume_from[-1].kind != 'human_input_requested'
+                or human_input != resume_from[-1].state_visit_id or recover_to is not None
+                or resume_from[-1].state not in flow.states
+                or flow.states[resume_from[-1].state].wait_for != 'human_input'
+                or resume_from[-1].target != flow.states[resume_from[-1].state].resume_to):
+            raise ValueError('human input requires the pending declared wait identity')
     if recover_to is not None:
         # Human recovery from a finished terminal into one declared, admitted state.
         if (resume_from is None or type(recover_to) is not str or recover_to not in flow.states
-                or flow.states[recover_to].terminal or not resume_from or resume_from[-1].kind != 'run_finished'
+                or flow.states[recover_to].terminal or flow.states[recover_to].wait_for or not resume_from or resume_from[-1].kind != 'run_finished'
                 or not flow.states.get(resume_from[-1].state, State()).terminal):
             raise ValueError('recovery requires a finished terminal history and a nonterminal target')
     if resume_from is not None:
         end = resume_from[-1].kind if resume_from else None
         if (not resume_from or resume_from[0].kind != 'run_started'
-            or (recover_to is None and (end != 'run_error' or resume_from[-1].invocation_id is None
+            or (recover_to is None and not human_resume and (end != 'run_error' or resume_from[-1].invocation_id is None
                                         or resume_from[-1].outcome is not None))
             or any(e.kind in ('run_finished', 'run_error') and resume_from[i+1].kind != 'run_resumed'
                    for i, e in enumerate(resume_from[:-1]))):
@@ -415,7 +441,13 @@ def run(work_unit: WorkUnit, flow: Flow, executors: Mapping[str, Executor],
     admitted_visits = dict.fromkeys(flow.states, 0)
     scope_usage = {scope.name: 0 for state in flow.states.values() for scope in state.invocation_budgets}
     pending: DiagnosticInput | None = None
-    resuming_visit = resume_from is not None and recover_to is None
+    resuming_visit = resume_from is not None and recover_to is None and not human_resume
+    all_scopes = {scope.name: scope for state in flow.states.values() for scope in state.invocation_budgets}
+
+    def enter_scopes(name):
+        for scope in all_scopes.values():
+            if scope.per_visit_of == name:
+                scope_usage[scope.name] = 0
     if resume_from is not None:
         current = events[-1].state
         visit_id = events[-1].state_visit_id
@@ -423,6 +455,7 @@ def run(work_unit: WorkUnit, flow: Flow, executors: Mapping[str, Executor],
             if event.kind == 'state_entered':
                 visit += 1
                 admitted_visits[event.state] += 1
+                enter_scopes(event.state)
             elif event.kind == 'invocation_started':
                 sequence += 1
                 if event.invocation_id in void_invocations:
@@ -431,7 +464,13 @@ def run(work_unit: WorkUnit, flow: Flow, executors: Mapping[str, Executor],
                 for scope in flow.states[event.state].invocation_budgets:
                     scope_usage[scope.name] += 1
         # Durations across process clocks cannot be reconstructed honestly.
-        if recover_to is None:
+        if human_resume:
+            target = flow.states[current].resume_to
+            emit(Event('human_input_received', run_id, current, visit_id, target=target))
+            emit(Event('human_input_resumed', run_id, current, visit_id, target=target))
+            emit(Event('state_exited', run_id, current, visit_id))
+            current = target
+        elif recover_to is None:
             emit(Event('run_resumed', run_id, current, visit_id))
         else:
             # The terminal visit stays closed; the target is admitted like any other visit.
@@ -456,9 +495,13 @@ def run(work_unit: WorkUnit, flow: Flow, executors: Mapping[str, Executor],
                 fail("diagnostic input exceeds target byte limit", Event("run_error", run_id, current))
             # Commit the visit after visit-limit and diagnostic admission checks.
             admitted_visits[current] += 1
+            enter_scopes(current)
             visit += 1
             visit_id = f"{run_id}:visit:{visit}"
             emit(Event("state_entered", run_id, current, visit_id))
+        if state.wait_for == 'human_input':
+            emit(Event('human_input_requested', run_id, current, visit_id, target=state.resume_to))
+            return RunResult(current, tuple(events), paused=True)
         if state.terminal:
             emit(Event("state_exited", run_id, current, visit_id))
             emit(Event("run_finished", run_id, current))

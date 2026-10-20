@@ -203,3 +203,51 @@ written restoration, missing blobs or unresolved QA intent blocks for inspection
 QA withdrawal can remain durable even if later restoration blocks; it must not be
 reversed into acceptability. Nothing automatically deletes recovery or QA history.
 No provider retries, push, scheduling or project/epic orchestration are introduced.
+
+## Answering an explicit human wait
+
+Human wait is not provider interruption. A successful clarification result remains
+charged, and the run pauses through its declared wait state. Legacy NEEDS_HUMAN
+terminals retain their old behavior unless the flow explicitly declares a wait.
+
+```python
+from switchyard.recovery import answer_v2_work, recovery_status
+status = recovery_status(work_root)
+execution = answer_v2_work(work_root, status['human_input_request_id'], answer_text,
+                           current_config_text, provider_runtime_config)
+```
+
+The operation locks the existing work and validates its pending ID, frozen semantic
+configuration, declared target, worktree/checkpoint integrity, required inputs and
+remaining budgets. It publishes the answer before executing. It never accepts a
+state/goto argument. Source snapshots, artifacts, run ID and history remain in place.
+
+CLI equivalents (target repository is read from the existing recovery baseline):
+
+```sh
+switchyard work status <work-root>
+switchyard work answer <work-root> <request-id> "Yes, preserve existing saved queries."
+switchyard work resume <work-root>
+switchyard work rollback <work-root>
+```
+
+Answer/resume read `<target>/.switchyard/config.yaml` by default; `--config PATH`
+selects the current file. `--claude-executable` / `--codex-executable` optionally
+select local binaries, just as ProviderRuntimeConfig does. No provider is launched
+by status. The API retains support for caller-supplied aliases/environment.
+
+Status exposes `phase: waiting_for_human`, the actual wait `state`, no terminal,
+`human_input_pending`, request ID, round, exact question/blockers, `resume_to`,
+`answer_allowed`, and `next_action: answer required`. Generic resume refuses with
+`human_input_required` and exposes the request on the exception. After answer
+publication, status can report `human_answer_ready` and permit resume. An unrelated
+subsequent provider failure follows ordinary recovery with the answer still in
+context. Infrastructure counters and all cumulative semantic budgets are preserved.
+Rollback remains available while waiting and retains question/answer/event history.
+
+A fully published wait checkpoint, question and event reconstruct the wait after a
+controller restart, including a crash before the final operation marker. An answer
+published before execution likewise survives restart. Existing fail-closed limits
+still apply to torn manifests/events or a controller dying midway through runtime
+resume events without a reconstructible provider checkpoint; this is not arbitrary
+crash repair. Waiting status and answering require no provider session memory.

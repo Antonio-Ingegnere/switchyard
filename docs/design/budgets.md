@@ -204,3 +204,26 @@ their event sequences. Cycles retain the same conservative validation.
 A repeated entry whose invocation scope is exhausted now increments the entry-state
 visit count before its alternate target runs. This permits an independent entry visit
 cap to stop subsequent entries using its own cause route, without new counters.
+
+## Explicit per-visit rung allowance
+
+Legacy V2 rung limits remain cumulative per run. A state can explicitly declare
+`rung_budget_scope: visit` to apply its rung allowances within each logical visit.
+The compiler sets `InvocationBudgetScope.per_visit_of` to that logical state's
+entry. All its rung counters start a new accounting epoch only on a new admitted
+logical entry; escalation and interrupted-provider resume preserve that epoch.
+Replay reconstructs the epochs from existing `state_entered` events. This does not
+refund invocations: run caps, explicitly declared cumulative state invocation caps,
+state visits and per-agent infrastructure counters remain cumulative.
+
+SimpleConfig preserves its legacy implicit cumulative state cap for run-scoped
+rungs. With explicitly visit-scoped rungs it adds no implicit cumulative state cap;
+an explicit `budget.invocations` still supplies one. `budget.visits` and the run cap
+continue to apply. An answer is a new visit, whereas provider interruption recovery
+re-enters the already-admitted visit. A valid `needs_clarification` is always a
+charged semantic invocation, never an infrastructure failure.
+
+Human waits reuse the existing per-state visit limit to bound clarification rounds.
+Wait exhaustion routes to its declared terminal, with `max_state_visits_per_run`
+evidence and recovery status reason `human_input_round_limit`. No budget is reset
+by answering, and no new delivery is started automatically.

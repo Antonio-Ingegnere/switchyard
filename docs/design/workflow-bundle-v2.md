@@ -464,3 +464,25 @@ artifact catalogs and consumes/produces declarations do not change. The context
 composition layer supplies snapshots only to the flow's declared entry state, across
 its rungs. They cannot be produced by providers or named as workflow output artifacts.
 See [source transport](context-transport.md#resolved-source-transport).
+
+### Explicit human-input states and per-visit rungs
+
+Advanced V2 wait syntax:
+
+```yaml
+DECISION:
+  wait_for: human_input
+  resume_to: SPECIFY
+  budget: {max_state_visits: 2, on_exceeded: NEEDS_HUMAN}
+```
+
+Wait states have no role, executor, artifacts, capabilities or ordinary transitions.
+Their target must be executable; their required visit limit bounds repeated rounds,
+and exhaustion must target a terminal. A wait cannot be the flow entry. Only semantic
+outcome transitions may request input; budget/exhaustion routes cannot fabricate a
+question. State names carry no human-input meaning.
+
+Executable states may set `rung_budget_scope: visit` (default `run`). The compiler
+uses the logical entry as the accounting epoch for their rung limits; shared state
+and run limits remain cumulative. A new answer enters that logical state anew.
+Legacy declarations compile to exactly their existing run-scoped budgets.

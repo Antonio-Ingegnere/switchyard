@@ -24,6 +24,9 @@ _VISIT = {'state', 'state_visit_id'}
 _INVOCATION = _VISIT | {'invocation_id'}
 _SHAPES = {
     'run_started': [set()],
+    'human_input_requested': [_VISIT | {'target'}],
+    'human_input_received': [_VISIT | {'target'}],
+    'human_input_resumed': [_VISIT | {'target'}],
     'run_resumed': [_VISIT, {'state', 'target'}],
     'state_entered': [_VISIT],
     'state_exited': [_VISIT],
@@ -157,6 +160,8 @@ class _RunShape:
         self.budget_visit = None
         self.closed_terminal = None
         self.finished = None
+        self.human_wait = None
+        self.human_received = False
         self.context = (None, None)
 
     def consume(self, event):
@@ -186,6 +191,23 @@ class _RunShape:
         _check(kind != 'run_started', 'duplicate run_started')
         _check(self.closed_terminal is None or kind == 'run_finished',
                'expected completion after terminal visit')
+        if kind.startswith('human_input_'):
+            _check(self.active == (event.state, event.state_visit_id) and self.invocation is None,
+                   'human input outside an executor-free visit')
+            identity = (event.state, event.state_visit_id, event.target)
+            if kind == 'human_input_requested':
+                _check(self.human_wait is None and not self.transitioned, 'duplicate human request')
+                self.human_wait = identity
+            elif kind == 'human_input_received':
+                _check(self.human_wait == identity and not self.human_received, 'answer without pending request')
+                self.human_received = True
+            else:
+                _check(self.human_wait == identity and self.human_received, 'resume without human answer')
+                self.human_wait = None
+                self.human_received = False
+                self.transitioned = True
+            return
+        _check(self.human_wait is None, 'event while human input is pending')
         if kind == 'state_entered':
             _check(self.active is None and self.budget is None, 'overlapping or premature state visit')
             _check(event.state_visit_id not in self.visit_ids, 'reused state visit ID')

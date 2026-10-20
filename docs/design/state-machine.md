@@ -107,3 +107,23 @@ cancelled
 A missing transition for the received outcome/event is an explicit runtime error. There are no implicit retries, fallbacks, or default transitions.
 
 Provider-specific errors must be normalized before reaching transition logic.
+
+## Explicit human wait (HUMAN-INPUT-001)
+
+V2 may declare an executor-free `wait_for: human_input` state with a fixed
+`resume_to` executable state and a required visit bound/exhaustion terminal.
+This is opt-in state data; no state-name prefix or legacy NEEDS_HUMAN inference is
+used. A semantic outcome enters the wait; budget/exhaustion routes cannot request
+human input. An actual originating handoff supplies the question.
+
+The runtime emits `state_entered`, then `human_input_requested` and returns a
+`RunResult` with `paused=True`. Its legacy `terminal_state` field names the paused
+state, but **no `run_finished` event is emitted** and status has no terminal result.
+After a durable answer the runtime emits `human_input_received`,
+`human_input_resumed`, closes the wait visit, and admits the declared target as a
+new visit. The wait visit ID is the stable request ID in these events. Event fields
+and JSONL representation are unchanged; the strict reader recognizes the new kinds.
+
+Only the pending request identity authorizes continuation; answer callers cannot
+supply a destination. The full run history and run ID are retained. Pending waits
+have no executor invocation, and ordinary recovery cannot bypass a missing answer.

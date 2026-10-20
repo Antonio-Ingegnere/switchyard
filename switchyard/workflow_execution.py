@@ -4,6 +4,7 @@ from pathlib import Path
 
 from runtime import EventRecorder, RunResult, WorkUnit, run
 from .context_transport import workspace_resolver
+from .human_input import HumanInputRecorder
 from .provider_stages import ProviderRuntimeConfig, ProviderStageExecutorResolver
 from .work_contract import WorkWorkspace
 from .workflow_bundle import WorkflowBundle
@@ -25,5 +26,5 @@ def execute_v2_workflow(bundle: WorkflowBundle, flow_name: str, request: str,
     provider = ProviderStageExecutorResolver(bundle.profiles, provider_runtime_config)
     resolver = workspace_resolver(bundle, flow_name, workspace, provider)
     compiled = compile_workflow(bundle, flow_name, resolver)
-    result = run(WorkUnit(request), compiled.flow, compiled.executors, recorder=recorder)
+    result = run(WorkUnit(request), compiled.flow, compiled.executors, recorder=HumanInputRecorder(workspace, compiled, recorder))
     return WorkflowExecution(result, workspace, compiled)

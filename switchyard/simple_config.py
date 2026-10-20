@@ -67,7 +67,8 @@ class SimpleConfig:
                  states={key: dict(terminal=state.terminal, on=dict(state.on),
                      budget=None if state.budget is None else dict(invocations=state.budget.max_invocations,
                          visits=state.budget.max_state_visits, on_exceeded=state.budget.on_exceeded),
-                     on_exhausted=state.escalation_exhausted, resume_to=state.resume_to) for key,state in flow.states.items()})
+                     on_exhausted=state.escalation_exhausted, resume_to=state.resume_to,
+                     wait_for=state.wait_for, rung_budget_scope=state.rung_budget_scope) for key,state in flow.states.items()})
                  for name,flow in self.bundle.flows.items()}
         return dict(invocations=rows, flows=flows, lifecycle=asdict(self.lifecycle))
 
@@ -172,6 +173,14 @@ def simple_config_from_text(text: str) -> SimpleConfig:
             path = _at(here+'.states', state_name)
             _name(state_name, path)
             _mapping(state, path)
+            if 'wait_for' in state:
+                _fields(state, {'wait_for', 'resume_to', 'budget'}, set(), path)
+                bound = state['budget']
+                _fields(bound, {'visits', 'on_exceeded'}, set(), path+'.budget')
+                states[state_name] = dict(wait_for=state['wait_for'], resume_to=state['resume_to'],
+                    budget=dict(max_state_visits=_positive(bound['visits'], path+'.budget.visits'),
+                                on_exceeded=bound['on_exceeded']))
+                continue
             if 'terminal' in state:
                 _fields(state, {'terminal'}, {'resume_to'}, path)
                 if state['terminal'] is not True:
@@ -182,7 +191,7 @@ def simple_config_from_text(text: str) -> SimpleConfig:
                         raise _error(path+'.resume_to', 'only NEEDS_HUMAN and NEEDS_REDIAGNOSIS may declare human recovery')
                     states[state_name]['resume_to'] = state['resume_to']
                 continue
-            _fields(state, {'on'}, {'agent','run','consumes','produces','budget','on_exhausted'}, path)
+            _fields(state, {'on'}, {'agent','run','consumes','produces','budget','on_exhausted','rung_budget_scope'}, path)
             if ('agent' in state) == ('run' in state):
                 raise _error(path, 'declare exactly one of agent or run')
             ladder = state.get('run', [{'agent':state.get('agent')}])
@@ -222,6 +231,9 @@ def simple_config_from_text(text: str) -> SimpleConfig:
                 budget=dict(max_invocations=_positive(budget.get('invocations',sum(r['budget']['max_invocations'] for r in rungs)),path+'.budget.invocations'),
                             max_state_visits=_positive(budget.get('visits',1),path+'.budget.visits'),
                             on_exceeded=budget.get('on_exceeded','NEEDS_HUMAN')))
+            normalized['rung_budget_scope'] = _enum(state.get('rung_budget_scope', 'run'), {'run', 'visit'}, path+'.rung_budget_scope')
+            if normalized['rung_budget_scope'] == 'visit' and 'invocations' not in budget:
+                del normalized['budget']['max_invocations']  # No implicit cumulative cap for explicitly per-visit rungs.
             if permissions[0] is not None:
                 normalized['capabilities'] = list(permissions[0])
             if len(rungs)>1:

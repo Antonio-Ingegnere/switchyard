@@ -174,3 +174,18 @@ normalized content and its artifact record/provenance, identifying it as externa
 material rather than execution instructions. Both model adapters receive identical
 source context. Provider output schemas and evidence-name catalogs are unchanged:
 source snapshots are control-plane inputs, not new provider output permissions.
+
+## Human clarification context
+
+`StageInvocation.human_clarification` is an optional tuple of immutable question and
+answer artifact snapshots. Before the declared resume destination executes, context
+selects the latest answered pair for that flow/state, includes the exact original
+request even if its ordinary consumes list omits it, and includes the persisted source
+snapshot when available. The shared renderer labels these inputs `HUMAN CLARIFICATION`
+separately from provider handoffs and resolved sources. Both model providers use it;
+no provider adapter owns waiting, answering or routing semantics.
+
+All supplied content counts toward the existing context byte bound. Empty optional
+fields preserve legacy byte accounting. Other states do not inherit the clarification
+transcript. A repeated round replaces the selected pair, never the durable history.
+A provider interruption at the destination reconstructs the same answered context.

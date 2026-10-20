@@ -417,3 +417,28 @@ There is no refresh or cache expiry. Source content supplied to the stage is the
 exact stored JSON. A source batch that fails resolution is not published; the parent
 request remains available. Existing histories/catalogs require no new fields, no
 migration and no event rewriting. Old work remains readable without a source store.
+
+## Human clarification records (HUMAN-INPUT-001)
+
+`<work-root>/human_input/` is a normal child WorkWorkspace with a fixed catalog:
+`request` (exact original text), `human_request` (versioned JSON), and `human_answer`
+(versioned JSON). No existing manifest/catalog is migrated. The normal immutable
+publication, hash verification, lock and partial-write rules apply.
+
+Each question stores schema version, request ID (runtime wait visit ID), work/run
+identity, flow, wait state, round, originating logical state/rung/visit/invocation,
+semantic outcome, exact handoff sequence, summary, blockers, derived question text,
+creation timestamp and declared resume target. Blockers are joined in order when
+present; otherwise the actual handoff summary is used. A missing handoff fails
+explicitly, rather than inventing a question. The original handoff remains intact.
+
+Answers append separate records with request ID, sequence, exact answer text,
+answer timestamp, work/run identity and `actor: human`. Empty/whitespace-only,
+invalid UTF-8 and answers over 8192 UTF-8 bytes are rejected. At most one request is
+pending. Duplicate/stale IDs cannot overwrite answers. Pending/answered status is
+reconstructed from the two immutable streams; questions are never rewritten.
+
+An answer commits before provider resolution/execution. Provider failure therefore
+cannot erase it or require a second answer. A committed answer awaiting execution
+can be continued with ordinary resume. The durable history retains all rounds;
+context selects only the latest answered pair relevant to the destination state.

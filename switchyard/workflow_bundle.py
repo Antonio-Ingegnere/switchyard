@@ -111,7 +111,9 @@ class WorkflowStateSpec:
     budget: BudgetSpec | None = None
     escalation_exhausted: str | None = None
     capabilities: tuple[str, ...] | None = None
-    resume_to: str | None = None  # Terminal only: the sole state an explicit human recovery may enter.
+    resume_to: str | None = None
+    wait_for: str | None = None
+    rung_budget_scope: str = "run"
 
     def __post_init__(self):
         object.__setattr__(self, 'on', MappingProxyType(dict(self.on)))
@@ -332,7 +334,7 @@ def _command(data, artifacts, path):
 
 def _command_uses(flow, roles, profiles, path):
     for name, state in flow.states.items():
-        if state.terminal:
+        if state.terminal or state.wait_for:
             continue
         role = roles[state.role]
         bindings = (role.primary,) + tuple(step.binding for step in role.escalation)
@@ -362,6 +364,18 @@ def _workflow(data, roles, artifacts, path):
         here = _at(path + '.states', name)
         _name(name, here)
         _mapping(state, here)
+        if 'wait_for' in state:
+            _fields(state, {'wait_for', 'resume_to', 'budget'}, set(), here)
+            _enum(state['wait_for'], {'human_input'}, here + '.wait_for')
+            target = _name(state['resume_to'], here + '.resume_to')
+            declaration = data['states'].get(target)
+            if type(declaration) is not dict or 'terminal' in declaration or 'wait_for' in declaration:
+                raise _error(here + '.resume_to', 'expected an executable state of this flow')
+            bound = _budget(state['budget'], 'state', here + '.budget')
+            if bound.max_state_visits is None or bound.max_invocations is not None:
+                raise _error(here + '.budget', 'human wait requires only max_state_visits and on_exceeded')
+            states[name] = WorkflowStateSpec(wait_for='human_input', resume_to=target, budget=bound)
+            continue
         if 'terminal' in state:
             if state['terminal'] is not True:
                 raise _error(here + '.terminal', 'only terminal: true is permitted; normal states omit terminal')
@@ -370,11 +384,11 @@ def _workflow(data, roles, artifacts, path):
             if 'resume_to' in state:
                 resume_to = _name(state['resume_to'], here + '.resume_to')
                 target = data['states'].get(resume_to)
-                if type(target) is not dict or 'terminal' in target:
+                if type(target) is not dict or 'terminal' in target or 'wait_for' in target:
                     raise _error(here + '.resume_to', f'expected a nonterminal state of this flow, got {resume_to!r}')
             states[name] = WorkflowStateSpec(terminal=True, resume_to=resume_to)
             continue
-        _fields(state, {'role', 'on'}, {'consumes', 'produces', 'budget', 'escalation_exhausted', 'capabilities'}, here)
+        _fields(state, {'role', 'on'}, {'consumes', 'produces', 'budget', 'escalation_exhausted', 'capabilities', 'rung_budget_scope'}, here)
         role = _name(state['role'], here + '.role')
         if role not in roles:
             raise _error(here + '.role', f'unknown role {role!r}')
@@ -410,7 +424,8 @@ def _workflow(data, roles, artifacts, path):
             _name(target, location)
             if target not in data['states']:
                 raise _error(location, f'unknown target {target!r}')
-        states[name] = WorkflowStateSpec(role, state['on'], consumes, produces, budget=local_budget, escalation_exhausted=exhaustion, capabilities=capabilities)
+        states[name] = WorkflowStateSpec(role, state['on'], consumes, produces, budget=local_budget, escalation_exhausted=exhaustion, capabilities=capabilities,
+            rung_budget_scope=_enum(state.get('rung_budget_scope', 'run'), {'run', 'visit'}, here + '.rung_budget_scope'))
     run_target = budget.on_exceeded
     if run_target not in states:
         raise _error(path + '.run_budget.on_exceeded', f'unknown target {run_target!r}')
@@ -420,14 +435,27 @@ def _workflow(data, roles, artifacts, path):
         if state.budget is not None and state.budget.on_exceeded not in states:
             raise _error(_at(path + '.states', name) + '.budget.on_exceeded',
                          f'unknown target {state.budget.on_exceeded!r}')
+    for name, state in states.items():
+        control_targets = [state.on.get('budget_exceeded'), state.escalation_exhausted]
+        if state.budget:
+            control_targets.append(state.budget.on_exceeded)
+        if any(target is not None and states[target].wait_for for target in control_targets):
+            raise _error(path + '.states.' + name, 'human wait requires a semantic outcome, not a budget/exhaustion route')
     if entry not in states:
         raise _error(path + '.entry', f'unknown entry {entry!r}')
+    if states[entry].wait_for:
+        raise _error(path + '.entry', 'human wait requires an originating provider result')
+    for name, state in states.items():
+        if state.wait_for and not states[state.budget.on_exceeded].terminal:
+            raise _error(path + '.states.' + name + '.budget', 'human wait exhaustion must target a terminal')
     seen, pending = set(), [entry, run_target]
     while pending:
         name = pending.pop()
         if name not in seen:
             seen.add(name)
             pending.extend(states[name].on.values())
+            if states[name].wait_for:
+                pending.append(states[name].resume_to)
             if states[name].budget is not None:
                 pending.append(states[name].budget.on_exceeded)
             if states[name].escalation_exhausted is not None:

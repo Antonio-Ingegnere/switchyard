@@ -234,7 +234,7 @@ class SourceTests(unittest.TestCase):
         request = InvocationRequest(WorkUnit(URL))
         plain = replace(wrapper, source_workspace=None)
         payload = asdict(plain._context(request))
-        del payload['output_contract'], payload['sources'], payload['binding']['executor_allowed_outcomes']
+        del payload['output_contract'], payload['sources'], payload['human_clarification'], payload['binding']['executor_allowed_outcomes']
         size = len(canonical_json(payload).encode())
         replace(plain, max_context_bytes=size)._context(request)
         with self.assertRaisesRegex(WorkContractError, 'context exceeds'):

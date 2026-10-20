@@ -84,7 +84,7 @@ def compile_workflow(bundle: WorkflowBundle, flow_name: str,
     identities: dict[str, tuple[str, ...]] = {}
     used_states: set[str] = set()
     for name, spec in sorted(source.states.items()):
-        ids = (name,) if spec.terminal else tuple(
+        ids = (name,) if spec.terminal or spec.wait_for else tuple(
             _state_id(flow_name, name, i) for i in range(1 + len(bundle.roles[spec.role].escalation)))
         for identifier in ids:
             if identifier in used_states:
@@ -97,13 +97,20 @@ def compile_workflow(bundle: WorkflowBundle, flow_name: str,
     plan: dict[str, CompiledStatePlan] = {}
     used_scopes: set[str] = set()
 
-    def scope(name: str, limit: int, target: str | None) -> InvocationBudgetScope:
+    def scope(name: str, limit: int, target: str | None, per_visit_of: str | None = None) -> InvocationBudgetScope:
         if name in used_scopes:
             raise WorkflowCompileError(f'generated invocation scope collision: {name}')
         used_scopes.add(name)
-        return InvocationBudgetScope(name, limit, target)
+        return InvocationBudgetScope(name, limit, target, per_visit_of)
 
     for name, spec in sorted(source.states.items()):
+        if spec.wait_for:
+            state = State(wait_for=spec.wait_for, resume_to=entries[spec.resume_to],
+                          max_state_visits_per_run=spec.budget.max_state_visits,
+                          state_visit_budget_exceeded=entries[spec.budget.on_exceeded])
+            states[name] = state
+            plan[name] = CompiledStatePlan(name, None, spec, state)
+            continue
         if spec.terminal:
             state = State(terminal=True)
             states[name] = state
@@ -143,7 +150,7 @@ def compile_workflow(bundle: WorkflowBundle, flow_name: str,
                 transitions = {key: value for key, value in transitions.items()
                                if key in declaration.outcomes}
             local = scope(_scope_id(flow_name, name, index), declaration.budget.max_invocations,
-                          target('budget_exceeded'))
+                          target('budget_exceeded'), entries[name] if spec.rung_budget_scope == 'visit' else None)
             visit_limit = spec.budget.max_state_visits if index == 0 and spec.budget else None
             state = State(identifier, transitions, max_state_visits_per_run=visit_limit,
                           invocation_budgets=((shared,) if shared else ()) + (local,),

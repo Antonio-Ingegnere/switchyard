@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import sys
+from pathlib import Path
 
 from flow_config import FlowConfigError, load_flow
 from runtime import ExecutionError, RunContext, WorkUnit, run
@@ -24,6 +25,18 @@ def _safe_display(value: str, limit: int | None = None) -> str:
 def _parser():
     parser = argparse.ArgumentParser(prog='switchyard', allow_abbrev=False)
     commands = parser.add_subparsers(dest='command', required=True)
+    work = commands.add_parser('work', allow_abbrev=False)
+    actions = work.add_subparsers(dest='action', required=True)
+    for action in ('status', 'answer', 'resume', 'rollback'):
+        operation = actions.add_parser(action, allow_abbrev=False)
+        operation.add_argument('work_root')
+        if action == 'answer':
+            operation.add_argument('request_id')
+            operation.add_argument('answer')
+        if action in ('answer', 'resume'):
+            operation.add_argument('--config')
+            operation.add_argument('--claude-executable')
+            operation.add_argument('--codex-executable')
     config = commands.add_parser('config', allow_abbrev=False)
     config.add_argument('action', choices=('validate', 'show'))
     config.add_argument('config_file', nargs='?', default='.switchyard/config.yaml')
@@ -42,6 +55,8 @@ def _parser():
 
 def main(argv=None) -> int:
     args = _parser().parse_args(argv)
+    if args.command == 'work':
+        return _work_command(args)
     if args.command == 'config':
         from .simple_config import load_simple_config
         try:
@@ -107,3 +122,28 @@ def main(argv=None) -> int:
         lines.append('Required terminal: ' + ', '.join(_safe_display(name) for name in required))
     print('\n'.join(lines), flush=True)
     return 0 if matches else 1
+
+
+def _work_command(args):
+    from .recovery import recovery_status, answer_v2_work, resume_v2_work, rollback_v2_work
+    from .provider_stages import ProviderRuntimeConfig
+    try:
+        status = recovery_status(args.work_root)
+        if args.action == 'rollback':
+            status = rollback_v2_work(args.work_root)
+        elif args.action in ('answer', 'resume'):
+            config_path = Path(args.config) if args.config else Path(status['target'])/'.switchyard/config.yaml'
+            config_text = config_path.read_text(encoding='utf-8')
+            provider = ProviderRuntimeConfig(status['target'], args.claude_executable, args.codex_executable)
+            if args.action == 'answer':
+                answer_v2_work(args.work_root, args.request_id, args.answer, config_text, provider)
+            else:
+                resume_v2_work(args.work_root, config_text, provider)
+            status = recovery_status(args.work_root)
+    except (ValueError, OSError, ExecutionError) as exc:
+        print('switchyard: '+_safe_display(str(exc), 2048), file=sys.stderr)
+        if getattr(exc, 'human_input_request', None):
+            print(json.dumps(exc.human_input_request, ensure_ascii=True), file=sys.stderr)
+        return 2
+    print(json.dumps(status, ensure_ascii=True, indent=2))
+    return 0
