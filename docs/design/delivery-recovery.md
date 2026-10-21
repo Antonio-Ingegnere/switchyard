@@ -220,8 +220,8 @@ execution = answer_v2_work(work_root, status['human_input_request_id'], answer_t
 
 The operation locks the existing work and validates its pending ID, frozen semantic
 configuration, declared target, worktree/checkpoint integrity, required inputs and
-remaining budgets. It publishes the answer before executing. It never accepts a
-state/goto argument. Source snapshots, artifacts, run ID and history remain in place.
+remaining budgets. It publishes the answer before executing. An optional `resume_to` argument selects only among the frozen wait
+contract's declared targets; it cannot jump to an arbitrary state. Source snapshots, artifacts, run ID and history remain in place.
 
 CLI equivalents (target repository is read from the existing recovery baseline):
 
@@ -287,3 +287,69 @@ Semantic clarification charges, per-visit epochs, cumulative budgets, source sna
 and provider infrastructure accounting are unchanged. Existing events continue to
 express pauses (`human_input_requested`), terminal completion (`run_finished`), and
 runtime failure (`run_error`); no historical event is reclassified or rewritten.
+
+
+## Selectable human continuation (HUMAN-TRANSITION / issue #18)
+
+`answer_v2_work(work_root, request_id, answer, config_text, provider_runtime_config,
+resume_to=None)` extends the existing API. With one allowed target, omission
+selects it. With multiple targets, omission or a nonmember fails with an error
+listing the allowed targets. CLI uses `work answer ... --resume-to DIAGNOSE`.
+Validation against the frozen contract, destination inputs and cumulative budgets
+precedes answer publication. The runtime independently checks the selected compiled
+entry against its State declaration. Providers only return semantic outcomes.
+
+Pending status includes `human_input_request_id`, `question`, `blockers`,
+`origin_state`, `origin_outcome`, `resume_targets`, and `selected_resume_to` (null
+until answered). `resume_to` remains a scalar for a single-target wait and is null
+for multi-target waits, including after selection. The decision is reported through
+`selected_resume_to`, `human_answer`, durable answer records, and received/resumed
+events. Ordinary post-wait status retains the latest decision and its origin.
+
+`resume_allowed` means the work has a valid supported continuation path with
+remaining budget, for both single- and multi-target waits. It does not necessarily
+mean `switchyard work resume` is immediately executable. When
+`human_input_pending: true`, `next_action` is `answer required`; generic resume
+remains rejected with `human_input_required` until a valid answer and any required
+target decision are persisted. A recorded answer changes `next_action` to `resume`.
+Pending input is a prerequisite, not a `resume_blocked` reason. Budget refusals set
+`resume_allowed: false` and `resume_blocked` explicitly.
+
+`target_blockers` reports budget refusal per considered target; `accounting_target`
+identifies the target used for the legacy accounting projection. Once answered, only
+the selected target is considered. There is no separate `continuation_allowed` flag.
+This intentionally corrects the old single-target pending `resume_allowed: false`
+projection. Clients that used that flag as permission to call generic resume must
+also inspect `human_input_pending` or `next_action`. Answer API compatibility and
+server-side answer requirements are unchanged.
+
+Status and selected-target validation read the frozen baseline workflow. A newer
+project configuration cannot add, remove or replace allowed routes: semantic config
+changes are rejected before publication. Permitted timeout retuning affects execution
+settings only; it does not supply the target-validation contract.
+
+New human records use `schema_version: 2`:
+
+- `human_request` adds ordered `resume_targets` and retains `resume_to` as a scalar
+  for one target or null for multiple targets. It preserves question, blockers,
+  summary, origin state/rung/invocation/visit/outcome, handoff sequence, work/run/flow,
+  round, stable request ID and timestamp.
+- `human_answer` adds `selected_resume_to` to answer text, request ID, sequence,
+  actor, work/run provenance and timestamp. The request stays immutable.
+
+Readers dispatch explicitly on version. Schema-v1 requests and answers keep their
+original single-target semantics; new answers to old requests use v2 and preserve
+all prior records byte-for-byte. Unsupported versions and inconsistent route or
+answer provenance fail closed. No historical artifact is rewritten.
+
+Only the latest answered pair relevant to the selected flow/state enters context.
+An allowed but unselected destination receives no new pair. Waiting and answering
+keep run identity, artifacts, history, visit counts, semantic charges and provider
+failure accounting. No additional allowance is granted by selection.
+
+Workflow bundle version remains 2 and project configuration syntax remains additive.
+No new dependencies or Python requirement changes are needed. Deploy the updated
+runtime/CLI together before using lists or schema-v2 human records: older releases
+do not support multi-target contracts or their null-target pending events. Downgrading
+a work that has new human records is unsupported; old records remain readable by
+the updated release. Package version is unchanged by this implementation.

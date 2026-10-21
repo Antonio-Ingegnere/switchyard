@@ -134,14 +134,24 @@ class State:
     invocation_budgets: tuple[InvocationBudgetScope, ...] = ()
     state_visit_budget_exceeded: str | None = None
     wait_for: str | None = None
-    resume_to: str | None = None
+    resume_to: str | tuple[str, ...] | None = None
+
+    @property
+    def resume_targets(self) -> tuple[str, ...]:
+        return self.resume_to if isinstance(self.resume_to, tuple) else (() if self.resume_to is None else (self.resume_to,))
+
+    @property
+    def single_resume_to(self) -> str | None:
+        return self.resume_targets[0] if len(self.resume_targets) == 1 else None
 
     @property
     def kind(self) -> str:
         return state_kind(self.terminal, self.wait_for, self.resume_to)
 
     def __post_init__(self):
-        object.__setattr__(self, "on", MappingProxyType(dict(self.on)))
+        if isinstance(self.resume_to, list):
+            object.__setattr__(self, 'resume_to', tuple(self.resume_to))
+        object.__setattr__(self, 'on', MappingProxyType(dict(self.on)))
         object.__setattr__(self, "invocation_budgets", tuple(self.invocation_budgets))
 
 
@@ -278,8 +288,9 @@ def validate(flow: Flow, executors: Mapping[str, Executor]) -> None:
         if state.wait_for is not None:
             if (state.wait_for != 'human_input' or state.terminal or state.executor is not None or state.on
                     or state.invocation_budgets or input_limit is not None or limit is None
-                    or state.state_visit_budget_exceeded is None or type(state.resume_to) is not str or state.resume_to not in flow.states
-                    or flow.states[state.resume_to].terminal or flow.states[state.resume_to].wait_for):
+                    or state.state_visit_budget_exceeded is None or not state.resume_targets
+                    or any(type(t) is not str or t not in flow.states or flow.states[t].kind != 'execution' for t in state.resume_targets)
+                    or len(set(state.resume_targets)) != len(state.resume_targets)):
                 raise FlowValidationError(f'invalid bounded human wait: {name}')
         elif state.resume_to is not None:
             if (not state.terminal or type(state.resume_to) is not str or state.resume_to not in flow.states
@@ -317,7 +328,7 @@ def validate(flow: Flow, executors: Mapping[str, Executor]) -> None:
         if state.max_state_visits_per_run is None:
             targets.update(state.on.values())
             if state.wait_for:
-                targets.add(state.resume_to)
+                targets.update(state.resume_targets)
         elif "budget_exceeded" in state.on:
             targets.add(state.on["budget_exceeded"])
         if state.state_visit_budget_exceeded is not None:
@@ -350,7 +361,7 @@ def run(work_unit: WorkUnit, flow: Flow, executors: Mapping[str, Executor],
         resume_from: tuple[Event, ...] | None = None,
         recover_to: str | None = None,
         void_invocations: frozenset[str] = frozenset(),
-        human_input: str | None = None) -> RunResult:
+        human_input: str | None = None, human_resume_to: str | None = None) -> RunResult:
     """`void_invocations`: resumed-history invocations that ended in run_error without
     any executor result (caller-proven infrastructure failures). They keep their events
     and ids but are not charged to reconstructed run/scope invocation budgets."""
@@ -372,8 +383,14 @@ def run(work_unit: WorkUnit, flow: Flow, executors: Mapping[str, Executor],
                 or human_input != resume_from[-1].state_visit_id or recover_to is not None
                 or resume_from[-1].state not in flow.states
                 or flow.states[resume_from[-1].state].wait_for != 'human_input'
-                or resume_from[-1].target != flow.states[resume_from[-1].state].resume_to):
+                or resume_from[-1].target != flow.states[resume_from[-1].state].single_resume_to):
             raise ValueError('human input requires the pending declared wait identity')
+        pending_state = flow.states[resume_from[-1].state]
+        human_resume_to = human_resume_to if human_resume_to is not None else pending_state.single_resume_to
+        if type(human_resume_to) is not str or human_resume_to not in pending_state.resume_targets:
+            raise ValueError('select a declared human continuation target: ' + ', '.join(pending_state.resume_targets))
+    elif human_resume_to is not None:
+        raise ValueError('human continuation target requires pending human input')
     if recover_to is not None:
         # Human recovery from a finished terminal into one declared, admitted state.
         if (resume_from is None or type(recover_to) is not str or recover_to not in flow.states
@@ -479,7 +496,7 @@ def run(work_unit: WorkUnit, flow: Flow, executors: Mapping[str, Executor],
                     scope_usage[scope.name] += 1
         # Durations across process clocks cannot be reconstructed honestly.
         if human_resume:
-            target = flow.states[current].resume_to
+            target = human_resume_to
             emit(Event('human_input_received', run_id, current, visit_id, target=target))
             emit(Event('human_input_resumed', run_id, current, visit_id, target=target))
             emit(Event('state_exited', run_id, current, visit_id))
@@ -514,7 +531,7 @@ def run(work_unit: WorkUnit, flow: Flow, executors: Mapping[str, Executor],
             visit_id = f"{run_id}:visit:{visit}"
             emit(Event("state_entered", run_id, current, visit_id))
         if state.wait_for == 'human_input':
-            emit(Event('human_input_requested', run_id, current, visit_id, target=state.resume_to))
+            emit(Event('human_input_requested', run_id, current, visit_id, target=state.single_resume_to))
             return RunResult(current, tuple(events), paused=True)
         if state.terminal:
             emit(Event("state_exited", run_id, current, visit_id))

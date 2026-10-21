@@ -105,7 +105,7 @@ def compile_workflow(bundle: WorkflowBundle, flow_name: str,
 
     for name, spec in sorted(source.states.items()):
         if spec.wait_for:
-            state = State(wait_for=spec.wait_for, resume_to=entries[spec.resume_to],
+            state = State(wait_for=spec.wait_for, resume_to=(entries[spec.single_resume_to] if spec.single_resume_to else tuple(entries[t] for t in spec.resume_targets)),
                           max_state_visits_per_run=spec.budget.max_state_visits,
                           state_visit_budget_exceeded=entries[spec.budget.on_exceeded])
             states[name] = state

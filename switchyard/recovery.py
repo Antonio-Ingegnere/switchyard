@@ -25,7 +25,7 @@ from .work_contract import WorkWorkspace
 from .workflow_compiler import compile_workflow
 from .workflow_execution import WorkflowExecution
 from .context_transport import workspace_resolver
-from .human_input import HumanInputRecorder, active_request, write_answer, validate_answer
+from .human_input import HumanInputRecorder, active_request, write_answer, validate_answer, request_targets, select_target, answer_target
 from .provider_stages import ProviderStageExecutorResolver
 from .provider_process import ProviderExecutionError
 from .git_safety import GitRepository
@@ -257,7 +257,7 @@ def _provider_failure(cause,binding,started):
                 duration_ms=None if started is None else max(0,(time.time_ns()-started)//1_000_000),output_tail=tail or None)
 
 
-def _drive(project,flow,request,root,config,store,repo,history=None,recover_to=None,void=frozenset(),human_input=None):
+def _drive(project,flow,request,root,config,store,repo,history=None,recover_to=None,void=frozenset(),human_input=None,human_resume_to=None):
     workspace=WorkWorkspace.open(root,project.bundle.artifacts);workspace.initialize_request(request)
     compiled=None
     try:
@@ -271,7 +271,7 @@ def _drive(project,flow,request,root,config,store,repo,history=None,recover_to=N
                    recorder=HumanInputRecorder(workspace,compiled,
                        _Recorder(Path(root)/'events.jsonl',store,compiled,root),
                        before_wait=lambda:_checkpoint(store,repo,root)),resume_from=history,recover_to=recover_to,
-                   void_invocations=void,human_input=human_input)
+                   void_invocations=void,human_input=human_input,human_resume_to=human_resume_to)
     except BaseException as exc:
         reason='execution_interrupted';cause=exc
         while cause is not None:
@@ -425,7 +425,7 @@ def _state_status(project, flow, state):
                 workflow_terminal=False if spec is None else spec.terminal,
                 waiting=False if spec is None else spec.kind == 'wait',
                 wait_for=None if spec is None else spec.wait_for,
-                declared_resume_to=None if spec is None else spec.resume_to)
+                declared_resume_to=None if spec is None else spec.single_resume_to)
 
 
 def resume_v2_work(work_root,config_text,provider_runtime_config,reason=''):
@@ -534,7 +534,11 @@ def recovery_status(work_root):
     if (Path(work_root)/'human_input/manifest.jsonl').is_file():
         question, answer = active_request(WorkWorkspace.open(work_root))
         human_history = dict(human_input_pending=False, human_input_request_id=question['request_id'],
-                             human_input_round=question['round'], human_input_answered=answer is not None)
+                             human_input_round=question['round'], human_input_answered=answer is not None,
+                             resume_targets=list(request_targets(question)),
+                             selected_resume_to=answer_target(question,answer) if answer else None,
+                             question=question['question'], human_answer=answer['answer'] if answer else None,
+                             origin_state=question['origin_state'],origin_outcome=question['origin_outcome'])
     return dict(work_id=Path(work_root).name,target=base['snapshot']['identity']['target'],flow=base['flow'],phase=phase,terminal=terminal,
                 state=op.get('state'),workflow_state=workflow_state,reason=op.get('reason'),diagnostic=op.get('diagnostic'),resume_allowed=resumable,resume_to=route,
                 recovery_source=recovery_source,**lifecycle,
@@ -650,26 +654,36 @@ def _human_status(root, store):
     question, answer = active_request(WorkWorkspace.open(root))
     project = _frozen_project(base)
     declaration = project.bundle.flow(base['flow']).states.get(question['wait_state'])
-    if declaration is None or declaration.kind != 'wait' or declaration.resume_to != question['resume_to']:
+    if declaration is None or declaration.kind != 'wait' or declaration.resume_targets != request_targets(question):
         raise RecoveryBlocked('RECOVERY_BLOCKED','human_wait_contract_mismatch')
     compiled = compile_workflow(project.bundle,base['flow'],lambda b:_Projection())
     history = tuple(read_events(Path(root)/'events.jsonl'))
     void = _void(_operations(store),history,compiled,Path(root).resolve())
-    accounting = _accounting(project,compiled,history,void,compiled.entry_states[question['resume_to']])
-    blocked = _refusal(accounting)
+    selected = answer_target(question, answer) if answer is not None else declaration.single_resume_to
+    choices = [selected] if selected is not None else declaration.resume_targets
+    options = {t: _accounting(project,compiled,history,void,compiled.entry_states[t]) for t in choices}
+    blocked_targets = {t: _refusal(a) for t, a in options.items()}
+    available = next((t for t in choices if blocked_targets[t] is None), choices[0])
+    accounting = options[available]
+    blocked = blocked_targets[available]
     del accounting['visits']
     return dict(work_id=Path(root).name,target=base['snapshot']['identity']['target'],flow=base['flow'],
         phase='waiting_for_human' if answer is None else 'human_answer_ready', terminal=None,
         state=question['wait_state'],workflow_state=question['wait_state'],human_input_pending=answer is None,
         **_state_status(project,base['flow'],question['wait_state']),recovery_source='human_input',
         human_input_request_id=question['request_id'],human_input_round=question['round'],
-        question=question['question'],blockers=question['blockers'],resume_to=declaration.resume_to,
-        answer_allowed=answer is None and blocked is None,resume_allowed=answer is not None and blocked is None,
-        resume_blocked=blocked or ('human_input_required' if answer is None else None),
+        question=question['question'],blockers=question['blockers'],resume_to=declaration.single_resume_to,
+        resume_targets=list(declaration.resume_targets),selected_resume_to=answer_target(question,answer) if answer else None,
+        origin_state=question['origin_state'],origin_outcome=question['origin_outcome'],
+        target_blockers=blocked_targets, accounting_target=available,
+        human_answer=answer['answer'] if answer else None,
+        answer_allowed=answer is None and blocked is None,
+        resume_allowed=blocked is None,
+        resume_blocked=blocked,
         next_action='answer required' if answer is None else 'resume',rollback_allowed=True,**accounting)
 
 
-def _continue_human(root,store,config_text,config,request_id=None,answer_text=None):
+def _continue_human(root,store,config_text,config,request_id=None,answer_text=None,resume_to=None):
     workspace = WorkWorkspace.open(root)
     question, answer = active_request(workspace)
     if request_id is None and answer is None:
@@ -682,35 +696,43 @@ def _continue_human(root,store,config_text,config,request_id=None,answer_text=No
     project = _frozen_project(base,config_text)
     if _semantic(config_text) != _semantic(base['config']):
         raise RecoveryBlocked('RESUME_BLOCKED','semantic_configuration_changed_new_delivery_required')
+    frozen = _frozen_project(base)
+    # Retune execution settings only; runtime routing also uses the frozen flows.
+    project = replace(project, bundle=replace(project.bundle, flows=frozen.bundle.flows))
     history = tuple(read_events(root/'events.jsonl'));summarize_runs(history)
     if not history or history[-1].kind != 'human_input_requested' or history[-1].state_visit_id != question['request_id']:
         raise RecoveryBlocked('RESUME_BLOCKED','incomplete_human_wait_history')
-    declaration = project.bundle.flow(base['flow']).states[question['wait_state']]
-    if declaration.wait_for != 'human_input' or declaration.resume_to != question['resume_to']:
+    declaration = frozen.bundle.flow(base['flow']).states[question['wait_state']]
+    if declaration.wait_for != 'human_input' or declaration.resume_targets != request_targets(question):
         raise RecoveryBlocked('RESUME_BLOCKED','human_wait_contract_mismatch')
     repo = _Repo(config.working_directory)
     checkpoint = _read(store,'checkpoint')
     _drift(checkpoint['snapshot'],repo.snapshot()[0],'RESUME_BLOCKED',ignore=(CONFIG_PATH,))
     if _manifest(root) != checkpoint['manifest']:
         raise RecoveryBlocked('RESUME_BLOCKED','artifact_history_changed')
-    compiled = compile_workflow(project.bundle,base['flow'],lambda b:_Projection())
+    compiled = compile_workflow(frozen.bundle,base['flow'],lambda b:_Projection())
     void = _void(_operations(store),history,compiled,root)
-    target = compiled.entry_states[declaration.resume_to]
-    refusal = _refusal(_accounting(project,compiled,history,void,target))
+    selected = answer_target(question, answer) if answer is not None else select_target(question, resume_to)
+    target = compiled.entry_states[selected]
+    pending = history[-1]
+    if (pending.state != question['wait_state'] or pending.run_id != question['run_id']
+            or pending.target != compiled.flow.states[pending.state].single_resume_to):
+        raise RecoveryBlocked('RESUME_BLOCKED','human_wait_contract_mismatch')
+    refusal = _refusal(_accounting(frozen,compiled,history,void,target))
     if refusal:
         raise RecoveryBlocked('RESUME_BLOCKED',refusal)
-    missing = [a for a in project.bundle.flow(base['flow']).states[declaration.resume_to].consumes if not workspace.versions(a)]
+    missing = [a for a in frozen.bundle.flow(base['flow']).states[selected].consumes if not workspace.versions(a)]
     if missing:
         raise RecoveryBlocked('RESUME_BLOCKED','recovery_inputs_missing',missing)
     if request_id is not None:
-        write_answer(workspace,request_id,answer_text)
+        write_answer(workspace,request_id,answer_text,selected)
     # Answer publication is complete before run, provider resolution or invocation.
     _operation(store,'running',human_input_request_id=question['request_id'])
     return _drive(project,base['flow'],workspace.read_artifact('request'),root,config,store,repo,
-                  history=history,void=void,human_input=question['request_id'])
+                  history=history,void=void,human_input=question['request_id'],human_resume_to=target)
 
 
-def answer_v2_work(work_root, request_id, answer, config_text, provider_runtime_config):
+def answer_v2_work(work_root, request_id, answer, config_text, provider_runtime_config, resume_to=None):
     """Append one human answer and continue this work through its declared wait route."""
     validate_answer(answer)
     root = Path(work_root).resolve()
@@ -718,4 +740,4 @@ def answer_v2_work(work_root, request_id, answer, config_text, provider_runtime_
         store = _store(root)
         if _read(store,'operation')['phase'] != 'waiting_for_human':
             raise RecoveryBlocked('ANSWER_BLOCKED','work_not_waiting_for_human')
-        return _continue_human(root,store,config_text,provider_runtime_config,request_id,answer)
+        return _continue_human(root,store,config_text,provider_runtime_config,request_id,answer,resume_to)

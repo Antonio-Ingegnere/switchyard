@@ -111,9 +111,17 @@ class WorkflowStateSpec:
     budget: BudgetSpec | None = None
     escalation_exhausted: str | None = None
     capabilities: tuple[str, ...] | None = None
-    resume_to: str | None = None
+    resume_to: str | tuple[str, ...] | None = None
     wait_for: str | None = None
     rung_budget_scope: str = "run"
+
+    @property
+    def resume_targets(self) -> tuple[str, ...]:
+        return self.resume_to if isinstance(self.resume_to, tuple) else (() if self.resume_to is None else (self.resume_to,))
+
+    @property
+    def single_resume_to(self) -> str | None:
+        return self.resume_targets[0] if len(self.resume_targets) == 1 else None
 
     @property
     def kind(self) -> str:
@@ -121,6 +129,8 @@ class WorkflowStateSpec:
         return state_kind(self.terminal, self.wait_for, self.resume_to)
 
     def __post_init__(self):
+        if isinstance(self.resume_to, list):
+            object.__setattr__(self, 'resume_to', tuple(self.resume_to))
         object.__setattr__(self, 'on', MappingProxyType(dict(self.on)))
         object.__setattr__(self, 'consumes', tuple(self.consumes))
         object.__setattr__(self, 'produces', tuple(self.produces))
@@ -372,10 +382,15 @@ def _workflow(data, roles, artifacts, path):
         if 'wait_for' in state:
             _fields(state, {'wait_for', 'resume_to', 'budget'}, set(), here)
             _enum(state['wait_for'], {'human_input'}, here + '.wait_for')
-            target = _name(state['resume_to'], here + '.resume_to')
-            declaration = data['states'].get(target)
-            if type(declaration) is not dict or 'terminal' in declaration or 'wait_for' in declaration:
-                raise _error(here + '.resume_to', 'expected an executable state of this flow')
+            raw = state['resume_to']
+            targets = _names(raw, here + '.resume_to') if type(raw) is list else (_name(raw, here + '.resume_to'),)
+            if not targets:
+                raise _error(here + '.resume_to', 'expected nonempty continuation targets')
+            for target in targets:
+                declaration = data['states'].get(target)
+                if type(declaration) is not dict or 'terminal' in declaration or 'wait_for' in declaration:
+                    raise _error(here + '.resume_to', 'expected an executable state of this flow')
+            target = targets[0] if len(targets) == 1 else targets
             bound = _budget(state['budget'], 'state', here + '.budget')
             if bound.max_state_visits is None or bound.max_invocations is not None:
                 raise _error(here + '.budget', 'human wait requires only max_state_visits and on_exceeded')
@@ -460,7 +475,7 @@ def _workflow(data, roles, artifacts, path):
             seen.add(name)
             pending.extend(states[name].on.values())
             if states[name].resume_to is not None:
-                pending.append(states[name].resume_to)
+                pending.extend(states[name].resume_targets)
             if states[name].budget is not None:
                 pending.append(states[name].budget.on_exceeded)
             if states[name].escalation_exhausted is not None:

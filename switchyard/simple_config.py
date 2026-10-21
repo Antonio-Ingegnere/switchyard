@@ -64,7 +64,8 @@ class SimpleConfig:
                  states={key: dict(state_kind=state.kind, terminal=state.terminal, on=dict(state.on),
                      budget=None if state.budget is None else dict(invocations=state.budget.max_invocations,
                          visits=state.budget.max_state_visits, on_exceeded=state.budget.on_exceeded),
-                     on_exhausted=state.escalation_exhausted, resume_to=state.resume_to,
+                     on_exhausted=state.escalation_exhausted, resume_to=state.single_resume_to,
+                     resume_targets=list(state.resume_targets),
                      wait_for=state.wait_for, rung_budget_scope=state.rung_budget_scope) for key,state in flow.states.items()})
                  for name,flow in self.bundle.flows.items()}
         return dict(invocations=rows, flows=flows, lifecycle=asdict(self.lifecycle))
@@ -297,11 +298,12 @@ def _check_inputs(bundle):
                 seen.add(node)
                 declaration = flow.states[node]
                 pending.extend(declaration.on.values())
+                if declaration.wait_for: pending.extend(declaration.resume_targets)
                 if declaration.budget: pending.append(declaration.budget.on_exceeded)
                 if declaration.escalation_exhausted: pending.append(declaration.escalation_exhausted)
             ancestors = {consumer}
             while True:
-                added = {n for n,s in flow.states.items() if set(s.on.values()) & ancestors}
+                added = {n for n,s in flow.states.items() if (set(s.on.values()) | (set(s.resume_targets) if s.wait_for else set())) & ancestors}
                 if added <= ancestors: break
                 ancestors.update(added)
             seen &= ancestors

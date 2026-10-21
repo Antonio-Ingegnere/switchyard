@@ -24,7 +24,7 @@ _VISIT = {'state', 'state_visit_id'}
 _INVOCATION = _VISIT | {'invocation_id'}
 _SHAPES = {
     'run_started': [set()],
-    'human_input_requested': [_VISIT | {'target'}],
+    'human_input_requested': [_VISIT | {'target'}, _VISIT],
     'human_input_received': [_VISIT | {'target'}],
     'human_input_resumed': [_VISIT | {'target'}],
     'run_resumed': [_VISIT, {'state', 'target'}],
@@ -199,7 +199,10 @@ class _RunShape:
                 _check(self.human_wait is None and not self.transitioned, 'duplicate human request')
                 self.human_wait = identity
             elif kind == 'human_input_received':
-                _check(self.human_wait == identity and not self.human_received, 'answer without pending request')
+                _check(self.human_wait is not None and self.human_wait[:2] == identity[:2]
+                       and self.human_wait[2] in (None, event.target) and not self.human_received,
+                       'answer without pending request')
+                self.human_wait = identity
                 self.human_received = True
             else:
                 _check(self.human_wait == identity and self.human_received, 'resume without human answer')

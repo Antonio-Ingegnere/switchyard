@@ -178,7 +178,7 @@ source snapshots are control-plane inputs, not new provider output permissions.
 ## Human clarification context
 
 `StageInvocation.human_clarification` is an optional tuple of immutable question and
-answer artifact snapshots. Before the declared resume destination executes, context
+answer artifact snapshots. Before the selected declared resume destination executes, context
 selects the latest answered pair for that flow/state, includes the exact original
 request even if its ordinary consumes list omits it, and includes the persisted source
 snapshot when available. The shared renderer labels these inputs `HUMAN CLARIFICATION`
@@ -189,3 +189,6 @@ All supplied content counts toward the existing context byte bound. Empty option
 fields preserve legacy byte accounting. Other states do not inherit the clarification
 transcript. A repeated round replaces the selected pair, never the durable history.
 A provider interruption at the destination reconstructs the same answered context.
+For schema-v2 decisions, destination relevance comes from the answer's
+`selected_resume_to`, never from membership in the request's allowed target list.
+Schema-v1 pairs retain the request's original scalar destination.

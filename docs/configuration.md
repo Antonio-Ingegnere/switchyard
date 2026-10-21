@@ -139,7 +139,7 @@ Every target must be declared, including default budget targets such as `NEEDS_H
 State names have no lifecycle semantics. Declare a final terminal with
 `name: {terminal: true}`. Adding `resume_to: <execution state>` explicitly makes it
 a recoverable terminal, regardless of its name (see [recovery](design/delivery-recovery.md#workflow-terminal-recovery)).
-A `wait_for: human_input` state is a bounded, nonterminal wait with a fixed target.
+A `wait_for: human_input` state is a bounded, nonterminal wait with one or more declared executable targets.
 Execution states declare `agent` or `run`. Combining these classifications, omitting
 a required target, or targeting a missing/terminal/wait state for resume is invalid.
 `config show` exposes the normalized `state_kind` (`execution`, `wait`, `terminal`,
@@ -242,5 +242,47 @@ DECISION:
 This permits two clarification rounds and a third SPECIFY visit to finish, subject
 to the flow's existing run budget. It does not raise that budget or refund the first
 invocation. `budget.invocations`, when explicitly supplied on SPECIFY, remains a
-cumulative cap. Answers never choose the destination. See [answer API/CLI and
+cumulative cap. A scalar target needs no selection; multiple targets require an explicit
+human selection from the declared list. See [answer API/CLI and
 restart behavior](design/delivery-recovery.md#answering-an-explicit-human-wait).
+
+
+## Explicit human review with selectable continuation (HUMAN-TRANSITION)
+
+A project whose `REPRODUCE.inconclusive` currently ends at a terminal must opt into
+human waiting in its configuration. For example, in the simple project format:
+
+```yaml
+REPRODUCE:
+  agent: investigate
+  on: {reproduced: FIX, inconclusive: HUMAN_REVIEW}
+  rung_budget_scope: visit
+  budget: {visits: 3, on_exceeded: BLOCKED}
+HUMAN_REVIEW:
+  wait_for: human_input
+  resume_to: [REPRODUCE, DIAGNOSE]
+  budget: {visits: 3, on_exceeded: BLOCKED}
+DIAGNOSE:
+  agent: diagnose
+  on: {diagnosed: FIX}
+  budget: {invocations: 3, on_exceeded: BLOCKED}
+BLOCKED:
+  terminal: true
+```
+
+Keep the project's agent declarations, artifact contracts, FIX and other states,
+and explicit run/exhaustion limits. Advanced V2 bundles use `role` instead of
+`agent` and `max_state_visits` instead of `visits`.
+
+```sh
+switchyard work answer <work> <request-id> \
+  "The reporter was running a stale build; fresh build reproduces differently." \
+  --resume-to DIAGNOSE
+```
+
+A missing selection for multiple targets, or an undeclared selection such as VERIFY,
+is rejected before writing an answer. A scalar `resume_to: REPRODUCE` or one-element
+list needs no CLI flag. `terminal: true` remains terminal regardless of its name;
+existing frozen works are not silently converted. Projects such as Adeo must opt
+into this contract for new work. This change does not modify Adeo configuration or
+provide a migration that changes the meaning of an already frozen terminal work.

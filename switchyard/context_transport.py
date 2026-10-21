@@ -271,7 +271,7 @@ def workspace_resolver(bundle: WorkflowBundle, flow_name: str, workspace: WorkWo
             StageHandoffContract(binding.provider != 'command', tuple(sorted(bundle.artifacts))))
         return ContextualExecutor(binding, declaration, workspace, stage, contract, max_context_bytes,
                                   sources if binding.logical_state == flow.entry or any(
-                                      s.wait_for and s.resume_to == binding.logical_state for s in flow.states.values()) else None,
+                                      s.wait_for and binding.logical_state in s.resume_targets for s in flow.states.values()) else None,
                                   tuple(outcome for outcome, target in declaration.on.items() if flow.states[target].wait_for),
                                   binding.logical_state == flow.entry)
     return resolve

@@ -110,8 +110,9 @@ Provider-specific errors must be normalized before reaching transition logic.
 
 ## Explicit human wait (HUMAN-INPUT-001)
 
-V2 may declare an executor-free `wait_for: human_input` state with a fixed
-`resume_to` executable state and a required visit bound/exhaustion terminal.
+V2 may declare an executor-free `wait_for: human_input` state with an explicit
+`resume_to` executable state (or nonempty list of executable states) and a required
+visit bound/exhaustion terminal.
 This is opt-in state data; no state-name prefix or legacy NEEDS_HUMAN inference is
 used. A semantic outcome enters the wait; budget/exhaustion routes cannot request
 human input. An actual originating handoff supplies the question.
@@ -124,8 +125,12 @@ After a durable answer the runtime emits `human_input_received`,
 new visit. The wait visit ID is the stable request ID in these events. Event fields
 and JSONL representation are unchanged; the strict reader recognizes the new kinds.
 
-Only the pending request identity authorizes continuation; answer callers cannot
-supply a destination. The full run history and run ID are retained. Pending waits
+The pending request identity authorizes continuation. For a multi-target wait, the
+human must also select a declared destination; runtime independently validates it.
+Single-target waits infer their sole destination. A multi-target request event has
+`target: null`; its versioned human request and frozen workflow carry the allowed
+targets. Received/resumed events record the selected compiled target. Existing
+single-target request events keep their original target shape. The full run history and run ID are retained. Pending waits
 have no executor invocation, and ordinary recovery cannot bypass a missing answer.
 
 ## Explicit state disposition (TERMINAL-CONTRACT-001)

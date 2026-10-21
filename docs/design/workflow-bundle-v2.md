@@ -40,7 +40,7 @@ Unknown fields are errors at every level; no metadata escape hatch exists.
 | Each `escalation` item | **kind**, **on**, **profile**, **context**, `effort`, `budget` |
 | `flows.<name>` | **entry**, **run_budget**, **states** |
 | Normal state | **role**, **on**, `consumes`, `produces`, `budget`, **escalation_exhausted when the role has a ladder** |
-| Human wait state | **wait_for: human_input**, **resume_to: <execution state>**, **budget** with visit limit and exhaustion terminal; no role or executor |
+| Human wait state | **wait_for: human_input**, **resume_to: <execution state or nonempty list>**, **budget** with visit limit and exhaustion terminal; no role or executor |
 | Terminal state | **terminal: true**; optional `resume_to: <execution state>` makes this an explicitly recoverable terminal and names its only recovery target, independent of the state name |
 
 `profiles`, `roles`, `flows` and each flow's `states` are nonempty mappings. Normal
@@ -479,7 +479,10 @@ DECISION:
 ```
 
 Wait states have no role, executor, artifacts, capabilities or ordinary transitions.
-Their target must be executable; their required visit limit bounds repeated rounds,
+Each target must be executable; duplicate, unknown, terminal and wait targets are
+rejected. Scalar syntax remains valid. A nonempty list allows the human to select
+one declared target (selection is required only for multiple targets). Their
+required visit limit bounds repeated rounds,
 and exhaustion must target a terminal. A wait cannot be the flow entry. Only semantic
 outcome transitions may request input; budget/exhaustion routes cannot fabricate a
 question. State names carry no human-input meaning.

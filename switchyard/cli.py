@@ -33,6 +33,7 @@ def _parser():
         if action == 'answer':
             operation.add_argument('request_id')
             operation.add_argument('answer')
+            operation.add_argument('--resume-to', help='select a declared human continuation target')
         if action in ('answer', 'resume'):
             operation.add_argument('--config')
             operation.add_argument('--claude-executable')
@@ -136,7 +137,7 @@ def _work_command(args):
             config_text = config_path.read_text(encoding='utf-8')
             provider = ProviderRuntimeConfig(status['target'], args.claude_executable, args.codex_executable)
             if args.action == 'answer':
-                answer_v2_work(args.work_root, args.request_id, args.answer, config_text, provider)
+                answer_v2_work(args.work_root, args.request_id, args.answer, config_text, provider, resume_to=args.resume_to)
             else:
                 resume_v2_work(args.work_root, config_text, provider)
             status = recovery_status(args.work_root)

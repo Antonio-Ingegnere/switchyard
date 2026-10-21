@@ -115,7 +115,7 @@ execution; it is neither a semantic agent outcome nor a provider infrastructure 
 ## Human Wait / Human Input Request / Clarification Round
 
 A human wait is an explicitly declared, bounded executor-free workflow state with a
-fixed continuation target. It pauses a run for external input rather than ending it
+declared set of executable continuation targets. It pauses a run for external input rather than ending it
 or retrying a provider. A human input request records the originating handoff question
 and invocation provenance; its answer is a separate immutable human record. One
 question/answer pair is a clarification round. Answering starts a new logical visit,
