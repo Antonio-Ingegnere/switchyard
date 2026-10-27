@@ -2,7 +2,7 @@
 
 Recovery wraps the existing V2 compiler, context transport and runtime. It does
 not retry automatically, fabricate a StageResult or restore a provider session.
-New operations use the installed `switchyard-runtime` package, version 2.2.0 (declared
+New operations use the installed `switchyard-runtime` package, version 2.3.0 (declared
 terminal recovery since VERIFICATION-RECOVERY-001).
 The advanced `execute_v2_workflow` API remains available without recovery.
 
