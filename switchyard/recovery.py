@@ -31,7 +31,8 @@ from .provider_stages import ProviderStageExecutorResolver
 from .provider_process import ProviderExecutionError
 from .git_safety import GitRepository
 from .qa_lifecycle import (withdraw_qa_candidate, finish_reopen_v2_work, accept_v2_work, create_qa_candidate,
-                           fix_records, write_fix_request, resolve_fix_request, validate_feedback, qa_rounds,
+                           fix_records, write_fix_request, resolve_fix_request, qa_rounds,
+                           finding_descriptions, request_findings, finding_states,
                            revalidate_candidate, _load as _load_candidate, LifecycleError)
 
 CATALOG = {name:ArtifactSpec('json') for name in
@@ -556,16 +557,20 @@ def recovery_status(work_root):
             resumable=blocked is None
             route=route or (op.get('state') if resumable else None)
     except Exception:pass
-    qa_history = {}
+    qa_status = {}
     if store.versions('qa_reference'):
         ref=_read(store,'qa_reference');qa_ws=WorkWorkspace.open(ref['workspace'])
         requests,resolved=fix_records(WorkWorkspace.open(work_root))
         sequence=json.loads(qa_ws.read_artifact('qa_candidate')).get('sequence',1)
-        qa_history=dict(qa_candidate=dict(sequence=sequence,identity=ref['identity'],workspace=ref['workspace'],
+        qa_status=dict(qa_candidate=dict(sequence=sequence,identity=ref['identity'],workspace=ref['workspace'],
                             decision=_read(qa_ws,'qa_decision')['terminal'] if qa_ws.versions('qa_decision') else None),
                         qa_fix_rounds=len(requests),qa_fix_open=len(requests)>len(resolved),
                         current_candidate_sequence=sequence,current_qa_round=len(requests) or None,
                         qa_round_open=len(requests)>len(resolved))
+        counts={state:0 for state in ('open','fixed','verified')}
+        for item in qa_history(work_root)['rounds']:
+            for finding in item['findings']:counts[finding['status']]+=1
+        qa_status.update(qa_open_findings=counts['open'],qa_fixed_findings=counts['fixed'],qa_verified_findings=counts['verified'])
     human_history = {}
     if (Path(work_root)/'human_input/manifest.jsonl').is_file():
         question, answer = active_request(WorkWorkspace.open(work_root))
@@ -578,7 +583,7 @@ def recovery_status(work_root):
     return dict(work_id=Path(work_root).name,target=base['snapshot']['identity']['target'],flow=base['flow'],phase=phase,terminal=terminal,
                 state=op.get('state'),workflow_state=workflow_state,reason=op.get('reason'),diagnostic=op.get('diagnostic'),resume_allowed=resumable,resume_to=route,
                 recovery_source=recovery_source,**lifecycle,
-                **accounting,**human_history,**qa_history,**({'resume_blocked':blocked} if blocked else {}),
+                **accounting,**human_history,**qa_status,**({'resume_blocked':blocked} if blocked else {}),
                 **({'provider_failure':op['provider_failure']} if phase=='interrupted' and 'provider_failure' in op else {}),
                 rollback_allowed=phase in ('interrupted','delivery_done','rollback_running','reopened') and not op.get('checkpoint_uncertain',False) and terminal!='ACCEPTED')
 
@@ -826,19 +831,20 @@ def _rejection_pending(store,op,root):
             and _open_round(WorkWorkspace.open(root)) is not None)
 
 
-def qa_fix_v2_work(work_root,feedback,config_text,provider_runtime_config):
+def qa_fix_v2_work(work_root,feedback,config_text,provider_runtime_config,*,findings=None):
     """Human QA rejection of the current candidate; continue the SAME work through its declared route.
 
-    Durable order: preflight (no writes) -> qa_fix_request (intent, feedback) -> candidate REOPENED
-    -> operation `reopened` -> corrective run. An interrupted call is finished by retrying with the
-    same feedback or by `resume`; it never opens a second round or rejects a candidate twice."""
-    validate_feedback(feedback)
+    `feedback` is one finding; `findings` (with feedback=None) is several, in order.
+    Durable order: preflight (no writes) -> qa_fix_request (intent: feedback + findings) -> candidate
+    REOPENED -> operation `reopened` -> corrective run. An interrupted call is finished by retrying with
+    the same findings or by `resume`; it never opens a second round or rejects a candidate twice."""
+    descriptions=finding_descriptions(feedback,findings)
     root=Path(work_root).resolve()
     with _lock(root):
         store=_store(root);baseline=_read(store,'baseline');op=_read(store,'operation')
         pending=_open_round(WorkWorkspace.open(root)) if op['phase'] in ('reopened','delivery_done') else None
         if pending is not None and (op['phase']=='reopened' or _rejection_pending(store,op,root)):
-            if pending['feedback']!=feedback:
+            if tuple(f['description'] for f in request_findings(pending))!=descriptions:
                 raise RecoveryBlocked('QA_FIX_BLOCKED','qa_fix_in_progress_with_different_feedback: use resume')
             if op['phase']=='reopened':
                 return _continue_corrective(root,store,baseline,config_text,provider_runtime_config,'qa_fix')
@@ -856,7 +862,7 @@ def qa_fix_v2_work(work_root,feedback,config_text,provider_runtime_config):
             raise RecoveryBlocked('QA_FIX_BLOCKED','qa_lineage_mismatch')
         _corrective_plan(root,store,baseline,config_text,provider_runtime_config)  # Refuse before any write.
         write_fix_request(WorkWorkspace.open(root),flow=baseline['flow'],reopen_to=_qa_route(_frozen_project(baseline),baseline['flow']),
-            feedback=feedback,candidate_workspace=ref['workspace'],identity=identity,candidate=candidate,work_id=root.name)
+            descriptions=descriptions,candidate_workspace=ref['workspace'],identity=identity,candidate=candidate,work_id=root.name)
         return _complete_qa_fix(root,store,baseline,config_text,provider_runtime_config)
 
 
@@ -937,13 +943,18 @@ def qa_history(work_root):
         candidates.append(dict(sequence=data.get('sequence',1),identity=ref['identity'],supersedes=data.get('supersedes'),
                                workspace=ref['workspace'],decision=_read(qa,'qa_decision')['terminal'] if qa.versions('qa_decision') else None))
     by_identity={c['identity']:c for c in candidates}
+    # Verification point: the ACCEPTED candidate's own qa_decision; its supersedes chain is the lineage.
+    accepted=set()
+    current=next((c for c in reversed(candidates) if c['decision']=='ACCEPTED'),None)
+    while current is not None and current['identity'] not in accepted:
+        accepted.add(current['identity']);current=by_identity.get(current['supersedes'])
     rounds=[]
     for item in qa_rounds(WorkWorkspace.open(root)):
         produced=item['produced']
         if produced is not None and produced['workspace'] is None and produced['identity'] in by_identity:
             produced=dict(produced,workspace=by_identity[produced['identity']]['workspace'])  # schema-1 record
         rounds.append(dict(item,produced=produced))
-    return dict(candidates=candidates,rounds=rounds)
+    return dict(candidates=candidates,rounds=list(finding_states(rounds,accepted)))
 
 
 def accept_v2_candidate(work_root,*,git_executable=None):

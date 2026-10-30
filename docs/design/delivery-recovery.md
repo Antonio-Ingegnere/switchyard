@@ -414,3 +414,24 @@ Each rejection is a durable, numbered round in the same work; rounds never reset
 - `qa_history(work_root)` returns every candidate (sequence, identity, supersedes, decision, workspace)
   and every round (rejected → produced, feedback, open). Status reports `current_candidate_sequence`,
   `current_qa_round` and `qa_round_open`.
+
+### QA findings
+
+A rejection carries one or more findings: `qa-fix <root> "text"` (one finding) or
+`qa-fix <root> --finding "A" --finding "B"` (`qa_fix_v2_work(..., None, ..., findings=[...])`, at most 20).
+
+- Findings are part of the round's single durable rejection intent (`qa_fix_request` schema 3:
+  `findings: [{id, round, description}]`), so they are created atomically with the round.
+  IDs are assigned once at that write: `qa-<round>-<n>`; they are never derived from position on read.
+- `feedback` on the request (and the rejected candidate's `qa_feedback`) is the single finding verbatim,
+  or `[qa-R-n] text` lines for several.
+- Status is derived from append-only records, never stored or rewritten:
+  - `open` — the round's request exists and its round is not resolved;
+  - `fixed` — the round's `qa_fix_resolved` exists (written only after its produced candidate is current);
+  - `verified` — the produced candidate is in the supersedes chain of a candidate whose `qa_decision` is
+    `ACCEPTED`. Accepting candidate #N therefore verifies every fixed finding in its lineage.
+- A later rejection always creates new findings in its own round; earlier findings are never reinterpreted.
+- Pre-findings requests (schema 1) are read as one finding `qa-<round>-1` with the old feedback, without rewriting.
+- Corrective model stages get a `MANUAL QA FINDINGS` section listing only the open round's `[id] description`.
+- `qa_history()` exposes `findings` (with `status`) per round; status adds `qa_open_findings`,
+  `qa_fixed_findings` and `qa_verified_findings` counters.

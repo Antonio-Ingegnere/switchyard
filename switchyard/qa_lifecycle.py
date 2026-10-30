@@ -461,6 +461,8 @@ FIX_CATALOG = {'request': ArtifactSpec('text', source='request'),
                'qa_fix_request': ArtifactSpec('json'), 'qa_fix_resolved': ArtifactSpec('json')}
 MAX_FEEDBACK_BYTES = 8192
 MAX_LISTED_FILES = 100
+MAX_FINDINGS = 20
+FINDING_STATES = ('open', 'fixed', 'verified')
 
 
 def validate_feedback(text):
@@ -472,6 +474,33 @@ def validate_feedback(text):
         raise LifecycleError('qa-fix requires non-empty UTF-8 feedback')
     if size > MAX_FEEDBACK_BYTES:
         raise LifecycleError(f'qa-fix feedback exceeds {MAX_FEEDBACK_BYTES} UTF-8 bytes')
+
+
+def finding_descriptions(feedback=None, findings=None):
+    """One rejection as an ordered tuple of finding texts; `qa-fix "text"` is one finding."""
+    if (feedback is None) == (findings is None):
+        raise LifecycleError('qa-fix requires feedback text or findings, not both')
+    descriptions = (feedback,) if findings is None else tuple(findings)
+    if not 1 <= len(descriptions) <= MAX_FINDINGS:
+        raise LifecycleError(f'qa-fix requires 1 to {MAX_FINDINGS} findings')
+    for text in descriptions:
+        validate_feedback(text)
+    validate_feedback(combined_feedback(descriptions, 99999))  # Conservative: any realistic round number.
+    return descriptions
+
+
+def combined_feedback(descriptions, round_number):
+    """Human text kept on the rejected candidate (`qa_feedback`); a single finding is stored verbatim."""
+    if len(descriptions) == 1:
+        return descriptions[0]
+    return '\n'.join(f'[qa-{round_number}-{i}] {text}' for i, text in enumerate(descriptions, 1))
+
+
+def request_findings(request):
+    """Findings defined by a rejection intent; pre-findings records read as one `qa-<round>-1`."""
+    if 'findings' in request:
+        return tuple(dict(f) for f in request['findings'])
+    return (dict(id=f"qa-{request['round']}-1", round=request['round'], description=request['feedback']),)
 
 
 def fix_store(workspace, create=False):
@@ -496,8 +525,9 @@ def fix_records(workspace):
     return requests, resolved
 
 
-def write_fix_request(workspace, *, flow, reopen_to, feedback, candidate_workspace, identity, candidate, work_id):
-    validate_feedback(feedback)
+def write_fix_request(workspace, *, flow, reopen_to, descriptions, candidate_workspace, identity, candidate, work_id):
+    """The round's single durable rejection intent: feedback AND its findings are one record."""
+    descriptions = finding_descriptions(findings=descriptions)
     requests, resolved = fix_records(workspace)
     if len(requests) != len(resolved):
         raise WorkContractError('a corrective QA cycle is already open')
@@ -505,8 +535,11 @@ def write_fix_request(workspace, *, flow, reopen_to, feedback, candidate_workspa
     if resolved and resolved[-1]['superseding_identity'] != identity:
         raise WorkContractError('QA lineage mismatch: rejected candidate is not the latest round result')
     files = sorted(candidate['files'])
-    record = dict(schema_version=1, round=len(requests)+1, work_id=work_id, flow=flow,
-                  reopen_to=reopen_to, feedback=feedback,
+    number = len(requests)+1
+    # IDs are assigned once, here, scoped to the round; never derived from list position on read.
+    findings = [dict(id=f'qa-{number}-{i}', round=number, description=text) for i, text in enumerate(descriptions, 1)]
+    record = dict(schema_version=3, round=number, work_id=work_id, flow=flow,
+                  reopen_to=reopen_to, feedback=combined_feedback(descriptions, number), findings=findings,
                   rejected_candidate=dict(identity=identity, workspace=str(candidate_workspace),
                       sequence=candidate.get('sequence', 1), base_head=candidate['base_head'],
                       branch=candidate['branch'],
@@ -537,10 +570,21 @@ def qa_rounds(workspace):
         if done is not None and done.get('rejected_identity', rejected['identity']) != rejected['identity']:
             raise WorkContractError('inconsistent QA fix history')
         rounds.append(dict(round=request['round'], feedback=request['feedback'], open=done is None,
+            findings=request_findings(request),
             rejected=dict(identity=rejected['identity'], sequence=rejected['sequence'], workspace=rejected['workspace']),
             produced=None if done is None else dict(identity=done['superseding_identity'], sequence=done['sequence'],
                                                     workspace=done.get('superseding_workspace'))))
     return tuple(rounds)
+
+
+def finding_states(rounds, accepted_lineage):
+    """Pure function of append-only records: open (rejection intent) -> fixed (round resolved:
+    its produced candidate is durably current) -> verified (an accepted candidate descends from it)."""
+    result = []
+    for item in rounds:
+        state = 'open' if item['open'] else ('verified' if item['produced']['identity'] in accepted_lineage else 'fixed')
+        result.append(dict(item, findings=tuple(dict(f, status=state) for f in item['findings'])))
+    return tuple(result)
 
 
 def qa_fix_snapshots(workspace):

@@ -12,6 +12,7 @@ from typing import Mapping
 
 from runtime import DiagnosticPayload, MAX_DIAGNOSTIC_BYTES
 from runtime.command import Command
+from .qa_lifecycle import request_findings
 from .context_transport import StageInvocation, StageResult, StageHandoff, ProducedArtifact
 from .work_contract import (microspec_guidance, handoff_guidance, HANDOFF_BODY_FIELDS,
                             HANDOFF_MAX_ITEMS, HANDOFF_MAX_TEXT, handoff_check, handoff_text, _kind)
@@ -232,6 +233,9 @@ def render_invocation(invocation: StageInvocation) -> str:
         parts.append('HUMAN CLARIFICATION — durable question and human answer\n'+
                      _json([{'record': asdict(a.record), 'content': a.content} for a in invocation.human_clarification]))
     if invocation.qa_feedback:
+        findings = [f for a in invocation.qa_feedback for f in request_findings(json.loads(a.content))]
+        parts.append('MANUAL QA FINDINGS — current QA round only; address each in the existing implementation\n'+
+                     '\n'.join(f"[{f['id']}] {f['description']}" for f in findings))
         parts.append('MANUAL QA REJECTION — the human rejected the latest candidate of this same work; '
                      'correct the existing implementation, do not start over\n'+
                      _json([{'record': asdict(a.record), 'content': a.content} for a in invocation.qa_feedback]))

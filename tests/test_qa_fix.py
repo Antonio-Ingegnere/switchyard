@@ -411,6 +411,7 @@ class QaFixTests(QaFixBase):
         self.deliver()
         status = recovery_status(self.work)
         self.assertEqual((status['current_candidate_sequence'], status['current_qa_round'], status['qa_round_open']), (1, None, False))
+        self.assertEqual((status['qa_open_findings'], status['qa_fixed_findings'], status['qa_verified_findings']), (0, 0, 0))
         self.assertEqual((status['terminal'], status['qa_candidate']['sequence'], status['qa_fix_rounds']), ('READY_FOR_MANUAL_QA', 1, 0))
         self.assertEqual(self.first.identity, status['qa_candidate']['identity'])
         self.assertEqual(self.events()[-1].state, 'READY_FOR_MANUAL_QA')
@@ -551,6 +552,159 @@ class RepeatedQaRoundTests(QaFixBase):
         self.assertEqual(ctx.exception.reason, 'qa_lineage_mismatch')
         self.assertEqual({p: p.read_bytes() for p in frozen}, frozen)
         self.assertEqual(foreign.identity, recovery_status(self.work)['qa_candidate']['identity'])
+
+
+F1, F2A, F2B = 'Rename dialog does not open.', 'Board loses focus after rename.', 'Dialog position is wrong.'
+
+
+class QaFindingTests(QaFixBase):
+    """Structured findings: open (rejection intent) -> fixed (candidate current) -> verified (accepted)."""
+    def setUp(self):
+        super().setUp()
+        for state in ('DIAGNOSE', 'FIX', 'VERIFY'):
+            self.data['flows']['bugfix']['states'][state]['budget']['visits'] = 3
+        self.data['flows']['bugfix']['limits']['run_invocations'] = 9
+        self.text = self.save_config()
+
+    def findings(self):
+        return [[(f['id'], f['description'], f['status']) for f in r['findings']] for r in qa_history(self.work)['rounds']]
+
+    def counts(self):
+        status = recovery_status(self.work)
+        return status['qa_open_findings'], status['qa_fixed_findings'], status['qa_verified_findings']
+
+    def request(self, version):
+        return json.loads(fix_store(WorkWorkspace.open(self.work)).read_artifact('qa_fix_request', version))
+
+    def test_single_text_is_one_finding_fixed_on_publication_verified_on_accept(self):
+        self.deliver()
+        self.assertEqual(self.counts(), (0, 0, 0))
+        self.qa_fix(F1)
+        stored = self.request(1)
+        self.assertEqual((stored['schema_version'], stored['feedback'], stored['findings']),
+                         (3, F1, [dict(id='qa-1-1', round=1, description=F1)]))  # Created with the rejection intent.
+        self.assertEqual(WorkWorkspace.open(self.qa).read_artifact('qa_feedback'), F1)  # Single finding stays verbatim.
+        self.assertEqual(self.findings(), [[('qa-1-1', F1, 'fixed')]])
+        self.assertEqual(self.counts(), (0, 1, 0))
+        accept_v2_candidate(self.work)
+        self.assertEqual(self.findings(), [[('qa-1-1', F1, 'verified')]])
+        self.assertEqual(self.counts(), (0, 0, 1))
+        with self.assertRaises(LifecycleError):
+            accept_v2_candidate(self.work)  # Retried accept: refused by candidate semantics, verified unchanged.
+        self.assertEqual(self.findings(), [[('qa-1-1', F1, 'verified')]])
+
+    def test_findings_open_until_a_candidate_is_published(self):
+        self.deliver(); self.stages.verdict = 'fail'
+        self.assertEqual(self.qa_fix(F1).result.terminal_state, 'NEEDS_HUMAN')
+        self.assertEqual(self.findings(), [[('qa-1-1', F1, 'open')]])
+        self.assertEqual(self.counts(), (1, 0, 0))
+
+    def test_multiple_findings_two_rounds_history_context_and_lineage_verification(self):
+        self.deliver()
+        execution = qa_fix_v2_work(self.work, None, self.text, self.config, findings=[F1])
+        round1_bytes = (self.work/'qa_fix'/'manifest.jsonl').read_bytes()
+        calls = len(self.stages.calls)
+        qa_fix_v2_work(self.work, None, self.text, self.config, findings=[F2A, F2B])
+        self.assertTrue((self.work/'qa_fix'/'manifest.jsonl').read_bytes().startswith(round1_bytes))
+        self.assertEqual(self.request(1)['findings'], [dict(id='qa-1-1', round=1, description=F1)])  # Not overwritten.
+        c2 = qa_history(self.work)['candidates'][1]
+        self.assertEqual(WorkWorkspace.open(c2['workspace']).read_artifact('qa_feedback'),
+                         f'[qa-2-1] {F2A}\n[qa-2-2] {F2B}')
+        self.assertEqual(self.findings(), [[('qa-1-1', F1, 'fixed')], [('qa-2-1', F2A, 'fixed'), ('qa-2-2', F2B, 'fixed')]])
+        rounds = qa_history(self.work)['rounds']
+        self.assertEqual([(r['round'], r['rejected']['sequence'], r['produced']['sequence']) for r in rounds], [(1, 1, 2), (2, 2, 3)])
+        # Corrective model stages of round 2 see exactly round 2's findings.
+        for call in self.stages.calls[calls:calls+2]:
+            rendered = render_invocation(call)
+            section = rendered.split('MANUAL QA FINDINGS')[1].split('\n\n')[0]
+            self.assertEqual(section.splitlines()[1:], [f'[qa-2-1] {F2A}', f'[qa-2-2] {F2B}'])
+            self.assertNotIn('qa-1-1', rendered); self.assertNotIn(F1, rendered)
+        self.assertEqual(self.stages.calls[calls+2].qa_feedback, ())  # Verifier: no prose.
+        self.assertEqual(self.counts(), (0, 3, 0))
+        accept_v2_candidate(self.work)
+        # Accepting #3 confirms its lineage (#3 supersedes #2 supersedes #1): every fixed finding is verified.
+        self.assertEqual(self.findings(), [[('qa-1-1', F1, 'verified')], [('qa-2-1', F2A, 'verified'), ('qa-2-2', F2B, 'verified')]])
+        self.assertEqual(self.counts(), (0, 0, 3))
+
+    def test_cli_repeated_finding_option(self):
+        self.deliver()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            code = main(['work', 'qa-fix', str(self.work), '--finding', F2A, '--finding', F2B])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out.getvalue())['qa_fixed_findings'], 2)
+        self.assertEqual(self.findings(), [[('qa-1-1', F2A, 'fixed'), ('qa-1-2', F2B, 'fixed')]])
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(main(['work', 'qa-fix', str(self.work), 'text', '--finding', F1]), 2)  # Both forms: refused.
+            self.assertEqual(main(['work', 'qa-fix', str(self.work)]), 2)
+        self.assertEqual(len(qa_history(self.work)['rounds']), 1)
+
+    def test_crash_while_opening_round_does_not_duplicate_findings(self):
+        self.deliver()
+        with patch('switchyard.recovery.finish_reopen_v2_work', crash_once(recovery.finish_reopen_v2_work)):
+            with self.assertRaises(Crash):
+                qa_fix_v2_work(self.work, None, self.text, self.config, findings=[F2A, F2B])
+        self.assertEqual(self.findings(), [[('qa-1-1', F2A, 'open'), ('qa-1-2', F2B, 'open')]])  # Intent holds them.
+        self.assertEqual(self.counts(), (2, 0, 0))
+        with self.assertRaisesRegex(RecoveryBlocked, 'different_feedback'):
+            qa_fix_v2_work(self.work, None, self.text, self.config, findings=[F2A])
+        qa_fix_v2_work(self.work, None, self.text, self.config, findings=[F2A, F2B])
+        self.assertEqual(self.findings(), [[('qa-1-1', F2A, 'fixed'), ('qa-1-2', F2B, 'fixed')]])
+        self.assertEqual(len(fix_store(WorkWorkspace.open(self.work)).versions('qa_fix_request')), 1)
+
+    def test_publication_failure_keeps_findings_open_and_resume_fixes_once(self):
+        self.deliver()
+        with patch('switchyard.recovery.resolve_fix_request', crash_once(recovery.resolve_fix_request)):
+            with self.assertRaises(Crash):
+                self.qa_fix(F1)
+        status = recovery_status(self.work)
+        self.assertEqual((status['terminal'], status['current_candidate_sequence']), ('INTERRUPTED', 2))  # Not yet fixed.
+        self.assertEqual(self.findings(), [[('qa-1-1', F1, 'open')]])
+        resume_v2_work(self.work, self.text, self.config)
+        resume_blocked = False
+        try:
+            resume_v2_work(self.work, self.text, self.config)
+        except RecoveryBlocked:
+            resume_blocked = True
+        self.assertTrue(resume_blocked)  # A second resume cannot re-apply anything.
+        store = fix_store(WorkWorkspace.open(self.work))
+        self.assertEqual((len(store.versions('qa_fix_request')), len(store.versions('qa_fix_resolved'))), (1, 1))
+        self.assertEqual(self.findings(), [[('qa-1-1', F1, 'fixed')]])
+
+    def test_interrupted_accept_does_not_verify(self):
+        self.deliver(); self.qa_fix(F1)
+        original = WorkWorkspace.write_artifact
+        with patch.object(WorkWorkspace, 'write_artifact', crash_once(original, lambda ws, name, *a, **k: name == 'qa_decision')):
+            with self.assertRaises(Crash):
+                accept_v2_candidate(self.work)
+        # Candidate acceptance stays authoritative: without its decision record nothing is verified.
+        self.assertEqual(self.findings(), [[('qa-1-1', F1, 'fixed')]])
+
+    def test_pre_findings_records_read_as_one_finding_and_stay_resumable(self):
+        self.deliver()
+        # Simulate a schema-1 request (first committed slice): no `findings`, open mid-cycle.
+        original = WorkWorkspace.write_artifact
+        def old_schema(ws, name, content, *a, **k):
+            if name == 'qa_fix_request':
+                data = json.loads(content); del data['findings']; data['schema_version'] = 1
+                content = json.dumps(data, sort_keys=True, separators=(',', ':'), ensure_ascii=False)+'\n'
+            return original(ws, name, content, *a, **k)
+        self.stages.fail_state = 'FIX'
+        with patch.object(WorkWorkspace, 'write_artifact', old_schema):
+            with self.assertRaises(Exception):
+                self.qa_fix(F1)
+        before = (self.work/'qa_fix'/'manifest.jsonl').read_bytes()
+        self.assertEqual(self.findings(), [[('qa-1-1', F1, 'open')]])
+        resume_v2_work(self.work, self.text, self.config)
+        self.assertIn(f'[qa-1-1] {F1}', render_invocation(self.stages.calls[-2]))  # Legacy record rendered as one finding.
+        self.assertEqual(self.findings(), [[('qa-1-1', F1, 'fixed')]])
+        self.assertTrue((self.work/'qa_fix'/'manifest.jsonl').read_bytes().startswith(before))  # Read never rewrites.
+        self.assertNotIn('findings', self.request(1))
+        self.qa_fix(F2A)
+        self.assertEqual(self.findings(), [[('qa-1-1', F1, 'fixed')], [('qa-2-1', F2A, 'fixed')]])
+        accept_v2_candidate(self.work)
+        self.assertEqual(self.counts(), (0, 0, 2))
+
 
 if __name__ == '__main__':
     unittest.main()
