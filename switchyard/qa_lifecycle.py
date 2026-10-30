@@ -455,6 +455,8 @@ def withdraw_qa_candidate(work_root, candidate_identity):
 # --- Same-work corrective QA feedback -------------------------------------------------
 # One durable free-text record per rejected candidate, held beside the work (like human_input)
 # so corrective stages read bounded context instead of a transcript. Routing stays in recovery.
+# QA round N = qa_fix_request version N (rejection intent) + qa_fix_resolved version N (the
+# candidate it produced). Both are append-only; a resolved round is never rewritten.
 FIX_CATALOG = {'request': ArtifactSpec('text', source='request'),
                'qa_fix_request': ArtifactSpec('json'), 'qa_fix_resolved': ArtifactSpec('json')}
 MAX_FEEDBACK_BYTES = 8192
@@ -488,7 +490,8 @@ def fix_records(workspace):
         return (), ()
     requests = tuple(json.loads(store.read_artifact('qa_fix_request', r.version)) for r in store.versions('qa_fix_request'))
     resolved = tuple(json.loads(store.read_artifact('qa_fix_resolved', r.version)) for r in store.versions('qa_fix_resolved'))
-    if len(resolved) > len(requests) or any(r['round'] != i+1 for i, r in enumerate(resolved)):
+    if (len(resolved) > len(requests) or any(r['round'] != i+1 for i, r in enumerate(requests))
+            or any(r['round'] != i+1 for i, r in enumerate(resolved))):
         raise WorkContractError('inconsistent QA fix history')
     return requests, resolved
 
@@ -498,6 +501,9 @@ def write_fix_request(workspace, *, flow, reopen_to, feedback, candidate_workspa
     requests, resolved = fix_records(workspace)
     if len(requests) != len(resolved):
         raise WorkContractError('a corrective QA cycle is already open')
+    # Lineage: round N+1 may only reject the candidate round N produced.
+    if resolved and resolved[-1]['superseding_identity'] != identity:
+        raise WorkContractError('QA lineage mismatch: rejected candidate is not the latest round result')
     files = sorted(candidate['files'])
     record = dict(schema_version=1, round=len(requests)+1, work_id=work_id, flow=flow,
                   reopen_to=reopen_to, feedback=feedback,
@@ -510,12 +516,31 @@ def write_fix_request(workspace, *, flow, reopen_to, feedback, candidate_workspa
     return record
 
 
-def resolve_fix_request(workspace, superseding_identity, sequence):
+def resolve_fix_request(workspace, superseding_identity, sequence, superseding_workspace):
     requests, resolved = fix_records(workspace)
     if len(requests) != len(resolved)+1:
         raise WorkContractError('no open corrective QA cycle')
+    # schema 2 adds the explicit rejected -> produced link; schema-1 records lack both fields.
     fix_store(workspace).write_artifact('qa_fix_resolved', _json(dict(
-        round=len(requests), superseding_identity=superseding_identity, sequence=sequence)))
+        schema_version=2, round=len(requests), rejected_identity=requests[-1]['rejected_candidate']['identity'],
+        superseding_identity=superseding_identity, sequence=sequence,
+        superseding_workspace=str(superseding_workspace))))
+
+
+def qa_rounds(workspace):
+    """Durable round history: which candidate was rejected, by what feedback, and what it produced."""
+    requests, resolved = fix_records(workspace)
+    rounds = []
+    for index, request in enumerate(requests):
+        rejected = request['rejected_candidate']
+        done = resolved[index] if index < len(resolved) else None
+        if done is not None and done.get('rejected_identity', rejected['identity']) != rejected['identity']:
+            raise WorkContractError('inconsistent QA fix history')
+        rounds.append(dict(round=request['round'], feedback=request['feedback'], open=done is None,
+            rejected=dict(identity=rejected['identity'], sequence=rejected['sequence'], workspace=rejected['workspace']),
+            produced=None if done is None else dict(identity=done['superseding_identity'], sequence=done['sequence'],
+                                                    workspace=done.get('superseding_workspace'))))
+    return tuple(rounds)
 
 
 def qa_fix_snapshots(workspace):

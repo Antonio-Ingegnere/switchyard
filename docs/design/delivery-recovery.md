@@ -395,3 +395,22 @@ history, reuses an already renamed candidate only if it still matches the worktr
 current candidate; rejected candidates are finalized and cannot be accepted.
 
 CLI: `switchyard work qa-fix <work_root> "<feedback>" [--config FILE]`, `switchyard work accept <work_root>`.
+
+### Repeated QA rounds
+
+Each rejection is a durable, numbered round in the same work; rounds never reset budgets.
+
+- Round N is `qa_fix_request` version N (`round`, `feedback`, `rejected_candidate`) plus
+  `qa_fix_resolved` version N (`round`, `rejected_identity`, `superseding_identity`, `sequence`,
+  `superseding_workspace`; the first committed slice wrote these without `rejected_identity` and
+  `superseding_workspace`, which readers derive from the request and the `qa_reference` history).
+- Both stores are append-only; a resolved round is never rewritten. Round numbering and
+  request/resolution pairing are validated on every read.
+- Lineage is a chain: candidate N+1 has `sequence: N+1` and `supersedes` = the candidate rejected in
+  round N. `qa-fix` refuses (`qa_lineage_mismatch`, before any write) to open round N+1 against any
+  candidate other than the one round N produced.
+- Corrective stages receive only the open round's record (its feedback and rejected-candidate summary);
+  earlier rounds stay in the store and are not replayed.
+- `qa_history(work_root)` returns every candidate (sequence, identity, supersedes, decision, workspace)
+  and every round (rejected → produced, feedback, open). Status reports `current_candidate_sequence`,
+  `current_qa_round` and `qa_round_open`.

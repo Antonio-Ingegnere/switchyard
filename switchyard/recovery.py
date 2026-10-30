@@ -31,7 +31,7 @@ from .provider_stages import ProviderStageExecutorResolver
 from .provider_process import ProviderExecutionError
 from .git_safety import GitRepository
 from .qa_lifecycle import (withdraw_qa_candidate, finish_reopen_v2_work, accept_v2_work, create_qa_candidate,
-                           fix_records, write_fix_request, resolve_fix_request, validate_feedback,
+                           fix_records, write_fix_request, resolve_fix_request, validate_feedback, qa_rounds,
                            revalidate_candidate, _load as _load_candidate, LifecycleError)
 
 CATALOG = {name:ArtifactSpec('json') for name in
@@ -563,7 +563,9 @@ def recovery_status(work_root):
         sequence=json.loads(qa_ws.read_artifact('qa_candidate')).get('sequence',1)
         qa_history=dict(qa_candidate=dict(sequence=sequence,identity=ref['identity'],workspace=ref['workspace'],
                             decision=_read(qa_ws,'qa_decision')['terminal'] if qa_ws.versions('qa_decision') else None),
-                        qa_fix_rounds=len(requests),qa_fix_open=len(requests)>len(resolved))
+                        qa_fix_rounds=len(requests),qa_fix_open=len(requests)>len(resolved),
+                        current_candidate_sequence=sequence,current_qa_round=len(requests) or None,
+                        qa_round_open=len(requests)>len(resolved))
     human_history = {}
     if (Path(work_root)/'human_input/manifest.jsonl').is_file():
         question, answer = active_request(WorkWorkspace.open(work_root))
@@ -849,6 +851,9 @@ def qa_fix_v2_work(work_root,feedback,config_text,provider_runtime_config):
         if identity!=ref['identity']:raise RecoveryBlocked('QA_FIX_BLOCKED','qa_candidate_identity_mismatch')
         if qa.versions('qa_decision') or qa.versions('qa_intent'):
             raise RecoveryBlocked('QA_FIX_BLOCKED','candidate_already_finalized')
+        _, resolved = fix_records(WorkWorkspace.open(root))
+        if resolved and resolved[-1]['superseding_identity']!=identity:
+            raise RecoveryBlocked('QA_FIX_BLOCKED','qa_lineage_mismatch')
         _corrective_plan(root,store,baseline,config_text,provider_runtime_config)  # Refuse before any write.
         write_fix_request(WorkWorkspace.open(root),flow=baseline['flow'],reopen_to=_qa_route(_frozen_project(baseline),baseline['flow']),
             feedback=feedback,candidate_workspace=ref['workspace'],identity=identity,candidate=candidate,work_id=root.name)
@@ -904,7 +909,7 @@ def _publish_corrective_candidate(root,store,repo,flow,workspace,result):
     elif ref['workspace']!=str(final):
         raise RecoveryBlocked('RECOVERY_BLOCKED','qa_reference_conflict')
     else:identity=ref['identity']
-    resolve_fix_request(workspace,identity,sequence)
+    resolve_fix_request(workspace,identity,sequence,final)
 
 
 def _finish_publication(root,store,baseline,config):
@@ -920,6 +925,25 @@ def _finish_publication(root,store,baseline,config):
     result=RunResult(QA_READY,history)
     _complete_delivery(root,store,repo,baseline['flow'],workspace,result,{})
     return WorkflowExecution(result,workspace,compile_workflow(project.bundle,baseline['flow'],lambda b:_Projection()))
+
+
+def qa_history(work_root):
+    """Read-only lineage: every candidate (oldest first) and every QA round, with their links."""
+    root=Path(work_root).resolve();store=_store(root)
+    candidates=[]
+    for record in store.versions('qa_reference'):
+        ref=_read_version(store,'qa_reference',record.version)
+        qa=WorkWorkspace.open(ref['workspace']);data=json.loads(qa.read_artifact('qa_candidate'))
+        candidates.append(dict(sequence=data.get('sequence',1),identity=ref['identity'],supersedes=data.get('supersedes'),
+                               workspace=ref['workspace'],decision=_read(qa,'qa_decision')['terminal'] if qa.versions('qa_decision') else None))
+    by_identity={c['identity']:c for c in candidates}
+    rounds=[]
+    for item in qa_rounds(WorkWorkspace.open(root)):
+        produced=item['produced']
+        if produced is not None and produced['workspace'] is None and produced['identity'] in by_identity:
+            produced=dict(produced,workspace=by_identity[produced['identity']]['workspace'])  # schema-1 record
+        rounds.append(dict(item,produced=produced))
+    return dict(candidates=candidates,rounds=rounds)
 
 
 def accept_v2_candidate(work_root,*,git_executable=None):

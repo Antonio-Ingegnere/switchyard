@@ -17,7 +17,9 @@ from switchyard.provider_process import ProviderExecutionError
 from switchyard.provider_stages import ProviderRuntimeConfig, render_invocation
 from switchyard.qa_lifecycle import (create_qa_candidate, accept_v2_work, LifecycleError, fix_records)
 from switchyard.recovery import (execute_recoverable_v2_work, attach_qa_candidate, qa_fix_v2_work,
-                                 accept_v2_candidate, resume_v2_work, recovery_status, RecoveryBlocked)
+                                 accept_v2_candidate, resume_v2_work, recovery_status, qa_history, RecoveryBlocked)
+from switchyard.qa_lifecycle import fix_store
+from runtime import RunResult
 from switchyard.work_contract import WorkWorkspace
 from switchyard import recovery
 
@@ -65,7 +67,7 @@ class Stages:
         return Stage()
 
 
-class QaFixTests(unittest.TestCase):
+class QaFixBase(unittest.TestCase):
     def setUp(self):
         self.temp = TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name).resolve(); self.target = self.root/'target'; self.target.mkdir()
@@ -122,6 +124,8 @@ class QaFixTests(unittest.TestCase):
         return [e.state.split(':')[2] if e.state.startswith('@v2:') else e.state
                 for e in self.events()[since:] if e.kind == 'state_entered']
 
+
+class QaFixTests(QaFixBase):
     # 1
     def test_qa_fix_rejected_outside_ready_for_manual_qa(self):
         with self.assertRaises(Exception):
@@ -253,8 +257,12 @@ class QaFixTests(unittest.TestCase):
 
     def test_second_round_obeys_unreset_state_visit_budget(self):
         self.deliver(); self.qa_fix()
+        second = Path(recovery_status(self.work)['qa_candidate']['workspace'])
+        frozen = {p: p.read_bytes() for p in (second/'manifest.jsonl', self.work/'qa_fix'/'manifest.jsonl',
+                                              self.work/'recovery'/'manifest.jsonl', self.work/'events.jsonl')}
         with self.assertRaises(RecoveryBlocked) as ctx:
             self.qa_fix('Still wrong in dark mode.')  # DIAGNOSE already used both of its visits.
+        self.assertEqual({p: p.read_bytes() for p in frozen}, frozen)  # No partial round, #2 untouched.
         self.assertEqual(ctx.exception.reason, 'invocation_budget_exhausted')
         status = recovery_status(self.work)
         self.assertEqual((status['qa_candidate']['sequence'], status['qa_candidate']['decision'], status['qa_fix_rounds']),
@@ -402,6 +410,7 @@ class QaFixTests(unittest.TestCase):
     def test_direct_accept_flow_is_unchanged(self):
         self.deliver()
         status = recovery_status(self.work)
+        self.assertEqual((status['current_candidate_sequence'], status['current_qa_round'], status['qa_round_open']), (1, None, False))
         self.assertEqual((status['terminal'], status['qa_candidate']['sequence'], status['qa_fix_rounds']), ('READY_FOR_MANUAL_QA', 1, 0))
         self.assertEqual(self.first.identity, status['qa_candidate']['identity'])
         self.assertEqual(self.events()[-1].state, 'READY_FOR_MANUAL_QA')
@@ -425,6 +434,123 @@ class QaFixTests(unittest.TestCase):
         self.assertEqual((code, json.loads(out)['terminal']), (0, 'ACCEPTED'))
         self.assertEqual(run('work', 'accept', str(self.work))[0], 2)
 
+
+ROUND1, ROUND2 = 'Round one: rename does nothing.', 'Round two: rename loses focus.'
+
+
+class RepeatedQaRoundTests(QaFixBase):
+    """Durable QA rounds: #1 -round 1-> #2 -round 2-> #3, all in one work and one run."""
+    def setUp(self):
+        super().setUp()
+        for state in ('DIAGNOSE', 'FIX', 'VERIFY'):
+            self.data['flows']['bugfix']['states'][state]['budget']['visits'] = 3
+        self.data['flows']['bugfix']['limits']['run_invocations'] = 9
+        self.text = self.save_config()
+
+    def two_rounds(self):
+        self.deliver(); self.qa_fix(ROUND1)
+        self.round1 = qa_history(self.work)['rounds'][0]
+        self.round1_bytes = (self.work/'qa_fix'/'manifest.jsonl').read_bytes()
+        self.qa_fix(ROUND2)
+
+    def assert_lineage(self):
+        history = qa_history(self.work)
+        c1, c2, c3 = history['candidates']
+        self.assertEqual([c['sequence'] for c in (c1, c2, c3)], [1, 2, 3])
+        self.assertEqual((c1['supersedes'], c2['supersedes'], c3['supersedes']), (None, c1['identity'], c2['identity']))
+        self.assertEqual(len({c1['identity'], c2['identity'], c3['identity']}), 3)
+        self.assertEqual([c['decision'] for c in (c1, c2)], ['REOPENED', 'REOPENED'])
+        r1, r2 = history['rounds']
+        self.assertEqual((r1['round'], r1['feedback'], r1['rejected']['identity'], r1['produced']['identity'], r1['open']),
+                         (1, ROUND1, c1['identity'], c2['identity'], False))
+        self.assertEqual((r2['round'], r2['feedback'], r2['rejected']['identity'], r2['produced']['identity'], r2['open']),
+                         (2, ROUND2, c2['identity'], c3['identity'], False))
+        self.assertEqual((r1['produced']['workspace'], r2['produced']['workspace']), (c2['workspace'], c3['workspace']))
+        self.assertEqual(WorkWorkspace.open(c1['workspace']).read_artifact('qa_feedback'), ROUND1)
+        self.assertEqual(WorkWorkspace.open(c2['workspace']).read_artifact('qa_feedback'), ROUND2)
+        status = recovery_status(self.work)
+        self.assertEqual((status['current_candidate_sequence'], status['current_qa_round'], status['qa_round_open'], status['terminal']),
+                         (3, 2, False, 'READY_FOR_MANUAL_QA'))
+        self.assertEqual(len([e for e in self.events() if e.kind == 'run_started']), 1)
+        return c1, c2, c3
+
+    def test_two_rounds_lineage_context_and_accept_latest_only(self):
+        self.deliver(); self.qa_fix(ROUND1)
+        round1 = qa_history(self.work)['rounds'][0]; store_bytes = (self.work/'qa_fix'/'manifest.jsonl').read_bytes()
+        c2 = recovery_status(self.work)['qa_candidate']; c2_bytes = (Path(c2['workspace'])/'manifest.jsonl').read_bytes()
+        calls = len(self.stages.calls)
+        self.qa_fix(ROUND2)
+        # Round 1 is immutable history: its records are a byte prefix of the store, unchanged after round 2.
+        self.assertTrue((self.work/'qa_fix'/'manifest.jsonl').read_bytes().startswith(store_bytes))
+        self.assertEqual(dict(qa_history(self.work)['rounds'][0], produced=round1['produced']), round1)
+        self.assertTrue((Path(c2['workspace'])/'manifest.jsonl').read_bytes().startswith(c2_bytes))  # #2 only gained its decision.
+        # Round-2 corrective model stages act on the latest rejection only.
+        for call in self.stages.calls[calls:calls+2]:
+            rendered = render_invocation(call)
+            self.assertIn(ROUND2, rendered); self.assertNotIn(ROUND1, rendered); self.assertIn(c2['identity'], rendered)
+        c1, c2, c3 = self.assert_lineage()
+        for old in (c1, c2):
+            with self.assertRaisesRegex(LifecycleError, 'already finalized'):
+                accept_v2_work(self.target, old['workspace'])
+        decision = accept_v2_candidate(self.work)
+        self.assertEqual((decision.terminal, decision.candidate_identity), ('ACCEPTED', c3['identity']))
+        self.assertEqual(self.git('show', 'HEAD:source.py'), 'fixed-3')
+        self.assertEqual(qa_history(self.work)['candidates'][2]['decision'], 'ACCEPTED')
+
+    def test_crash_during_round_two_reject_is_not_duplicated(self):
+        self.deliver(); self.qa_fix(ROUND1)
+        with patch('switchyard.recovery.finish_reopen_v2_work', crash_once(recovery.finish_reopen_v2_work)):
+            with self.assertRaises(Crash):
+                self.qa_fix(ROUND2)
+        status = recovery_status(self.work)
+        self.assertEqual((status['terminal'], status['current_qa_round'], status['qa_round_open'], status['current_candidate_sequence']),
+                         ('REOPENED', 2, True, 2))
+        self.qa_fix(ROUND2)  # Retry finishes round 2.
+        self.assert_lineage()
+        self.assertEqual(len(fix_store(WorkWorkspace.open(self.work)).versions('qa_fix_request')), 2)
+
+    def test_crash_during_candidate_three_publication_does_not_create_four(self):
+        self.deliver(); self.qa_fix(ROUND1)
+        with patch('switchyard.recovery.resolve_fix_request', crash_once(recovery.resolve_fix_request)):
+            with self.assertRaises(Crash):
+                self.qa_fix(ROUND2)
+        status = recovery_status(self.work)
+        self.assertEqual((status['terminal'], status['current_candidate_sequence'], status['qa_round_open']), ('INTERRUPTED', 3, True))
+        resume_v2_work(self.work, self.text, self.config)
+        self.assert_lineage()
+        self.assertEqual(sorted(p.name for p in (self.work/'qa').iterdir() if not p.name.startswith('.')), ['candidate-2', 'candidate-3'])
+        self.assertEqual(accept_v2_candidate(self.work).terminal, 'ACCEPTED')
+
+    def test_previous_single_round_format_stays_readable_and_resumable(self):
+        # Records written by the first committed slice: schema-1 resolution without explicit links.
+        def legacy(workspace, identity, sequence, _workspace):
+            requests, _ = fix_records(workspace)
+            fix_store(workspace).write_artifact('qa_fix_resolved', json.dumps(
+                dict(round=len(requests), superseding_identity=identity, sequence=sequence), sort_keys=True, separators=(',', ':'))+'\n')
+        self.deliver()
+        with patch('switchyard.recovery.resolve_fix_request', legacy):
+            self.qa_fix(ROUND1)
+        status = recovery_status(self.work)
+        self.assertEqual((status['current_candidate_sequence'], status['current_qa_round'], status['qa_round_open']), (2, 1, False))
+        (round1,) = qa_history(self.work)['rounds']
+        self.assertEqual(round1['produced']['workspace'], status['qa_candidate']['workspace'])  # Recovered from qa_reference.
+        self.qa_fix(ROUND2)
+        self.assert_lineage()
+        self.assertEqual(accept_v2_candidate(self.work).terminal, 'ACCEPTED')
+
+    def test_round_two_refuses_a_candidate_outside_the_lineage(self):
+        self.deliver(); self.qa_fix(ROUND1)
+        # An embedder attaching an unrelated (sequence-1) candidate must not silently fork the lineage.
+        history = tuple(read_events(self.work/'events.jsonl'))
+        foreign = create_qa_candidate(self.target, WorkWorkspace.open(self.work), RunResult(history[-1].state, history),
+                                      'bugfix', self.root/'foreign')
+        attach_qa_candidate(self.work, self.root/'foreign')
+        frozen = {p: p.read_bytes() for p in (self.root/'foreign'/'manifest.jsonl', self.work/'qa_fix'/'manifest.jsonl')}
+        with self.assertRaises(RecoveryBlocked) as ctx:
+            self.qa_fix(ROUND2)
+        self.assertEqual(ctx.exception.reason, 'qa_lineage_mismatch')
+        self.assertEqual({p: p.read_bytes() for p in frozen}, frozen)
+        self.assertEqual(foreign.identity, recovery_status(self.work)['qa_candidate']['identity'])
 
 if __name__ == '__main__':
     unittest.main()
