@@ -129,6 +129,7 @@ class StageOutputContractTests(unittest.TestCase):
             replace(contract, allowed_outcomes=('x'*MAX_OUTPUT_CONTRACT_BYTES,))
         payload = asdict(context); del payload['output_contract']; del payload['binding']['executor_allowed_outcomes']
         del payload['human_clarification']
+        del payload['qa_feedback']  # Empty optional QA feedback also preserves the legacy budget.
         del payload['sources']  # Empty optional sources preserve the legacy context byte budget.
         size = len(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode())
         replace(wrapper, max_context_bytes=size)._context(InvocationRequest(WorkUnit(REQUEST)))

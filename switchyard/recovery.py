@@ -15,8 +15,9 @@ import shutil
 import stat
 import subprocess
 import time
+import uuid
 
-from runtime import WorkUnit, run, Event, ExecutionError
+from runtime import WorkUnit, run, Event, ExecutionError, RunResult
 from runtime.recording import JsonlRecorder
 from .observability import read_events, summarize_runs
 from .simple_config import simple_config_from_text
@@ -29,12 +30,17 @@ from .human_input import HumanInputRecorder, active_request, write_answer, valid
 from .provider_stages import ProviderStageExecutorResolver
 from .provider_process import ProviderExecutionError
 from .git_safety import GitRepository
-from .qa_lifecycle import withdraw_qa_candidate
+from .qa_lifecycle import (withdraw_qa_candidate, finish_reopen_v2_work, accept_v2_work, create_qa_candidate,
+                           fix_records, write_fix_request, resolve_fix_request, validate_feedback,
+                           revalidate_candidate, _load as _load_candidate, LifecycleError)
 
 CATALOG = {name:ArtifactSpec('json') for name in
            ('baseline','checkpoint','operation','qa_reference','rollback_intent')}
 CATALOG['request'] = ArtifactSpec('text',source='request')
 CONFIG_PATH = '.switchyard/config.yaml'
+QA_READY = 'READY_FOR_MANUAL_QA'
+# Durable marker: the corrective run finished at QA but its new candidate is not yet current.
+PUBLICATION_PENDING = 'candidate_publication_pending'
 
 
 class RecoveryBlocked(ValueError):
@@ -302,7 +308,7 @@ def _drive(project,flow,request,root,config,store,repo,history=None,recover_to=N
     else:
         waits = [e for e in result.events if e.kind=='budget_exceeded' and compiled.flow.states[e.state].wait_for=='human_input']
         details = dict(reason='human_input_round_limit', diagnostic=f'Clarification limit {waits[-1].limit} reached for {waits[-1].state}; review the request before starting further work.') if waits else {}
-        _operation(store,'delivery_done',terminal=result.terminal_state,**details)
+        _complete_delivery(root,store,repo,flow,workspace,result,details)
     return WorkflowExecution(result,workspace,compiled)
 
 
@@ -419,6 +425,15 @@ def _route(project, flow, terminal):
     return spec.resume_to if spec is not None and spec.kind == 'recoverable_terminal' else None
 
 
+def _qa_route(project, flow):
+    """The corrective entry state declared by the frozen QA terminal (`resume_to`), if reopen is enabled."""
+    lifecycle = getattr(project, 'lifecycle', None)
+    spec = project.bundle.flow(flow).states.get(QA_READY)
+    if lifecycle is None or not lifecycle.reopen or spec is None or spec.kind != 'recoverable_terminal':
+        return None
+    return spec.resume_to
+
+
 def _state_status(project, flow, state):
     spec = project.bundle.flow(flow).states.get(state)
     return dict(state_kind=None if spec is None else spec.kind,
@@ -443,6 +458,12 @@ def resume_v2_work(work_root,config_text,provider_runtime_config,reason=''):
         target=None
         if op['phase']=='waiting_for_human':
             return _continue_human(root,store,config_text,provider_runtime_config)
+        if op['phase']=='reopened':
+            return _continue_corrective(root,store,baseline,config_text,provider_runtime_config,reason)
+        if _rejection_pending(store,op,root):
+            return _complete_qa_fix(root,store,baseline,config_text,provider_runtime_config)
+        if op['phase']=='interrupted' and op.get('reason')==PUBLICATION_PENDING:
+            return _finish_publication(root,store,baseline,provider_runtime_config)
         if op['phase']=='delivery_done':
             target=_route(_frozen_project(baseline),baseline['flow'],op.get('terminal'))
             if target is None or store.versions('qa_reference'):
@@ -503,22 +524,27 @@ def recovery_status(work_root):
         except RecoveryBlocked:pass  # Another controller still owns the active invocation.
     if phase=='waiting_for_human':
         return _human_status(work_root,store)
-    terminal={'running':'RUNNING','interrupted':'INTERRUPTED','rolled_back':'ROLLED_BACK','rollback_running':'ROLLBACK_BLOCKED'}.get(phase,op.get('terminal'))
-    if phase=='delivery_done' and store.versions('qa_reference'):
+    terminal={'running':'RUNNING','interrupted':'INTERRUPTED','reopened':'REOPENED','rolled_back':'ROLLED_BACK','rollback_running':'ROLLBACK_BLOCKED'}.get(phase,op.get('terminal'))
+    if phase=='delivery_done' and op.get('terminal')==QA_READY and store.versions('qa_reference'):
         ref=_read(store,'qa_reference')
         if not (Path(ref['workspace'])/'manifest.jsonl').is_file():
             raise RecoveryBlocked('RECOVERY_BLOCKED','qa_workspace_unavailable')
         qa=WorkWorkspace.open(ref['workspace'])
         if qa.versions('qa_decision'):terminal=_read(qa,'qa_decision')['terminal']
+        if _rejection_pending(store,op,work_root):terminal='REOPENED'  # Durably requested, not yet finalized.
     project=_frozen_project(base)
-    workflow_state=op.get('terminal') if phase=='delivery_done' else op.get('state')
+    workflow_state=op.get('terminal') if phase=='delivery_done' else (QA_READY if phase=='reopened' else op.get('state'))
     lifecycle=_state_status(project,base['flow'],workflow_state)
     recovery_source='runtime_interruption' if phase=='interrupted' else ('workflow' if phase=='delivery_done' else None)
     resumable=False;route=None;accounting={};blocked=None
     try:
         if phase=='delivery_done' and not store.versions('qa_reference'):
             route=_route(project,base['flow'],terminal)
-        if route or (phase=='interrupted' and op.get('resume_safe')):
+        if phase=='reopened' or _rejection_pending(store,op,work_root):
+            route=_qa_route(project,base['flow'])
+        if phase=='interrupted' and op.get('reason')==PUBLICATION_PENDING:
+            route,resumable=QA_READY,True
+        elif route or (phase=='interrupted' and op.get('resume_safe')):
             compiled=compile_workflow(project.bundle,base['flow'],lambda b:_Projection())
             history=tuple(read_events(Path(work_root)/'events.jsonl'))
             void=_void(_operations(store),history,compiled,Path(work_root).resolve())
@@ -530,6 +556,14 @@ def recovery_status(work_root):
             resumable=blocked is None
             route=route or (op.get('state') if resumable else None)
     except Exception:pass
+    qa_history = {}
+    if store.versions('qa_reference'):
+        ref=_read(store,'qa_reference');qa_ws=WorkWorkspace.open(ref['workspace'])
+        requests,resolved=fix_records(WorkWorkspace.open(work_root))
+        sequence=json.loads(qa_ws.read_artifact('qa_candidate')).get('sequence',1)
+        qa_history=dict(qa_candidate=dict(sequence=sequence,identity=ref['identity'],workspace=ref['workspace'],
+                            decision=_read(qa_ws,'qa_decision')['terminal'] if qa_ws.versions('qa_decision') else None),
+                        qa_fix_rounds=len(requests),qa_fix_open=len(requests)>len(resolved))
     human_history = {}
     if (Path(work_root)/'human_input/manifest.jsonl').is_file():
         question, answer = active_request(WorkWorkspace.open(work_root))
@@ -542,9 +576,9 @@ def recovery_status(work_root):
     return dict(work_id=Path(work_root).name,target=base['snapshot']['identity']['target'],flow=base['flow'],phase=phase,terminal=terminal,
                 state=op.get('state'),workflow_state=workflow_state,reason=op.get('reason'),diagnostic=op.get('diagnostic'),resume_allowed=resumable,resume_to=route,
                 recovery_source=recovery_source,**lifecycle,
-                **accounting,**human_history,**({'resume_blocked':blocked} if blocked else {}),
+                **accounting,**human_history,**qa_history,**({'resume_blocked':blocked} if blocked else {}),
                 **({'provider_failure':op['provider_failure']} if phase=='interrupted' and 'provider_failure' in op else {}),
-                rollback_allowed=phase in ('interrupted','delivery_done','rollback_running') and not op.get('checkpoint_uncertain',False) and terminal!='ACCEPTED')
+                rollback_allowed=phase in ('interrupted','delivery_done','rollback_running','reopened') and not op.get('checkpoint_uncertain',False) and terminal!='ACCEPTED')
 
 
 def attach_qa_candidate(work_root,qa_root):
@@ -564,7 +598,7 @@ def rollback_v2_work(work_root,reason=''):
     root=Path(work_root).resolve()
     with _lock(root):
         store=_store(root);base=_read(store,'baseline');op=_read(store,'operation')
-        if op['phase'] not in ('interrupted','delivery_done','rollback_running','waiting_for_human'):
+        if op['phase'] not in ('interrupted','delivery_done','rollback_running','waiting_for_human','reopened'):
             raise RecoveryBlocked('ROLLBACK_BLOCKED','delivery_not_in_rollback_state')
         if store.versions('qa_reference'):
             ref=_read(store,'qa_reference');qa=WorkWorkspace.open(ref['workspace'])
@@ -741,3 +775,163 @@ def answer_v2_work(work_root, request_id, answer, config_text, provider_runtime_
         if _read(store,'operation')['phase'] != 'waiting_for_human':
             raise RecoveryBlocked('ANSWER_BLOCKED','work_not_waiting_for_human')
         return _continue_human(root,store,config_text,provider_runtime_config,request_id,answer,resume_to)
+
+
+def _corrective_plan(root,store,baseline,config_text,config):
+    """Every precondition of a corrective continuation; no durable side effects."""
+    frozen=_frozen_project(baseline)
+    target=_qa_route(frozen,baseline['flow'])
+    if target is None:raise RecoveryBlocked('QA_FIX_BLOCKED','no_declared_reopen_route')
+    try:project=_frozen_project(baseline,config_text)
+    except ValueError as exc:
+        raise RecoveryBlocked('RESUME_BLOCKED','invalid_configuration: '+str(exc)[:512]) from None
+    if _semantic(config_text)!=_semantic(baseline['config']):
+        raise RecoveryBlocked('RESUME_BLOCKED','semantic_configuration_changed_new_delivery_required')
+    repo=_Repo(config.working_directory);snap,_=repo.snapshot()
+    checkpoint=_read(store,'checkpoint')
+    _drift(checkpoint['snapshot'],snap,'RESUME_BLOCKED',ignore=(CONFIG_PATH,))
+    history=tuple(read_events(root/'events.jsonl'));summarize_runs(history)
+    if not history or (history[-1].kind,history[-1].state)!=('run_finished',QA_READY):
+        raise RecoveryBlocked('RESUME_BLOCKED','incomplete_event_history')
+    compiled=compile_workflow(project.bundle,baseline['flow'],lambda b:_Projection())
+    enter=compiled.entry_states[target];void=_void(_operations(store),history,compiled,root)
+    refusal=_refusal(_accounting(project,compiled,history,void,enter))
+    if refusal:raise RecoveryBlocked('RESUME_BLOCKED',refusal)
+    workspace=WorkWorkspace.open(root)
+    if _manifest(root)!=checkpoint['manifest']:raise RecoveryBlocked('RESUME_BLOCKED','artifact_history_changed')
+    missing=[a for a in project.bundle.flow(baseline['flow']).states[target].consumes if not workspace.versions(a)]
+    if missing:raise RecoveryBlocked('RESUME_BLOCKED','recovery_inputs_missing',missing)
+    return project,repo,history,void,enter,target
+
+
+def _continue_corrective(root,store,baseline,config_text,config,reason=''):
+    """REOPENED -> declared corrective entry, same run, same budgets, same history."""
+    project,repo,history,void,enter,target=_corrective_plan(root,store,baseline,config_text,config)
+    requests,resolved=fix_records(WorkWorkspace.open(root))
+    _operation(store,'running',recovery=dict(from_terminal=QA_READY,resume_to=target,reason=reason,qa_fix_round=len(requests)))
+    workspace=WorkWorkspace.open(root)
+    return _drive(project,baseline['flow'],workspace.read_artifact('request'),root,config,store,repo,history,enter,void)
+
+
+def _open_round(workspace):
+    requests,resolved=fix_records(workspace)
+    return requests[-1] if len(requests)>len(resolved) else None
+
+
+def _rejection_pending(store,op,root):
+    """qa-fix intent is durable but the work has not yet entered REOPENED (interrupted qa-fix)."""
+    return (op['phase']=='delivery_done' and op.get('terminal')==QA_READY
+            and _open_round(WorkWorkspace.open(root)) is not None)
+
+
+def qa_fix_v2_work(work_root,feedback,config_text,provider_runtime_config):
+    """Human QA rejection of the current candidate; continue the SAME work through its declared route.
+
+    Durable order: preflight (no writes) -> qa_fix_request (intent, feedback) -> candidate REOPENED
+    -> operation `reopened` -> corrective run. An interrupted call is finished by retrying with the
+    same feedback or by `resume`; it never opens a second round or rejects a candidate twice."""
+    validate_feedback(feedback)
+    root=Path(work_root).resolve()
+    with _lock(root):
+        store=_store(root);baseline=_read(store,'baseline');op=_read(store,'operation')
+        pending=_open_round(WorkWorkspace.open(root)) if op['phase'] in ('reopened','delivery_done') else None
+        if pending is not None and (op['phase']=='reopened' or _rejection_pending(store,op,root)):
+            if pending['feedback']!=feedback:
+                raise RecoveryBlocked('QA_FIX_BLOCKED','qa_fix_in_progress_with_different_feedback: use resume')
+            if op['phase']=='reopened':
+                return _continue_corrective(root,store,baseline,config_text,provider_runtime_config,'qa_fix')
+            return _complete_qa_fix(root,store,baseline,config_text,provider_runtime_config)
+        if op['phase']!='delivery_done' or op.get('terminal')!=QA_READY or not store.versions('qa_reference'):
+            raise RecoveryBlocked('QA_FIX_BLOCKED','work_not_ready_for_manual_qa')
+        ref=_read(store,'qa_reference')
+        try:qa,candidate,identity=_load_candidate(ref['workspace'])
+        except (LifecycleError,OSError):raise RecoveryBlocked('QA_FIX_BLOCKED','qa_workspace_unavailable') from None
+        if identity!=ref['identity']:raise RecoveryBlocked('QA_FIX_BLOCKED','qa_candidate_identity_mismatch')
+        if qa.versions('qa_decision') or qa.versions('qa_intent'):
+            raise RecoveryBlocked('QA_FIX_BLOCKED','candidate_already_finalized')
+        _corrective_plan(root,store,baseline,config_text,provider_runtime_config)  # Refuse before any write.
+        write_fix_request(WorkWorkspace.open(root),flow=baseline['flow'],reopen_to=_qa_route(_frozen_project(baseline),baseline['flow']),
+            feedback=feedback,candidate_workspace=ref['workspace'],identity=identity,candidate=candidate,work_id=root.name)
+        return _complete_qa_fix(root,store,baseline,config_text,provider_runtime_config)
+
+
+def _complete_qa_fix(root,store,baseline,config_text,config):
+    """Finish a durably requested rejection from its record; idempotent up to the corrective run."""
+    pending=_open_round(WorkWorkspace.open(root));ref=_read(store,'qa_reference')
+    if pending['rejected_candidate']['identity']!=ref['identity']:
+        raise RecoveryBlocked('RECOVERY_BLOCKED','qa_fix_candidate_mismatch')
+    _corrective_plan(root,store,baseline,config_text,config)
+    try:finish_reopen_v2_work(baseline['snapshot']['identity']['target'],ref['workspace'],pending['feedback'])
+    except (LifecycleError,OSError) as exc:
+        raise RecoveryBlocked('QA_FIX_BLOCKED','candidate_reopen_failed: '+str(exc)[:512]) from None
+    _operation(store,'reopened',terminal='REOPENED',qa_fix_round=pending['round'],rejected_candidate=ref['identity'])
+    return _continue_corrective(root,store,baseline,config_text,config,'qa_fix')
+
+
+def _complete_delivery(root,store,repo,flow,workspace,result,details):
+    """Corrective QA-ready is published only after its new candidate is current."""
+    if result.terminal_state==QA_READY and _open_round(workspace) is not None:
+        _operation(store,'interrupted',reason=PUBLICATION_PENDING,state=QA_READY,resume_safe=False)
+        try:_publish_corrective_candidate(root,store,repo,flow,workspace,result)
+        except Exception as exc:
+            _operation(store,'interrupted',reason=PUBLICATION_PENDING,state=QA_READY,resume_safe=False,
+                       diagnostic=(type(exc).__name__+': '+str(exc))[:2048])
+            raise
+    _operation(store,'delivery_done',terminal=result.terminal_state,**details)
+
+
+def _publish_corrective_candidate(root,store,repo,flow,workspace,result):
+    """Idempotent: build -> atomically name -> make current (qa_reference) -> close the round."""
+    pending=_open_round(workspace);rejected=pending['rejected_candidate']
+    sequence,supersedes=rejected['sequence']+1,rejected['identity']
+    final=(Path(root)/'qa'/f'candidate-{sequence}').resolve()
+    ref=_read(store,'qa_reference')
+    if ref['identity']==supersedes:
+        if final.exists():
+            # A crash after the atomic rename: reuse only if it is this round's candidate and still exact.
+            candidate,identity=revalidate_candidate(repo.workspace,final)
+            if (candidate.get('sequence'),candidate.get('supersedes'),candidate['source_workspace'])!=(sequence,supersedes,str(Path(root).resolve())):
+                raise RecoveryBlocked('RECOVERY_BLOCKED','qa_candidate_conflict')
+        else:
+            final.parent.mkdir(exist_ok=True)
+            building=final.parent/f'.candidate-{sequence}.{uuid.uuid4().hex}'
+            identity=create_qa_candidate(repo.workspace,workspace,result,flow,building,sequence=sequence,supersedes=supersedes).identity
+            os.rename(building,final)
+            fd=os.open(final.parent,os.O_RDONLY)
+            try:os.fsync(fd)
+            finally:os.close(fd)
+        _put(store,'qa_reference',dict(workspace=str(final),identity=identity))
+    elif ref['workspace']!=str(final):
+        raise RecoveryBlocked('RECOVERY_BLOCKED','qa_reference_conflict')
+    else:identity=ref['identity']
+    resolve_fix_request(workspace,identity,sequence)
+
+
+def _finish_publication(root,store,baseline,config):
+    """Resume an interrupted/failed candidate publication; no stage is executed."""
+    repo=_Repo(config.working_directory)
+    checkpoint=_read(store,'checkpoint')
+    _drift(checkpoint['snapshot'],repo.snapshot()[0],'RESUME_BLOCKED',ignore=(CONFIG_PATH,))
+    history=tuple(read_events(root/'events.jsonl'));summarize_runs(history)
+    if not history or (history[-1].kind,history[-1].state)!=('run_finished',QA_READY):
+        raise RecoveryBlocked('RESUME_BLOCKED','incomplete_event_history')
+    if _manifest(root)!=checkpoint['manifest']:raise RecoveryBlocked('RESUME_BLOCKED','artifact_history_changed')
+    project=_frozen_project(baseline);workspace=WorkWorkspace.open(root,project.bundle.artifacts)
+    result=RunResult(QA_READY,history)
+    _complete_delivery(root,store,repo,baseline['flow'],workspace,result,{})
+    return WorkflowExecution(result,workspace,compile_workflow(project.bundle,baseline['flow'],lambda b:_Projection()))
+
+
+def accept_v2_candidate(work_root,*,git_executable=None):
+    """Human ACCEPT of the work's CURRENT candidate; rejected or superseded candidates are unreachable."""
+    root=Path(work_root).resolve()
+    with _lock(root):
+        store=_store(root);baseline=_read(store,'baseline');op=_read(store,'operation')
+        if op['phase']!='delivery_done' or op.get('terminal')!=QA_READY or not store.versions('qa_reference'):
+            raise RecoveryBlocked('ACCEPT_BLOCKED','work_not_ready_for_manual_qa')
+        requests,resolved=fix_records(WorkWorkspace.open(root))
+        if len(requests)!=len(resolved):raise RecoveryBlocked('ACCEPT_BLOCKED','corrective_cycle_open')
+        ref=_read(store,'qa_reference')
+        _,_,identity=_load_candidate(ref['workspace'])
+        if identity!=ref['identity']:raise RecoveryBlocked('ACCEPT_BLOCKED','qa_candidate_identity_mismatch')
+        return accept_v2_work(baseline['snapshot']['identity']['target'],ref['workspace'],git_executable=git_executable)

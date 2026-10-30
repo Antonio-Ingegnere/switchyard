@@ -276,8 +276,15 @@ class _Git(GitRepository):
 
 
 def create_qa_candidate(target, source_workspace: WorkWorkspace, source_result: RunResult,
-                        source_flow: str, work_root, *, git_executable=None) -> QaCandidate:
-    """Capture after a QA-ready delivery. work_root is a fresh, external WorkWorkspace."""
+                        source_flow: str, work_root, *, git_executable=None,
+                        sequence: int = 1, supersedes: str | None = None) -> QaCandidate:
+    """Capture after a QA-ready delivery. work_root is a fresh, external WorkWorkspace.
+
+    `sequence`/`supersedes` mark a corrective candidate of the same work; the first
+    candidate keeps its original byte-for-byte shape and therefore its identity.
+    """
+    if type(sequence) is not int or sequence < 1 or (sequence > 1) != (supersedes is not None):
+        raise LifecycleError('corrective candidates require a sequence and the superseded identity')
     if (not isinstance(source_result, RunResult) or source_result.terminal_state != 'READY_FOR_MANUAL_QA'
             or type(source_flow) is not str or not re.fullmatch(r'[A-Za-z][A-Za-z0-9_.-]*', source_flow)):
         raise LifecycleError('source must be a READY_FOR_MANUAL_QA delivery')
@@ -300,6 +307,9 @@ def create_qa_candidate(target, source_workspace: WorkWorkspace, source_result: 
                      'source_workspace':str(source_workspace.root.resolve()),
                      'source_request_sha256':source_workspace.latest_artifact('request').sha256,
                      'commit_message':f'{source_flow}: accept reviewed V2 work'}
+        if sequence > 1:
+            # Identity must advance even if a corrective cycle reproduces identical bytes.
+            candidate.update(sequence=sequence, supersedes=supersedes)
         # A moving worktree must not yield a silently mixed candidate snapshot.
         _require(git.snapshot() == snapshot, 'candidate_drift')
     except (_Blocked, ScopeBlocked, OSError) as exc:
@@ -385,6 +395,46 @@ def reopen_v2_work(target, work_root, feedback: str) -> QaDecision:
     return _decision(target, work_root, 'reopen', feedback)
 
 
+def finish_reopen_v2_work(target, work_root, feedback: str) -> QaDecision:
+    """Idempotent REOPEN for a durably requested same-work QA fix.
+
+    REOPEN never mutates Git, so a reopen interrupted after its intent (and maybe its
+    feedback) was written is completed deterministically; an already REOPENED candidate
+    with identical feedback is a no-op. Any other finalized/pending state is refused."""
+    workspace, candidate, identity = _load(work_root)
+    if not workspace.versions('qa_intent') and not workspace.versions('qa_decision'):
+        return reopen_v2_work(target, work_root, feedback)
+    with _exclusive(workspace.root/'.lifecycle.lock'):
+        intents = workspace.versions('qa_intent')
+        intent = json.loads(workspace.read_artifact('qa_intent')) if intents else None
+        if (len(intents) != 1 or intent != {'candidate_identity':identity, 'decision':'reopen', 'phase':'started'}
+                or str(Path(target).resolve()) != candidate['target']):
+            raise LifecycleError('unresolved lifecycle intent; manual inspection required')
+        if workspace.versions('qa_feedback') and workspace.read_artifact('qa_feedback') != feedback:
+            raise LifecycleError('recorded REOPEN feedback differs; manual inspection required')
+        result = QaDecision(identity, 'reopen', 'REOPENED')
+        if workspace.versions('qa_decision'):
+            if json.loads(workspace.read_artifact('qa_decision'))['terminal'] != 'REOPENED' or not workspace.versions('qa_feedback'):
+                raise LifecycleError('candidate already finalized')
+            return result
+        if not workspace.versions('qa_feedback'):
+            workspace.write_artifact('qa_feedback', feedback)
+        workspace.write_artifact('qa_decision', _json({**asdict(result), 'source_run_id':candidate['source_run_id'],
+                                 'correlation_id':candidate['correlation_id'], 'feedback_artifact':'qa_feedback'}))
+        return result
+
+
+def revalidate_candidate(target, work_root, *, git_executable=None):
+    """Identity of an existing candidate that still exactly matches the worktree."""
+    _, candidate, identity = _load(work_root)
+    try:
+        _require(str(Path(target).resolve()) == candidate['target'], 'worktree_identity_changed')
+        _Git(target, git_executable).revalidate(candidate)
+    except (_Blocked, ScopeBlocked, OSError) as exc:
+        raise LifecycleError(getattr(exc, 'reason', 'git_inspection_failed')) from None
+    return candidate, identity
+
+
 def withdraw_qa_candidate(work_root, candidate_identity):
     """Permanently retire pre-accept QA for explicit delivery rollback; retain audit."""
     workspace, candidate, identity = _load(work_root)
@@ -400,3 +450,80 @@ def withdraw_qa_candidate(work_root, candidate_identity):
             raise LifecycleError('unresolved QA intent; inspect before rollback')
         workspace.write_artifact('qa_intent', _json(dict(candidate_identity=identity, decision='rollback', phase='started')))
         workspace.write_artifact('qa_decision', _json(asdict(QaDecision(identity,'rollback','ROLLED_BACK'))))
+
+
+# --- Same-work corrective QA feedback -------------------------------------------------
+# One durable free-text record per rejected candidate, held beside the work (like human_input)
+# so corrective stages read bounded context instead of a transcript. Routing stays in recovery.
+FIX_CATALOG = {'request': ArtifactSpec('text', source='request'),
+               'qa_fix_request': ArtifactSpec('json'), 'qa_fix_resolved': ArtifactSpec('json')}
+MAX_FEEDBACK_BYTES = 8192
+MAX_LISTED_FILES = 100
+
+
+def validate_feedback(text):
+    try:
+        size = len(text.encode('utf-8')) if type(text) is str and text.strip() else 0
+    except UnicodeError:
+        size = 0
+    if not size:
+        raise LifecycleError('qa-fix requires non-empty UTF-8 feedback')
+    if size > MAX_FEEDBACK_BYTES:
+        raise LifecycleError(f'qa-fix feedback exceeds {MAX_FEEDBACK_BYTES} UTF-8 bytes')
+
+
+def fix_store(workspace, create=False):
+    path = workspace.root/'qa_fix'
+    if not create and not (path/'manifest.jsonl').exists():
+        return None
+    store = WorkWorkspace.open(path, FIX_CATALOG)
+    store.initialize_request(workspace.read_artifact('request'))
+    return store
+
+
+def fix_records(workspace):
+    """(requests, resolved) in order; resolved[i] closes requests[i] with the superseding candidate."""
+    store = fix_store(workspace)
+    if store is None:
+        return (), ()
+    requests = tuple(json.loads(store.read_artifact('qa_fix_request', r.version)) for r in store.versions('qa_fix_request'))
+    resolved = tuple(json.loads(store.read_artifact('qa_fix_resolved', r.version)) for r in store.versions('qa_fix_resolved'))
+    if len(resolved) > len(requests) or any(r['round'] != i+1 for i, r in enumerate(resolved)):
+        raise WorkContractError('inconsistent QA fix history')
+    return requests, resolved
+
+
+def write_fix_request(workspace, *, flow, reopen_to, feedback, candidate_workspace, identity, candidate, work_id):
+    validate_feedback(feedback)
+    requests, resolved = fix_records(workspace)
+    if len(requests) != len(resolved):
+        raise WorkContractError('a corrective QA cycle is already open')
+    files = sorted(candidate['files'])
+    record = dict(schema_version=1, round=len(requests)+1, work_id=work_id, flow=flow,
+                  reopen_to=reopen_to, feedback=feedback,
+                  rejected_candidate=dict(identity=identity, workspace=str(candidate_workspace),
+                      sequence=candidate.get('sequence', 1), base_head=candidate['base_head'],
+                      branch=candidate['branch'],
+                      files={p: candidate['files'][p] for p in files[:MAX_LISTED_FILES]},
+                      files_omitted=max(0, len(files)-MAX_LISTED_FILES)))
+    fix_store(workspace, create=True).write_artifact('qa_fix_request', _json(record))
+    return record
+
+
+def resolve_fix_request(workspace, superseding_identity, sequence):
+    requests, resolved = fix_records(workspace)
+    if len(requests) != len(resolved)+1:
+        raise WorkContractError('no open corrective QA cycle')
+    fix_store(workspace).write_artifact('qa_fix_resolved', _json(dict(
+        round=len(requests), superseding_identity=superseding_identity, sequence=sequence)))
+
+
+def qa_fix_snapshots(workspace):
+    """Latest open feedback only: rejected-candidate summary plus the human's text."""
+    from .context_transport import ArtifactSnapshot
+    requests, resolved = fix_records(workspace)
+    if len(requests) == len(resolved):
+        return ()
+    store = fix_store(workspace)
+    record = store.versions('qa_fix_request')[len(requests)-1]
+    return (ArtifactSnapshot(record, store.read_artifact('qa_fix_request', record.version)),)

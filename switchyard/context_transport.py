@@ -8,6 +8,7 @@ from runtime import (DiagnosticInput, DiagnosticPayload, ExecutorResult,
                      InvocationRequest, InvocationResponse)
 from .source_resolution import prepare_sources
 from .human_input import clarification_snapshots
+from .qa_lifecycle import qa_fix_snapshots
 from .workflow_compiler import ExecutionBinding
 from .work_contract import (ArtifactProducer, ArtifactRecord, HandoffRecord,
                             WorkContractError, WorkWorkspace, MicroSpecField, MICROSPEC_FIELDS,
@@ -117,9 +118,10 @@ class StageInvocation:
     output_contract: StageOutputContract = field(kw_only=True)
     sources: tuple[ArtifactSnapshot, ...] = field(default=(), kw_only=True)
     human_clarification: tuple[ArtifactSnapshot, ...] = field(default=(), kw_only=True)
+    qa_feedback: tuple[ArtifactSnapshot, ...] = field(default=(), kw_only=True)
 
     def __post_init__(self):
-        _tuples(self, 'artifacts', 'sources', 'human_clarification')
+        _tuples(self, 'artifacts', 'sources', 'human_clarification', 'qa_feedback')
         _require(type(self.output_contract) is StageOutputContract, 'expected StageOutputContract')
 
 
@@ -183,18 +185,26 @@ class ContextualExecutor:
         if clarification and not any(a.record.name == 'request' for a in snapshots):
             record = self.workspace.latest_artifact('request')
             snapshots.insert(0, ArtifactSnapshot(record, self.workspace.read_artifact('request', record.version)))
+        # Open corrective QA cycle: bounded latest feedback for model stages; verifiers do not read prose.
+        qa_feedback = qa_fix_snapshots(self.workspace) if self.binding.provider != 'command' else ()
+        if qa_feedback and not any(a.record.name == 'request' for a in snapshots):
+            record = self.workspace.latest_artifact('request')
+            snapshots.insert(0, ArtifactSnapshot(record, self.workspace.read_artifact('request', record.version)))
         sources = ()
         if self.source_workspace is not None and (self.entry_source_context or clarification):
             record = self.source_workspace.latest_artifact('resolved_sources')
             _require(record is not None, 'missing resolved sources')
             sources = (ArtifactSnapshot(record, self.source_workspace.read_artifact(record.name, record.version)),)
         context = StageInvocation(self.binding, tuple(snapshots), previous, request.diagnostics,
-                                  output_contract=self.output_contract, sources=sources, human_clarification=clarification)
+                                  output_contract=self.output_contract, sources=sources, human_clarification=clarification,
+                                  qa_feedback=qa_feedback)
         # Canonical size accounting only, not a provider prompt format.
         input_data = asdict(context)
         del input_data['output_contract']
         if not clarification:
             del input_data['human_clarification']
+        if not qa_feedback:
+            del input_data['qa_feedback']
         if not sources:
             del input_data['sources']  # preserve legacy byte accounting
         del input_data['binding']['executor_allowed_outcomes']

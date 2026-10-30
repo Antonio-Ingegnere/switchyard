@@ -353,3 +353,45 @@ runtime/CLI together before using lists or schema-v2 human records: older releas
 do not support multi-target contracts or their null-target pending events. Downgrading
 a work that has new human records is unsupported; old records remain readable by
 the updated release. Package version is unchanged by this implementation.
+
+## Corrective manual QA (`qa-fix`)
+
+A work in `READY_FOR_MANUAL_QA` with an attached candidate can be rejected with free-text
+feedback and continue **as the same work** (same run, events, artifacts and budgets):
+
+```text
+READY_FOR_MANUAL_QA -- qa-fix <feedback> --> REOPENED -> <resume_to of the QA terminal> -> ... -> READY_FOR_MANUAL_QA
+```
+
+- The route is declared in the frozen workflow: `READY_FOR_MANUAL_QA: {terminal: true, resume_to: DIAGNOSE}`.
+  Without it (or with `lifecycle.reopen: false`) `qa-fix` is refused before anything is written.
+  As before, plain `resume` follows that route only while no candidate is attached.
+- Budgets are not reset. The target state needs remaining visits and invocations
+  (e.g. `rung_budget_scope: visit`, `budget: {visits: 2}`); otherwise `qa-fix` is refused and the candidate stays QA-ready.
+- Feedback (≤ 8192 bytes) and a bounded summary of the rejected candidate are stored in `<work>/qa_fix`
+  (`qa_fix_request`). While that round is open, every non-command stage receives only this record
+  (`MANUAL QA REJECTION` section) plus the request; no transcript is replayed.
+
+Durable order of `qa-fix` (each step is finished, never repeated, by retrying the same command or `resume`):
+
+1. preflight: route, configuration, checkpoint drift, history, budgets (no writes);
+2. `qa_fix_request` — the durable intent; status now reports `REOPENED`, accept is refused;
+3. candidate #N finalized `REOPENED` (`qa_intent`, `qa_feedback`, `qa_decision`; an interrupted reopen is completed);
+4. operation `reopened`;
+5. corrective run from the declared entry state (an interruption is an ordinary `interrupted` resume).
+
+When a corrective run reaches `READY_FOR_MANUAL_QA`:
+
+1. operation `interrupted` / `candidate_publication_pending` (status `INTERRUPTED`, never QA-ready);
+2. candidate #N+1 built in a temporary directory with `sequence` and `supersedes`, then atomically renamed
+   to `<work>/qa/candidate-N+1` (identity advances even for identical bytes);
+3. latest `qa_reference` → candidate #N+1;
+4. `qa_fix_resolved` closes the round;
+5. operation `delivery_done` / `READY_FOR_MANUAL_QA`.
+
+A failure or crash in 2–4 leaves `candidate_publication_pending`; `resume` rechecks checkpoint drift and
+history, reuses an already renamed candidate only if it still matches the worktree, and executes no stage.
+`rollback` stays available. `accept` (`accept_v2_candidate` / `switchyard work accept`) accepts only the
+current candidate; rejected candidates are finalized and cannot be accepted.
+
+CLI: `switchyard work qa-fix <work_root> "<feedback>" [--config FILE]`, `switchyard work accept <work_root>`.

@@ -27,14 +27,16 @@ def _parser():
     commands = parser.add_subparsers(dest='command', required=True)
     work = commands.add_parser('work', allow_abbrev=False)
     actions = work.add_subparsers(dest='action', required=True)
-    for action in ('status', 'answer', 'resume', 'rollback'):
+    for action in ('status', 'answer', 'resume', 'rollback', 'qa-fix', 'accept'):
         operation = actions.add_parser(action, allow_abbrev=False)
         operation.add_argument('work_root')
         if action == 'answer':
             operation.add_argument('request_id')
             operation.add_argument('answer')
             operation.add_argument('--resume-to', help='select a declared human continuation target')
-        if action in ('answer', 'resume'):
+        if action == 'qa-fix':
+            operation.add_argument('feedback', help='free-text manual QA feedback for the current candidate')
+        if action in ('answer', 'resume', 'qa-fix'):
             operation.add_argument('--config')
             operation.add_argument('--claude-executable')
             operation.add_argument('--codex-executable')
@@ -126,17 +128,23 @@ def main(argv=None) -> int:
 
 
 def _work_command(args):
-    from .recovery import recovery_status, answer_v2_work, resume_v2_work, rollback_v2_work
+    from .recovery import (recovery_status, answer_v2_work, resume_v2_work, rollback_v2_work,
+                           qa_fix_v2_work, accept_v2_candidate)
     from .provider_stages import ProviderRuntimeConfig
     try:
         status = recovery_status(args.work_root)
         if args.action == 'rollback':
             status = rollback_v2_work(args.work_root)
-        elif args.action in ('answer', 'resume'):
+        elif args.action == 'accept':
+            accept_v2_candidate(args.work_root)
+            status = recovery_status(args.work_root)
+        elif args.action in ('answer', 'resume', 'qa-fix'):
             config_path = Path(args.config) if args.config else Path(status['target'])/'.switchyard/config.yaml'
             config_text = config_path.read_text(encoding='utf-8')
             provider = ProviderRuntimeConfig(status['target'], args.claude_executable, args.codex_executable)
-            if args.action == 'answer':
+            if args.action == 'qa-fix':
+                qa_fix_v2_work(args.work_root, args.feedback, config_text, provider)
+            elif args.action == 'answer':
                 answer_v2_work(args.work_root, args.request_id, args.answer, config_text, provider, resume_to=args.resume_to)
             else:
                 resume_v2_work(args.work_root, config_text, provider)
