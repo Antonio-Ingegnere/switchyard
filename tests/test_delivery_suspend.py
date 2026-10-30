@@ -106,9 +106,10 @@ class SuspendTests(SuspendBase):
         self.assertEqual(order, [('suspended', False, True)])
         self.assertEqual((status['terminal'], status['suspended'], status['suspend_reason'], status['shelf_id'],
                           status['workspace_cleanup_pending'], status['delivery_worktree_state'], status['resume_allowed'],
-                          status['resume_blocked'], status['workflow_state'], status['rollback_allowed']),
-                         ('SUSPENDED', True, 'Pause for the weekend', 'shelf-1', False, 'removed', False,
-                          'suspended_restore_not_implemented', 'IMPLEMENT', False))
+                          status['restore_pending'], status['workflow_state'], status['rollback_allowed']),
+                         ('SUSPENDED', True, 'Pause for the weekend', 'shelf-1', False, 'removed', True,
+                          False, 'IMPLEMENT', False))
+        self.assertNotIn('resume_blocked', status)  # `resume` restores the shelf.
         self.assertNotIn('isolation_blocked', status)  # Intentionally absent worktree is healthy.
         self.assertEqual((status['base_sha'], status['delivery_branch']), (self.base, 'refs/heads/switchyard/work'))
         # Worktree gone (via Git), branch kept at its HEAD, source untouched, all other durable state untouched.
@@ -210,13 +211,12 @@ class SuspendTests(SuspendBase):
     # 19
     def test_every_other_operation_refuses_suspended_explicitly(self):
         self.interrupted(); suspend_v2_work(self.work)
-        for operation in (lambda: resume_v2_work(self.work, self.text, self.config),
-                          lambda: answer_v2_work(self.work, 'r', 'a', self.text, self.config),
+        for operation in (lambda: answer_v2_work(self.work, 'r', 'a', self.text, self.config),
                           lambda: qa_fix_v2_work(self.work, 'x', self.text, self.config),
                           lambda: accept_v2_candidate(self.work), lambda: rollback_v2_work(self.work)):
             with self.assertRaises(RecoveryBlocked) as ctx:
                 operation()
-            self.assertEqual(ctx.exception.reason, 'suspended_restore_not_implemented')
+            self.assertEqual(ctx.exception.reason, 'work_suspended: resume restores it first')
         out = subprocess.run([sys.executable, '-m', 'switchyard', 'work', 'status', str(self.work)], cwd=ROOT,
                              capture_output=True, text=True, check=True).stdout
         self.assertEqual(json.loads(out)['terminal'], 'SUSPENDED')

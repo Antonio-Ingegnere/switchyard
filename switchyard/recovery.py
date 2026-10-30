@@ -613,7 +613,14 @@ def resume_v2_work(work_root,config_text,provider_runtime_config,reason=''):
     root=Path(work_root).resolve()
     with _lock(root):
         store=_store(root);baseline=_read(store,'baseline');op=_read(store,'operation')
-        _not_suspended(op,'RESUME_BLOCKED')
+        if op['phase']=='suspending':raise RecoveryBlocked('RESUME_BLOCKED','suspend_in_progress: retry suspend')
+        if op['phase'] in ('suspended','restoring'):
+            # Restore first (control-plane work: no provider, no budget), then continue the suspended
+            # operation exactly as before. Workflow terminals and human waits are restored only.
+            from .suspend import restore_suspended
+            op=restore_suspended(root,store,baseline,op)
+            if op['phase']=='waiting_for_human' or (op['phase']=='delivery_done' and not _rejection_pending(store,op,root)):
+                return recovery_status(root)  # A durable but unfinished qa-fix rejection continues below.
         target=None
         if op['phase']=='waiting_for_human':
             return _continue_human(root,store,config_text,provider_runtime_config)
@@ -687,7 +694,7 @@ def recovery_status(work_root):
     if phase=='waiting_for_human':
         return _human_status(work_root,store)
     terminal={'running':'RUNNING','interrupted':'INTERRUPTED','reopened':'REOPENED','rolled_back':'ROLLED_BACK','rollback_running':'ROLLBACK_BLOCKED','accepted':'ACCEPTED',
-              'suspending':'SUSPENDING','suspended':'SUSPENDED'}.get(phase,op.get('terminal'))
+              'suspending':'SUSPENDING','suspended':'SUSPENDED','restoring':'RESTORING'}.get(phase,op.get('terminal'))
     if phase=='delivery_done' and op.get('terminal')==QA_READY and store.versions('qa_reference'):
         ref=_read(store,'qa_reference')
         if not (Path(ref['workspace'])/'manifest.jsonl').is_file():
@@ -720,6 +727,7 @@ def recovery_status(work_root):
             resumable=blocked is None
             route=route or (op.get('state') if resumable else None)
     except Exception:pass
+    if phase in ('suspended','restoring'):resumable=True  # `resume` restores the shelf first.
     qa_status = {}
     if store.versions('qa_reference'):
         ref=_read(store,'qa_reference');qa_ws=WorkWorkspace.open(ref['workspace'])
@@ -763,31 +771,33 @@ def _isolation_status(base,op=None):
     iso=base.get('isolation')
     if iso is None:return dict(isolated=False)
     removed=op is not None and op['phase']=='suspended' and op.get('worktree_removed') is True
+    restoring=op is not None and op['phase']=='restoring'  # Partially recreated: never reported healthy.
     problem=None
-    if not removed:
+    if not (removed or restoring):
         try:_check_isolation(iso,'RECOVERY_BLOCKED')
         except RecoveryBlocked as exc:problem=exc.reason
     return dict(isolated=True,base_sha=iso['base_sha'],delivery_branch=iso['delivery_branch'],
                 delivery_worktree=iso['delivery_worktree'],source_worktree=iso['source_worktree'],
-                delivery_worktree_state='removed' if removed else ('invalid' if problem else 'present'),
+                delivery_worktree_state='removed' if removed else ('restoring' if restoring else ('invalid' if problem else 'present')),
                 **({'isolation_blocked':problem} if problem else {}))
 
 
-SUSPEND_PHASES=('suspending','suspended')
+SUSPEND_PHASES=('suspending','suspended','restoring')
 
 
 def _suspend_status(op):
     if op['phase'] not in SUSPEND_PHASES:return {}
     shelf=op.get('shelf') or {}
-    return dict(suspended=op['phase']=='suspended',suspend_reason=op.get('reason') or None,
+    return dict(suspended=op['phase'] in ('suspended','restoring'),suspend_reason=op.get('reason') or None,
                 shelf_id=shelf.get('id',op.get('shelf_id')),shelf_manifest_sha256=shelf.get('manifest_sha256'),
                 workspace_cleanup_pending=op['phase']=='suspended' and op.get('worktree_removed') is not True,
-                resume_blocked='suspended_restore_not_implemented' if op['phase']=='suspended' else 'suspend_in_progress: retry suspend')
+                restore_pending=op['phase']=='restoring',
+                **({'resume_blocked':'suspend_in_progress: retry suspend'} if op['phase']=='suspending' else {}))
 
 
 def _not_suspended(op,terminal):
-    """SUSPENDED is intentional, not a missing worktree; restoring it is not implemented yet."""
-    if op['phase']=='suspended':raise RecoveryBlocked(terminal,'suspended_restore_not_implemented')
+    """SUSPENDED is intentional, not a missing worktree: only `resume` restores it."""
+    if op['phase'] in ('suspended','restoring'):raise RecoveryBlocked(terminal,'work_suspended: resume restores it first')
     if op['phase']=='suspending':raise RecoveryBlocked(terminal,'suspend_in_progress: retry suspend')
 
 

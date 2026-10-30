@@ -551,7 +551,7 @@ identities are created. Earlier rounds' evidence is not delivered. Command stage
 
 `suspend_v2_work(work_root, reason='')` / `switchyard work suspend <work_root> [reason]` shelves an isolated
 delivery worktree as Switchyard-owned data, records `SUSPENDED`, then removes the worktree. It needs no
-provider configuration. Restoring a suspended work is the next slice.
+provider configuration. `resume` restores it (below).
 
 - **Eligible:** isolated work whose operation is `interrupted`, `delivery_done` (e.g. `READY_FOR_MANUAL_QA`,
   `NEEDS_HUMAN`), `waiting_for_human` or `reopened`. Refused: `running` or a live provider
@@ -579,10 +579,41 @@ provider configuration. Restoring a suspended work is the next slice.
   (`workspace_cleanup_pending: worktree_remove_failed`). A completed suspend is a no-op.
 - **Status:** `terminal: SUSPENDED` (or `SUSPENDING` while incomplete, never `SUSPENDED` without a verified
   shelf), `suspended`, `suspend_reason`, `shelf_id`, `shelf_manifest_sha256`, `workspace_cleanup_pending`,
-  `delivery_worktree_state` (`present`/`removed`/`invalid`), `workflow_state` of the suspended position,
-  `resume_allowed: false`, `resume_blocked: suspended_restore_not_implemented`. A worktree removed by suspend
-  is healthy; a missing worktree of active work is still `isolation_blocked: delivery_worktree_missing`.
-  `resume`, `answer`, `qa-fix`, `accept` and `rollback` refuse with `suspended_restore_not_implemented`.
+  `delivery_worktree_state` (`present`/`removed`/`restoring`/`invalid`), `workflow_state` of the suspended
+  position, `restore_pending`, `resume_allowed: true`. A worktree removed by suspend is healthy; a missing
+  worktree of active work is still `isolation_blocked: delivery_worktree_missing`. `answer`, `qa-fix`,
+  `accept` and `rollback` refuse with `work_suspended: resume restores it first`.
 - History, budgets, QA rounds, findings, evidence, candidates and human input are untouched; only the
   recovery operation log gains records. Files ignored by `.gitignore` are not product state and are removed
   with the worktree.
+
+### Resume of a suspended work (#4, slice 2)
+
+`resume_v2_work` / `switchyard work resume` on a `SUSPENDED` (or interrupted `RESTORING`) work restores the
+same work (same work id, branch, HEAD, worktree path and Git admin directory) before anything else.
+
+- **Verify first, no writes:** the shelf manifest against its recorded SHA-256, every shelf blob, every
+  referenced Git blob (`shelf_missing_or_corrupt`, `shelf_manifest_digest_mismatch`, `shelf_blob_corrupt`,
+  `shelf_git_blob_missing`), the shelf's provenance against the frozen isolation record, and the delivery
+  branch: it must still exist at the shelf's `head` (`delivery_branch_moved`; never reset, rebased or
+  transplanted) and descend from `base_sha`. Source/main movement is irrelevant. The recorded path must be
+  absent (`delivery_restore_path_conflict`) and the branch not checked out elsewhere
+  (`delivery_restore_worktree_conflict`); nothing is deleted. On refusal the work stays `SUSPENDED`.
+- **Order:** operation `restoring` -> `git worktree add <recorded path> <delivery branch>` (hooks disabled)
+  -> the worktree's Git admin directory is given back its recorded name if Git chose another (recorded
+  checkpoints and candidates name it) -> rebuild: `read-tree --reset -u <head>` and `clean -ffdx` in this
+  restore-owned worktree, deletions applied, every shelf entry written with its exact bytes, mode and
+  permissions (symlinks as links), the index rebuilt from the shelf (staged entries included) -> the worktree
+  is re-described exactly as suspend describes it and must equal the shelf (`restore_verification_failed`
+  otherwise) -> the suspended operation is re-instated with `restored_shelf`. Until then status is
+  `RESTORING`, never a healthy active work.
+- **Retry:** a crash anywhere converges: no worktree -> add it; registered worktree on the delivery branch ->
+  rebuilt from HEAD + shelf unless it already equals the shelf, which is then reused untouched. A suspended
+  worktree whose removal never finished is adopted only if it still equals the shelf.
+- **Continuation:** `READY_FOR_MANUAL_QA`, other workflow terminals and human waits are restored only
+  (`resume` returns the status; no provider runs, the same human request stays pending). `INTERRUPTED`,
+  `REOPENED` and an unfinished qa-fix rejection continue through the ordinary resume rules, including the
+  checkpoint drift check: restoring is exact, so only edits made outside the shelf are refused.
+- Restoring is control-plane work: it adds no run event, invocation, visit or attempt. Candidates, QA rounds,
+  findings and evidence are unchanged; no candidate is published. Shelves are kept; the next suspend creates
+  `shelf-<n+1>`. Ignored files are not shelved, so they are not restored either.

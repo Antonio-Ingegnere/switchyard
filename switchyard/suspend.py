@@ -3,7 +3,7 @@
 The shelf is Switchyard-owned data under `<work_root>/suspend/<shelf-id>/`: `manifest.json` describes
 the COMPLETE product state of the delivery worktree (the same Git-visible files the recovery snapshot
 and candidates use) relative to the delivery branch HEAD; `blobs/<sha256>` holds every byte not already
-in that commit. No stash, no commits. Restoring is a later slice.
+in that commit. No stash, no commits. `resume` restores it (see `restore_suspended`).
 
 Durable order: eligibility (no writes) -> operation `suspending` (intent: shelf id, reason, previous
 operation) -> build `.<shelf-id>.<random>` -> verify -> atomic rename to `<shelf-id>` -> operation
@@ -18,7 +18,7 @@ import shutil
 import uuid
 
 from .recovery import (RecoveryBlocked, _lock, _store, _read, _operation, _operations, _check_isolation,
-                       _Repo, _worktrees, _sha, _json, recovery_status)
+                       _Repo, _worktrees, _branch_head, _sha, _json, recovery_status)
 from .work_contract import WorkWorkspace
 
 SHELF_SCHEMA = 1
@@ -82,23 +82,36 @@ def _manifest_digest(path):
     return _sha((path/'manifest.json').read_bytes())
 
 
-def verify_shelf(path, repo=None):
-    """Integrity of a shelf: every referenced byte exists and matches its SHA-256. Returns the manifest."""
+def verify_shelf(path, repo=None, terminal='SUSPEND_BLOCKED', manifest_sha256=None):
+    """Integrity of a shelf: the manifest (and its recorded digest), every shelf blob, and, given the
+    repository, every referenced Git blob exists and matches. Returns the manifest; never repairs."""
     path = Path(path)
-    manifest = json.loads((path/'manifest.json').read_bytes())
-    if manifest.get('schema') != SHELF_SCHEMA:
-        raise RecoveryBlocked('SUSPEND_BLOCKED', 'unsupported_shelf_schema')
+    try:
+        raw = (path/'manifest.json').read_bytes()
+        manifest = json.loads(raw)
+    except (OSError, ValueError):
+        raise RecoveryBlocked(terminal, 'shelf_missing_or_corrupt', [str(path)]) from None
+    if manifest_sha256 is not None and _sha(raw) != manifest_sha256:
+        raise RecoveryBlocked(terminal, 'shelf_manifest_digest_mismatch', [str(path)])
+    if type(manifest) is not dict or manifest.get('schema') != SHELF_SCHEMA:
+        raise RecoveryBlocked(terminal, 'unsupported_shelf_schema')
     refs = [(name, e) for name, e in manifest['files'].items()]
     refs += [(e['path'], e) for e in manifest['index'].get('entries', ())]
     for name, entry in refs:
         if 'blob' in entry:
             digest = entry['blob']
-            if len(digest) != 64 or _sha((path/'blobs'/digest).read_bytes()) != digest:
-                raise RecoveryBlocked('SUSPEND_BLOCKED', 'shelf_blob_corrupt', [name])
+            try:
+                ok = len(digest) == 64 and _sha((path/'blobs'/digest).read_bytes()) == digest
+            except OSError:
+                ok = False
+            if not ok:
+                raise RecoveryBlocked(terminal, 'shelf_blob_corrupt', [name])
         elif repo is not None:
-            data = repo.git('cat-file', 'blob', entry['git_blob'])
+            code, data = repo.probe('cat-file', 'blob', entry['git_blob'])
+            if code:
+                raise RecoveryBlocked(terminal, 'shelf_git_blob_missing', [name])
             if 'sha256' in entry and _sha(data) != entry['sha256']:
-                raise RecoveryBlocked('SUSPEND_BLOCKED', 'shelf_git_blob_mismatch', [name])
+                raise RecoveryBlocked(terminal, 'shelf_git_blob_mismatch', [name])
     return manifest
 
 
@@ -204,3 +217,147 @@ def suspend_v2_work(work_root, reason=''):
                         previous_operation=intent['previous_operation'], worktree_removed=False,
                         shelf=dict(id=shelf_id, path='suspend/'+shelf_id, manifest_sha256=_manifest_digest(final)))
         return _cleanup(root, store, iso, op)
+
+
+# --- Restore (#4 slice 2): SUSPENDED -> RESTORING -> the suspended operation, same work ------------------
+# Durable order: shelf + lineage verified (no writes) -> operation `restoring` (shelf, the suspended
+# operation) -> worktree registered at the recorded path on the delivery branch (admin name reconciled)
+# -> restore-owned rebuild: Git resets the worktree to the shelf HEAD, then every shelf entry, deletion and
+# the index are applied -> the restored worktree is re-described and must equal the shelf exactly ->
+# the suspended operation is re-instated (with `restored_shelf`). Until then status is RESTORING.
+RESTORE = 'RESUME_BLOCKED'
+
+
+def _admin_dir(repo):
+    return os.fsdecode(repo.git('rev-parse', '--absolute-git-dir').strip())
+
+
+def _add_worktree(iso):
+    """Git owns registration; hooks of the user's repository never run for Switchyard's checkout."""
+    _Repo(iso['repository']).git('-c', 'core.hooksPath='+os.devnull, 'worktree', 'add', iso['delivery_worktree'],
+                                 iso['delivery_branch'][len('refs/heads/'):])
+
+
+def _reconcile_admin_name(iso, recorded):
+    """Git names a worktree's admin dir after its basename (+N if taken). Recorded identities (checkpoint,
+    candidates) name the ORIGINAL admin dir, so a recreated worktree takes that name back if it is free."""
+    path = Path(iso['delivery_worktree']); current = _admin_dir(_Repo(path))
+    if current == recorded:
+        return  # The identity string recorded by the baseline/checkpoints/candidates.
+    current, recorded = Path(current).resolve(), Path(recorded).resolve()
+    if current == recorded:
+        return
+    if recorded.exists() or recorded.parent != current.parent:
+        raise RecoveryBlocked(RESTORE, 'delivery_restore_worktree_conflict: recorded worktree name in use', [str(recorded)])
+    os.rename(current, recorded)
+    with (path/'.git').open('w') as out:  # Both links of a worktree: <worktree>/.git and <admin>/gitdir.
+        out.write('gitdir: '+str(recorded)+'\n'); out.flush(); os.fsync(out.fileno())
+    if Path(_admin_dir(_Repo(path))).resolve() != recorded:
+        raise RecoveryBlocked(RESTORE, 'delivery_restore_worktree_conflict: admin rename failed', [str(recorded)])
+
+
+def _write_entry(repo, shelf, name, entry):
+    data = (shelf/'blobs'/entry['blob']).read_bytes() if 'blob' in entry else repo.git('cat-file', 'blob', entry['git_blob'])
+    if _sha(data) != entry['sha256']:
+        raise RecoveryBlocked(RESTORE, 'shelf_blob_corrupt', [name])
+    path = repo.path(name)  # Repository-relative, no symlinked parents.
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.exists():
+        raise RecoveryBlocked(RESTORE, 'restore_path_type_conflict', [name])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if entry['type'] == 'symlink':
+        os.symlink(os.fsdecode(data), path)
+        try:
+            os.chmod(path, entry['permissions'], follow_symlinks=False)
+        except (NotImplementedError, OSError):
+            pass  # Platforms without lchmod: link permissions are not settable (and not meaningful).
+    else:
+        with path.open('xb') as out:
+            out.write(data); out.flush(); os.fsync(out.fileno())
+        path.chmod(entry['permissions'])
+
+
+def _rebuild(repo, shelf, manifest):
+    """Restore-owned worktree only: Git state of the shelf HEAD, then the shelf applied over it."""
+    lock = Path(str(repo.index_path())+'.lock'); lock.unlink(missing_ok=True)  # Left by a dead restore.
+    repo.git('-c', 'core.hooksPath='+os.devnull, 'read-tree', '--reset', '-u', manifest['head'])
+    repo.git('clean', '-ffdxq')
+    for name in manifest['deleted']:
+        path = repo.path(name)
+        if path.is_symlink() or path.is_file():
+            path.unlink()
+    for name, entry in sorted(manifest['files'].items()):
+        _write_entry(repo, shelf, name, entry)
+    index = manifest['index']
+    if not index['matches_head']:
+        lines = []
+        for entry in index['entries']:
+            if 'git_blob' in entry:
+                oid = entry['git_blob']
+            else:
+                oid = repo.git('hash-object', '-w', '--no-filters', '--stdin',
+                               input=(shelf/'blobs'/entry['blob']).read_bytes()).decode().strip()
+            lines.append(f"{entry['mode']} {oid}\t{entry['path']}\0")
+        repo.git('read-tree', '--empty')
+        repo.git('update-index', '-z', '--index-info', input=''.join(lines).encode('utf-8', 'surrogateescape'))
+    repo.probe('update-index', '-q', '--refresh')  # Stat cache only.
+
+
+def _restored_equals(repo, iso, manifest):
+    try:
+        core, _, _ = _describe(repo, iso)
+    except RecoveryBlocked:
+        return False
+    return core == {k: manifest[k] for k in _CORE}
+
+
+def _finalize(store, intent):
+    """Re-instate the suspended operation: the work is active again exactly where it was suspended."""
+    previous = intent['previous_operation']
+    fields = {k: v for k, v in previous.items() if k not in ('phase', 'timestamp')}
+    return _operation(store, previous['phase'], **{**fields, 'restored_shelf': intent['shelf']['id']})
+
+
+def restore_suspended(root, store, base, op):
+    """Called by `resume` under the work lock for a `suspended` or `restoring` work."""
+    iso = base['isolation']
+    shelf_ref = op['shelf']; shelf = Path(root)/shelf_ref['path']
+    common = _Repo(iso['repository'])
+    manifest = verify_shelf(shelf, common, RESTORE, shelf_ref['manifest_sha256'])
+    if any(manifest.get(k) != iso[k] for k in ('repository', 'delivery_branch', 'base_sha')) or manifest.get('work_id') != Path(root).name:
+        raise RecoveryBlocked(RESTORE, 'shelf_provenance_mismatch')
+    head = _branch_head(common, iso['delivery_branch'])
+    if head is None:
+        raise RecoveryBlocked(RESTORE, 'delivery_branch_missing', [iso['delivery_branch']])
+    if head != manifest['head']:
+        raise RecoveryBlocked(RESTORE, 'delivery_branch_moved', [iso['delivery_branch']])  # Never reset/rebase.
+    if common.probe('merge-base', '--is-ancestor', iso['base_sha'], head)[0] != 0:
+        raise RecoveryBlocked(RESTORE, 'delivery_base_mismatch', [iso['base_sha']])
+    path = Path(iso['delivery_worktree'])
+    listed = _worktrees(common)
+    owner = listed.get(str(path), False)
+    if owner is False and iso['delivery_branch'] in listed.values():
+        raise RecoveryBlocked(RESTORE, 'delivery_restore_worktree_conflict: branch checked out elsewhere', [iso['delivery_branch']])
+    if owner is not False and owner != iso['delivery_branch']:
+        raise RecoveryBlocked(RESTORE, 'delivery_restore_worktree_conflict', [str(path)])
+    if owner is False and (path.exists() or path.is_symlink()):
+        raise RecoveryBlocked(RESTORE, 'delivery_restore_path_conflict', [str(path)])
+    if op['phase'] == 'suspended':
+        if owner is not False:
+            # Cleanup never finished: the suspended worktree itself. Adopt it only if it still IS the shelf.
+            repo = _check_isolation(iso, RESTORE)
+            if not _restored_equals(repo, iso, manifest):
+                raise RecoveryBlocked(RESTORE, 'worktree_changed_since_shelf')
+            return _finalize(store, op)
+        op = _operation(store, 'restoring', shelf=shelf_ref, reason=op.get('reason'),
+                        previous_operation=op['previous_operation'], suspended_at=op['timestamp'])
+    if owner is False:
+        _add_worktree(iso)
+    _reconcile_admin_name(iso, base['snapshot']['identity']['git_dir'])
+    repo = _check_isolation(iso, RESTORE)
+    if not _restored_equals(repo, iso, manifest):  # Fresh, partial or stale: rebuild from HEAD + shelf.
+        _rebuild(repo, shelf, manifest)
+        if not _restored_equals(repo, iso, manifest):
+            raise RecoveryBlocked(RESTORE, 'restore_verification_failed')
+    return _finalize(store, op)
