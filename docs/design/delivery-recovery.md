@@ -617,3 +617,38 @@ same work (same work id, branch, HEAD, worktree path and Git admin directory) be
 - Restoring is control-plane work: it adds no run event, invocation, visit or attempt. Candidates, QA rounds,
   findings and evidence are unchanged; no candidate is published. Shelves are kept; the next suspend creates
   `shelf-<n+1>`. Ignored files are not shelved, so they are not restored either.
+
+## Continuity: adopt prior work (#5, slice 1)
+
+`adopt_v2_work(old_work_root, new_work_root, config_text, provider_runtime_config)` /
+`switchyard work adopt <old_work_root> <new_work_root> [--source DIR] [--config FILE]` creates a NEW isolated
+work W2 (own work id, `switchyard/<new-work-id>` branch, worktree, budgets and history under the current
+configuration) that reuses the durable product of an old work W1. W1 is only read, under its work lock.
+
+- **Same base only:** the source checkout (default: W1's) must pass the normal isolation preflight and be at
+  W1's `base_sha` in the same repository (`ADOPTION_BLOCKED: base_mismatch` / `repository_mismatch`). No
+  rebase, cherry-pick, merge or model call.
+- **Implementation source** (by W1's durable state): ACCEPTED -> `accepted_commit:<sha>` (tree diff
+  base..C from Git); SUSPENDED -> `shelf:<n>` (verified shelf; staging is not carried over); READY_FOR_MANUAL_QA
+  with an undecided current candidate and no open round -> `candidate:<n>` (W1's worktree, proven equal to
+  the candidate first). Interrupted, reopened, waiting, suspend/restore or QA decision in progress ->
+  `implementation_uncertain`; nothing durable -> `no_reusable_implementation`; legacy in-place or pre-v2
+  work -> `unsupported_source_schema`. Checkpoints are fingerprints taken mid-run and are never a source.
+- **Reused product:** the exact request, W1's verified `sources/` store (never re-fetched), and the latest
+  version of every artifact the entry state needs, followed back through their producers (e.g.
+  `implementation_handoff`, `microspec`); each must have the same artifact contract in the current
+  configuration. W1's candidates, QA rounds, decisions and events are provenance only: W2 starts with no
+  candidate and a fresh event log.
+- **Entry:** the single command (deterministic) verifier that routes to `READY_FOR_MANUAL_QA`; W2's run
+  starts there, so current verification always runs. Adoption itself invokes no provider and consumes no
+  budget; VERIFY is ordinary, accounted W2 execution.
+- **Order:** W1 read and every byte verified (no writes) -> W2 store: request, all adopted bytes in W2's own
+  blobs, operation `provisioning` with the isolation record and the adoption plan -> sources copied ->
+  branch at base -> worktree -> rebuilt from base + adopted bytes and verified (paths, bytes, deletions,
+  modes, symlinks, permissions where recorded; index = base) -> baseline with `adoption` -> reused artifacts
+  -> `running`. A retry converges on one branch, worktree and adoption record; W2's partial worktree is
+  rebuilt from base + its own blobs, never from guesses, and W1 is never written.
+- **Status:** `adopted`, `adopted_from_work_id`, `adopted_from_base_sha`, `adopted_implementation_source`,
+  `adoption_entry_state`, `reused_request`, `reused_specification`, `reused_implementation`,
+  `reused_artifacts`, `reused_sources`. The full plan (source identity, changed paths, artifact versions and
+  digests, W1's baseline digest) is in W2's baseline `adoption` record.

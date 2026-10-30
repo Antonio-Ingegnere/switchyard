@@ -27,6 +27,11 @@ def _parser():
     commands = parser.add_subparsers(dest='command', required=True)
     work = commands.add_parser('work', allow_abbrev=False)
     actions = work.add_subparsers(dest='action', required=True)
+    adopt = actions.add_parser('adopt', allow_abbrev=False)
+    adopt.add_argument('old_work_root'); adopt.add_argument('work_root')
+    adopt.add_argument('--source', help='clean source checkout for the new work (default: the old work\'s source checkout)')
+    for flag in ('--config', '--claude-executable', '--codex-executable'):
+        adopt.add_argument(flag)
     for action in ('status', 'answer', 'resume', 'rollback', 'qa-fix', 'accept', 'suspend'):
         operation = actions.add_parser(action, allow_abbrev=False)
         operation.add_argument('work_root')
@@ -138,6 +143,16 @@ def _work_command(args):
                            qa_fix_v2_work, accept_v2_candidate)
     from .provider_stages import ProviderRuntimeConfig
     try:
+        if args.action == 'adopt':
+            from .continuity import adopt_v2_work
+            source = args.source or recovery_status(args.old_work_root).get('source_worktree')
+            if not source:
+                raise ValueError('ADOPTION_BLOCKED: unsupported_source_schema: legacy in-place work')
+            config_text = (Path(args.config) if args.config else Path(source)/'.switchyard/config.yaml').read_text(encoding='utf-8')
+            adopt_v2_work(args.old_work_root, args.work_root, config_text,
+                          ProviderRuntimeConfig(source, args.claude_executable, args.codex_executable))
+            print(json.dumps(recovery_status(args.work_root), ensure_ascii=True, indent=2))
+            return 0
         status = recovery_status(args.work_root)
         if args.action == 'rollback':
             status = rollback_v2_work(args.work_root)

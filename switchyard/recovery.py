@@ -241,7 +241,7 @@ def _provision_preflight(iso):
         raise RecoveryBlocked('DELIVERY_BLOCKED','delivery_worktree_path_exists',[str(path)])
 
 
-def _provision(iso):
+def _provision(iso,pristine=True):
     """Idempotent after the durable intent: create the branch at base_sha, then its worktree. A retry
     adopts an existing branch/worktree only if it exactly matches the recorded provenance (branch at
     base_sha, clean worktree of this repository on that branch). Nothing is ever reset or deleted."""
@@ -259,7 +259,7 @@ def _provision(iso):
             raise RecoveryBlocked('DELIVERY_BLOCKED','delivery_branch_checked_out_elsewhere',[branch])
         # Repository hooks do not run for Switchyard's own checkout.
         source.git('-c','core.hooksPath='+os.devnull,'worktree','add',str(path),branch[len('refs/heads/'):])
-    return _check_isolation(iso,'DELIVERY_BLOCKED',pristine=True)
+    return _check_isolation(iso,'DELIVERY_BLOCKED',pristine=pristine)
 
 
 def _execution(baseline,config,terminal):
@@ -273,7 +273,7 @@ def _execution(baseline,config,terminal):
     return repo,replace(config,working_directory=iso['delivery_worktree'])
 
 
-def _baseline(repo,store,config,flow,isolation=None):
+def _baseline(repo,store,config,flow,isolation=None,extra=None):
     snap,tree=repo.snapshot();sources={}
     for name,fp in snap['files'].items():
         data,mode=repo.content(name)
@@ -285,7 +285,7 @@ def _baseline(repo,store,config,flow,isolation=None):
     index=repo.index_path().read_bytes()
     if repo.snapshot()[0]!=snap:raise RecoveryBlocked('RECOVERY_BLOCKED','worktree_moved_during_baseline')
     _put(store,'baseline',dict(snapshot=snap,sources=sources,index_blob=_blob(store,index),config=config,flow=flow,lifecycle_contract_version=2,
-                                **({'isolation':isolation} if isolation else {})))
+                                **({'isolation':isolation} if isolation else {}),**(extra or {})))
     _put(store,'checkpoint',dict(snapshot=snap,manifest=None))
 
 
@@ -387,7 +387,7 @@ def _provider_failure(cause,binding,started):
                 duration_ms=None if started is None else max(0,(time.time_ns()-started)//1_000_000),output_tail=tail or None)
 
 
-def _drive(project,flow,request,root,config,store,repo,history=None,recover_to=None,void=frozenset(),human_input=None,human_resume_to=None):
+def _drive(project,flow,request,root,config,store,repo,history=None,recover_to=None,void=frozenset(),human_input=None,human_resume_to=None,start=None):
     workspace=WorkWorkspace.open(root,project.bundle.artifacts);workspace.initialize_request(request)
     compiled=None
     try:
@@ -397,7 +397,8 @@ def _drive(project,flow,request,root,config,store,repo,history=None,recover_to=N
             _put(store,'operation',old)
         config=replace(config,process_observer=observe)
         compiled=_compiled(project,flow,workspace,config,store,repo,root)
-        result=run(WorkUnit(request),compiled.flow,compiled.executors,
+        runtime_flow=compiled.flow if start is None else replace(compiled.flow,initial=compiled.entry_states[start])
+        result=run(WorkUnit(request),runtime_flow,compiled.executors,
                    recorder=HumanInputRecorder(workspace,compiled,
                        _Recorder(Path(root)/'events.jsonl',store,compiled,root),
                        before_wait=lambda:_checkpoint(store,repo,root)),resume_from=history,recover_to=recover_to,
@@ -672,7 +673,8 @@ def resume_v2_work(work_root,config_text,provider_runtime_config,reason=''):
 def recovery_status(work_root):
     store=_store(work_root);op=_read(store,'operation')
     if op['phase']=='provisioning':
-        raise RecoveryBlocked('RECOVERY_BLOCKED','delivery_provisioning_incomplete: retry the same delivery start')
+        raise RecoveryBlocked('RECOVERY_BLOCKED','adoption_incomplete: retry the same adopt' if op.get('adoption')
+                              else 'delivery_provisioning_incomplete: retry the same delivery start')
     base=_read(store,'baseline')
     phase=op['phase']
     if phase=='running':
@@ -759,7 +761,7 @@ def recovery_status(work_root):
                              origin_state=question['origin_state'],origin_outcome=question['origin_outcome'])
     return dict(work_id=Path(work_root).name,target=base['snapshot']['identity']['target'],flow=base['flow'],phase=phase,terminal=terminal,
                 state=op.get('state'),workflow_state=workflow_state,reason=op.get('reason'),diagnostic=op.get('diagnostic'),resume_allowed=resumable,resume_to=route,
-                recovery_source=recovery_source,**lifecycle,**_isolation_status(base,op),**_suspend_status(op),
+                recovery_source=recovery_source,**lifecycle,**_isolation_status(base,op),**_suspend_status(op),**_adoption_status(base),
                 **accounting,**human_history,**qa_status,**({'resume_blocked':blocked} if blocked else {}),
                 **({'provider_failure':op['provider_failure']} if phase=='interrupted' and 'provider_failure' in op else {}),
                 rollback_allowed=phase in ('interrupted','delivery_done','rollback_running','reopened') and not op.get('checkpoint_uncertain',False) and terminal!='ACCEPTED')
@@ -783,6 +785,16 @@ def _isolation_status(base,op=None):
 
 
 SUSPEND_PHASES=('suspending','suspended','restoring')
+
+
+def _adoption_status(base):
+    """Compact continuity view (#5): where reused product came from; never W1's history."""
+    adoption=base.get('adoption')
+    if adoption is None:return {}
+    return dict(adopted=True,adopted_from_work_id=adoption['from_work_id'],adopted_from_base_sha=adoption['from_base_sha'],
+                adopted_implementation_source=adoption['implementation_source'],adoption_entry_state=adoption['entry_state'],
+                reused_request=True,reused_specification=adoption['reused_specification'],reused_implementation=True,
+                reused_artifacts=sorted(adoption['reused_artifacts']),reused_sources=adoption['reused_sources'])
 
 
 def _suspend_status(op):
