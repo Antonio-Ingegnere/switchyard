@@ -32,7 +32,7 @@ from .provider_process import ProviderExecutionError
 from .git_safety import GitRepository
 from .qa_lifecycle import (withdraw_qa_candidate, finish_reopen_v2_work, accept_v2_work, create_qa_candidate,
                            fix_records, write_fix_request, resolve_fix_request, qa_rounds,
-                           finding_descriptions, request_findings, finding_states,
+                           finding_inputs, evidence_plan, load_evidence, request_findings, finding_states,
                            revalidate_candidate, _load as _load_candidate, LifecycleError)
 
 CATALOG = {name:ArtifactSpec('json') for name in
@@ -568,7 +568,7 @@ def recovery_status(work_root):
                         current_candidate_sequence=sequence,current_qa_round=len(requests) or None,
                         qa_round_open=len(requests)>len(resolved))
         counts={state:0 for state in ('open','fixed','verified')}
-        for item in qa_history(work_root)['rounds']:
+        for item in qa_history(work_root,include_evidence=False)['rounds']:
             for finding in item['findings']:counts[finding['status']]+=1
         qa_status.update(qa_open_findings=counts['open'],qa_fixed_findings=counts['fixed'],qa_verified_findings=counts['verified'])
     human_history = {}
@@ -831,20 +831,24 @@ def _rejection_pending(store,op,root):
             and _open_round(WorkWorkspace.open(root)) is not None)
 
 
-def qa_fix_v2_work(work_root,feedback,config_text,provider_runtime_config,*,findings=None):
+def qa_fix_v2_work(work_root,feedback,config_text,provider_runtime_config,*,findings=None,attachments=None):
     """Human QA rejection of the current candidate; continue the SAME work through its declared route.
 
-    `feedback` is one finding; `findings` (with feedback=None) is several, in order.
-    Durable order: preflight (no writes) -> qa_fix_request (intent: feedback + findings) -> candidate
-    REOPENED -> operation `reopened` -> corrective run. An interrupted call is finished by retrying with
-    the same findings or by `resume`; it never opens a second round or rejects a candidate twice."""
-    descriptions=finding_descriptions(feedback,findings)
+    `feedback` is one finding; `findings` (with feedback=None) is several, in order, each text or
+    {'description', 'attachments'}. `attachments` belong to the single finding (refused otherwise).
+    Durable order: validate + snapshot attachments, preflight (no writes) -> publish evidence (immutable,
+    atomic) -> qa_fix_request (intent: feedback + findings + evidence refs) -> candidate REOPENED ->
+    operation `reopened` -> corrective run. An interrupted call is finished by retrying with the same
+    input or by `resume`; it never opens a second round or rejects a candidate twice."""
+    inputs=finding_inputs(feedback,findings,attachments)
+    descriptions=tuple(text for text,_ in inputs)
+    fingerprint=tuple((text,tuple(a['sha256'] for a in files)) for text,files in inputs)
     root=Path(work_root).resolve()
     with _lock(root):
         store=_store(root);baseline=_read(store,'baseline');op=_read(store,'operation')
         pending=_open_round(WorkWorkspace.open(root)) if op['phase'] in ('reopened','delivery_done') else None
         if pending is not None and (op['phase']=='reopened' or _rejection_pending(store,op,root)):
-            if tuple(f['description'] for f in request_findings(pending))!=descriptions:
+            if tuple((f['description'],tuple(e['sha256'] for e in f.get('evidence',()))) for f in request_findings(pending))!=fingerprint:
                 raise RecoveryBlocked('QA_FIX_BLOCKED','qa_fix_in_progress_with_different_feedback: use resume')
             if op['phase']=='reopened':
                 return _continue_corrective(root,store,baseline,config_text,provider_runtime_config,'qa_fix')
@@ -861,8 +865,13 @@ def qa_fix_v2_work(work_root,feedback,config_text,provider_runtime_config,*,find
         if resolved and resolved[-1]['superseding_identity']!=identity:
             raise RecoveryBlocked('QA_FIX_BLOCKED','qa_lineage_mismatch')
         _corrective_plan(root,store,baseline,config_text,provider_runtime_config)  # Refuse before any write.
+        requests,_=fix_records(WorkWorkspace.open(root))
+        # Evidence is durable BEFORE the request that references it; a crash here leaves only
+        # unreferenced immutable objects that the same retry reuses (IDs are deterministic).
+        evidence=evidence_plan(root,len(requests)+1,identity,inputs)
         write_fix_request(WorkWorkspace.open(root),flow=baseline['flow'],reopen_to=_qa_route(_frozen_project(baseline),baseline['flow']),
-            descriptions=descriptions,candidate_workspace=ref['workspace'],identity=identity,candidate=candidate,work_id=root.name)
+            descriptions=descriptions,candidate_workspace=ref['workspace'],identity=identity,candidate=candidate,work_id=root.name,
+            evidence=evidence)
         return _complete_qa_fix(root,store,baseline,config_text,provider_runtime_config)
 
 
@@ -933,8 +942,9 @@ def _finish_publication(root,store,baseline,config):
     return WorkflowExecution(result,workspace,compile_workflow(project.bundle,baseline['flow'],lambda b:_Projection()))
 
 
-def qa_history(work_root):
-    """Read-only lineage: every candidate (oldest first) and every QA round, with their links."""
+def qa_history(work_root,*,include_evidence=True):
+    """Read-only lineage: every candidate (oldest first) and every QA round, with their links.
+    Each finding lists its evidence as verified metadata (never bytes)."""
     root=Path(work_root).resolve();store=_store(root)
     candidates=[]
     for record in store.versions('qa_reference'):
@@ -954,7 +964,11 @@ def qa_history(work_root):
         if produced is not None and produced['workspace'] is None and produced['identity'] in by_identity:
             produced=dict(produced,workspace=by_identity[produced['identity']]['workspace'])  # schema-1 record
         rounds.append(dict(item,produced=produced))
-    return dict(candidates=candidates,rounds=list(finding_states(rounds,accepted)))
+    rounds=list(finding_states(rounds,accepted))
+    if include_evidence:
+        rounds=[dict(r,findings=tuple(dict(f,evidence=[load_evidence(root,e['id'],e['sha256']) for e in f.get('evidence',())])
+                                      for f in r['findings'])) for r in rounds]
+    return dict(candidates=candidates,rounds=rounds)
 
 
 def accept_v2_candidate(work_root,*,git_executable=None):

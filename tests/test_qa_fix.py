@@ -18,7 +18,9 @@ from switchyard.provider_stages import ProviderRuntimeConfig, render_invocation
 from switchyard.qa_lifecycle import (create_qa_candidate, accept_v2_work, LifecycleError, fix_records)
 from switchyard.recovery import (execute_recoverable_v2_work, attach_qa_candidate, qa_fix_v2_work,
                                  accept_v2_candidate, resume_v2_work, recovery_status, qa_history, RecoveryBlocked)
-from switchyard.qa_lifecycle import fix_store
+from switchyard.qa_lifecycle import fix_store, evidence_bytes, load_evidence
+from switchyard.work_contract import WorkContractError
+import hashlib
 from runtime import RunResult
 from switchyard.work_contract import WorkWorkspace
 from switchyard import recovery
@@ -704,6 +706,172 @@ class QaFindingTests(QaFixBase):
         self.assertEqual(self.findings(), [[('qa-1-1', F1, 'fixed')], [('qa-2-1', F2A, 'fixed')]])
         accept_v2_candidate(self.work)
         self.assertEqual(self.counts(), (0, 0, 2))
+
+
+
+PNG = b'\x89PNG\r\n\x1a\n' + b'fake screenshot pixels' * 10
+
+
+class QaEvidenceTests(QaFixBase):
+    """Durable evidence linked to findings, stored beside the work and never in the worktree."""
+    def setUp(self):
+        super().setUp()
+        for state in ('DIAGNOSE', 'FIX', 'VERIFY'):
+            self.data['flows']['bugfix']['states'][state]['budget']['visits'] = 3
+        self.data['flows']['bugfix']['limits']['run_invocations'] = 9
+        self.text = self.save_config()
+        self.shot = self.root/'shot.png'; self.shot.write_bytes(PNG)
+        self.console = self.root/'console.txt'; self.console.write_text('TypeError: rename is undefined\n')
+
+    def evidence(self, round_index=0, finding_index=0):
+        return qa_history(self.work)['rounds'][round_index]['findings'][finding_index]['evidence']
+
+    def assert_no_round(self):
+        self.assertFalse((self.work/'qa_fix').exists())
+        self.assertFalse((self.work/'qa'/'evidence').exists())
+        status = recovery_status(self.work)
+        self.assertEqual((status['terminal'], status['qa_candidate']['decision'], status['current_qa_round']),
+                         ('READY_FOR_MANUAL_QA', None, None))
+
+    def test_text_with_attachments_links_metadata_to_candidate_round_and_finding(self):
+        self.deliver()
+        qa_fix_v2_work(self.work, F1, self.text, self.config, attachments=[self.shot, self.console])
+        shot, console = self.evidence()
+        for item, name, mime, data in ((shot, 'shot.png', 'image/png', PNG), (console, 'console.txt', 'text/plain', self.console.read_bytes())):
+            self.assertEqual({k: item[k] for k in ('filename', 'mime_type', 'size', 'sha256', 'candidate_identity', 'qa_round', 'finding_id')},
+                             dict(filename=name, mime_type=mime, size=len(data), sha256=hashlib.sha256(data).hexdigest(),
+                                  candidate_identity=self.first.identity, qa_round=1, finding_id='qa-1-1'))
+            self.assertRegex(item['id'], r'^ev-[0-9a-f]{32}$')
+            self.assertEqual(evidence_bytes(self.work, item['id']), data)
+        self.assertNotEqual(shot['id'], console['id'])
+        self.assertNotIn(str(self.shot), json.dumps(qa_history(self.work)))  # Source path is never authoritative.
+        # Outside the product worktree; never seen by Git.
+        stored = self.work/'qa'/'evidence'/shot['id']/'shot.png'
+        self.assertTrue(stored.is_file()); self.assertFalse(stored.resolve().is_relative_to(self.target))
+        self.assertNotIn('shot.png', self.git('status', '--porcelain', '--untracked-files=all'))
+        # Evidence does not change lifecycle facts.
+        self.assertEqual(self.findings_status(), ['fixed'])
+        self.assertEqual(len([e for e in self.events() if e.kind == 'invocation_started']), 6)
+
+    def findings_status(self):
+        return [f['status'] for r in qa_history(self.work)['rounds'] for f in r['findings']]
+
+    def test_source_changes_do_not_affect_stored_evidence(self):
+        self.deliver()
+        qa_fix_v2_work(self.work, F1, self.text, self.config, attachments=[self.shot])
+        (item,) = self.evidence()
+        self.shot.write_bytes(b'overwritten'); self.shot.unlink()
+        self.assertEqual(evidence_bytes(self.work, item['id']), PNG)
+        self.assertEqual(self.evidence()[0], item)
+
+    def test_invalid_inputs_refuse_before_opening_a_round(self):
+        self.deliver()
+        cases = [[self.root/'missing.png'], [self.root], [self.shot]*11]
+        for paths in cases:
+            with self.assertRaises(LifecycleError):
+                qa_fix_v2_work(self.work, F1, self.text, self.config, attachments=paths)
+            self.assert_no_round()
+        with patch('switchyard.qa_lifecycle.MAX_ATTACHMENT_BYTES', 10):
+            with self.assertRaisesRegex(LifecycleError, 'exceeds'):
+                qa_fix_v2_work(self.work, F1, self.text, self.config, attachments=[self.shot])
+        self.assert_no_round()
+        with self.assertRaisesRegex(LifecycleError, 'ambiguous'):
+            qa_fix_v2_work(self.work, None, self.text, self.config, findings=[F1, F2A], attachments=[self.shot])
+        self.assert_no_round()
+
+    def test_filenames_are_sanitized_and_references_cannot_traverse(self):
+        weird = self.root/'..a b$(c).PNG'; weird.write_bytes(PNG)
+        meta = self.root/'metadata.json'; meta.write_text('{}')
+        self.deliver()
+        qa_fix_v2_work(self.work, F1, self.text, self.config, attachments=[weird, meta])
+        names = [e['filename'] for e in self.evidence()]
+        self.assertEqual(names, ['a_b__c_.PNG', '_metadata.json'])
+        for bad in ('../../target', 'ev-../x', str(self.target/'source.py')):
+            with self.assertRaises(WorkContractError):
+                load_evidence(self.work, bad)
+        # Tampered metadata pointing outside its directory is refused, not followed.
+        item = self.evidence()[0]; path = self.work/'qa'/'evidence'/item['id']/'metadata.json'
+        tampered = dict(json.loads(path.read_text()), filename='../../../target/source.py')
+        path.chmod(0o644); path.write_text(json.dumps(tampered))
+        with self.assertRaises(WorkContractError):
+            load_evidence(self.work, item['id'])
+
+    def test_crash_during_ingestion_leaves_no_dangling_reference(self):
+        self.deliver()
+        with patch('switchyard.qa_lifecycle.os.rename', side_effect=Crash()):
+            with self.assertRaises(Crash):
+                qa_fix_v2_work(self.work, F1, self.text, self.config, attachments=[self.shot])
+        self.assertFalse((self.work/'qa_fix').exists())  # No request, so nothing references the partial copy.
+        self.assertEqual([p.name for p in (self.work/'qa'/'evidence').iterdir() if not p.name.startswith('.')], [])
+        qa_fix_v2_work(self.work, F1, self.text, self.config, attachments=[self.shot])
+        self.assertEqual(evidence_bytes(self.work, self.evidence()[0]['id']), PNG)
+        self.assertEqual(len(qa_history(self.work)['rounds']), 1)
+
+    def test_crash_after_publication_before_request_reuses_evidence(self):
+        self.deliver()
+        with patch('switchyard.recovery.write_fix_request', side_effect=Crash()):
+            with self.assertRaises(Crash):
+                qa_fix_v2_work(self.work, F1, self.text, self.config, attachments=[self.shot])
+        published = [p.name for p in (self.work/'qa'/'evidence').iterdir()]
+        self.assertEqual(len(published), 1)
+        self.assert_no_round_except_evidence()
+        qa_fix_v2_work(self.work, F1, self.text, self.config, attachments=[self.shot])
+        self.assertEqual([e['id'] for e in self.evidence()], published)  # Same deterministic object reused.
+        self.assertEqual([p.name for p in (self.work/'qa'/'evidence').iterdir()], published)
+        self.assertEqual(len(fix_store(WorkWorkspace.open(self.work)).versions('qa_fix_request')), 1)
+
+    def assert_no_round_except_evidence(self):
+        self.assertFalse((self.work/'qa_fix').exists())
+        self.assertEqual(recovery_status(self.work)['qa_candidate']['decision'], None)
+
+    def test_crash_after_request_retry_with_same_attachments_finishes_round(self):
+        self.deliver()
+        with patch('switchyard.recovery.finish_reopen_v2_work', crash_once(recovery.finish_reopen_v2_work)):
+            with self.assertRaises(Crash):
+                qa_fix_v2_work(self.work, F1, self.text, self.config, attachments=[self.shot])
+        self.assertEqual(len(self.evidence()), 1)  # The open round already references durable evidence.
+        with self.assertRaisesRegex(RecoveryBlocked, 'different_feedback'):
+            qa_fix_v2_work(self.work, F1, self.text, self.config)  # Same text, missing evidence: not the same rejection.
+        qa_fix_v2_work(self.work, F1, self.text, self.config, attachments=[self.shot])
+        self.assertEqual(len(list((self.work/'qa'/'evidence').iterdir())), 1)
+
+    def test_evidence_survives_rounds_and_acceptance_and_per_finding_mapping(self):
+        self.deliver()
+        qa_fix_v2_work(self.work, None, self.text, self.config,
+                       findings=[dict(description=F1, attachments=[self.shot]), F2B])
+        first = self.evidence()
+        self.assertEqual(self.evidence(0, 1), [])  # Only the explicitly mapped finding carries it.
+        self.qa_fix(F2A)
+        accept_v2_candidate(self.work)
+        history = qa_history(self.work)
+        r1, r2 = history['rounds']
+        self.assertEqual([(f['id'], f['status'], [e['id'] for e in f['evidence']]) for f in r1['findings']],
+                         [('qa-1-1', 'verified', [first[0]['id']]), ('qa-1-2', 'verified', [])])
+        self.assertEqual(r2['findings'][0]['evidence'], [])
+        self.assertEqual(r1['findings'][0]['evidence'], first)
+        self.assertEqual(hashlib.sha256(evidence_bytes(self.work, first[0]['id'])).hexdigest(), hashlib.sha256(PNG).hexdigest())
+        self.assertNotIn('shot.png', self.git('show', '--name-only', '--format=', 'HEAD'))  # Not in the accepted commit.
+        self.assertNotIn('shot.png', self.git('ls-files'))
+        self.assertEqual([c['sequence'] for c in history['candidates']], [1, 2, 3])
+
+    def test_cli_attach_single_finding_and_ambiguous_refusal(self):
+        self.deliver()
+        def run(*argv):
+            with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
+                code = main(list(argv))
+            return code, out.getvalue(), err.getvalue()
+        code, _, err = run('work', 'qa-fix', str(self.work), '--finding', F1, '--finding', F2A, '--attach', str(self.shot))
+        self.assertEqual(code, 2); self.assertIn('ambiguous', err)
+        self.assert_no_round()
+        code, _, err = run('work', 'qa-fix', str(self.work), '--finding', F1, '--attach', str(self.shot), '--attach', str(self.console))
+        self.assertEqual(code, 0, err)
+        self.assertEqual([e['filename'] for e in self.evidence()], ['shot.png', 'console.txt'])
+
+    def test_findings_without_evidence_keep_their_schema(self):
+        self.deliver(); self.qa_fix(F1)
+        request = json.loads(fix_store(WorkWorkspace.open(self.work)).read_artifact('qa_fix_request'))
+        self.assertEqual((request['schema_version'], 'evidence' in request['findings'][0]), (3, False))
+        self.assertEqual(self.evidence(), [])
 
 
 if __name__ == '__main__':

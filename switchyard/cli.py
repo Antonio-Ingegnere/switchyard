@@ -38,6 +38,8 @@ def _parser():
             operation.add_argument('feedback', nargs='?', help='one free-text manual QA finding for the current candidate')
             operation.add_argument('--finding', action='append', dest='findings', metavar='TEXT',
                                    help='one QA finding (repeatable; instead of feedback)')
+            operation.add_argument('--attach', action='append', dest='attachments', metavar='PATH',
+                                   help='evidence file for the single finding (repeatable)')
         if action in ('answer', 'resume', 'qa-fix'):
             operation.add_argument('--config')
             operation.add_argument('--claude-executable')
@@ -145,7 +147,8 @@ def _work_command(args):
             config_text = config_path.read_text(encoding='utf-8')
             provider = ProviderRuntimeConfig(status['target'], args.claude_executable, args.codex_executable)
             if args.action == 'qa-fix':
-                qa_fix_v2_work(args.work_root, args.feedback, config_text, provider, findings=args.findings)
+                qa_fix_v2_work(args.work_root, args.feedback, config_text, provider, findings=args.findings,
+                               attachments=args.attachments)
             elif args.action == 'answer':
                 answer_v2_work(args.work_root, args.request_id, args.answer, config_text, provider, resume_to=args.resume_to)
             else:

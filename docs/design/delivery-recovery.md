@@ -435,3 +435,26 @@ A rejection carries one or more findings: `qa-fix <root> "text"` (one finding) o
 - Corrective model stages get a `MANUAL QA FINDINGS` section listing only the open round's `[id] description`.
 - `qa_history()` exposes `findings` (with `status`) per round; status adds `qa_open_findings`,
   `qa_fixed_findings` and `qa_verified_findings` counters.
+
+### QA evidence
+
+Findings may carry durable evidence files (screenshots, logs, any type):
+`qa-fix <root> "text" --attach shot.png [--attach console.txt]`, or with exactly one `--finding`.
+Several `--finding` with `--attach` is refused as ambiguous; the API maps files per finding:
+`findings=[{'description': ..., 'attachments': [path, ...]}, ...]`.
+
+- Inputs are untrusted: each must be a regular readable file (≤ 10 MiB, ≤ 10 per finding,
+  ≤ 20 and ≤ 32 MiB per round). All files are read and validated before anything is written;
+  later changes to the source files have no effect.
+- Storage is outside the worktree and never committed: `<work>/qa/evidence/<id>/{metadata.json,<filename>}`.
+  The filename is sanitized (`[A-Za-z0-9._-]`, no leading dots, never `metadata.json`); the directory is
+  chosen only from the validated ID. MIME comes from magic bytes or a fixed extension table, else
+  `application/octet-stream`.
+- `id = ev-` + SHA-256 (first 128 bits) of the metadata: filename, MIME, size, content SHA-256, rejected
+  candidate identity, QA round, finding ID and position. Objects are built in a temporary directory and
+  published by atomic rename; an existing ID is reused only if its metadata and bytes verify.
+- Order: validate → publish evidence → `qa_fix_request` (schema 4, `findings[].evidence: [{id, sha256}]`)
+  → reject → corrective run. A crash before the request leaves only unreferenced immutable objects, which
+  the same retry reuses; the request never references unpublished evidence.
+- `qa_history()` lists each finding's verified evidence metadata (never bytes); `evidence_bytes(work, id)`
+  returns verified bytes. Evidence changes no candidate, finding status, budget or transition.

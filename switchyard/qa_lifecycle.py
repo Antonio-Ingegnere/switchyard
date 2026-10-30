@@ -10,6 +10,7 @@ import shutil
 import stat
 import subprocess
 from tempfile import TemporaryDirectory
+import uuid
 
 from runtime import RunResult
 from .git_safety import GitRepository, ScopeBlocked
@@ -496,6 +497,145 @@ def combined_feedback(descriptions, round_number):
     return '\n'.join(f'[qa-{round_number}-{i}] {text}' for i, text in enumerate(descriptions, 1))
 
 
+# --- QA evidence (issue #7): durable attachments of structured findings -----------------
+# Stored beside the work, never in the product worktree:
+#   <work>/qa/evidence/<evidence-id>/{metadata.json,<safe filename>}
+# published by atomic directory rename; bytes and metadata are immutable once published.
+MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
+MAX_ATTACHMENTS_PER_FINDING = 10
+MAX_ATTACHMENTS_PER_ROUND = 20
+MAX_ROUND_ATTACHMENT_BYTES = 32 * 1024 * 1024
+_EVIDENCE_ID = re.compile(r'ev-[0-9a-f]{32}')
+# Deterministic, host-independent MIME detection (mimetypes depends on system databases).
+_MIME = {'.png':'image/png', '.jpg':'image/jpeg', '.jpeg':'image/jpeg', '.gif':'image/gif', '.webp':'image/webp',
+         '.txt':'text/plain', '.log':'text/plain', '.md':'text/markdown', '.csv':'text/csv',
+         '.json':'application/json', '.html':'text/html', '.pdf':'application/pdf'}
+_MAGIC = ((b'\x89PNG\r\n\x1a\n', 'image/png'), (b'\xff\xd8\xff', 'image/jpeg'), (b'GIF8', 'image/gif'), (b'%PDF-', 'application/pdf'))
+
+
+def _safe_filename(source):
+    """Display/storage name only; the destination directory is always chosen by Switchyard."""
+    name = re.sub(r'[^A-Za-z0-9._-]', '_', os.path.basename(os.fsdecode(source)))[-100:].lstrip('.')
+    name = name or 'attachment'
+    return '_'+name if name == 'metadata.json' else name
+
+
+def _mime(filename, data):
+    for magic, kind in _MAGIC:
+        if data.startswith(magic):
+            return kind
+    return _MIME.get(os.path.splitext(filename)[1].lower(), 'application/octet-stream')
+
+
+def read_attachment(source):
+    """Snapshot one untrusted local file into memory; no writes. Later source changes are irrelevant."""
+    try:
+        with open(source, 'rb') as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode):
+                raise LifecycleError(f'attachment is not a regular file: {_safe_filename(source)}')
+            if info.st_size > MAX_ATTACHMENT_BYTES:
+                raise LifecycleError(f'attachment exceeds {MAX_ATTACHMENT_BYTES} bytes: {_safe_filename(source)}')
+            data = stream.read(MAX_ATTACHMENT_BYTES + 1)
+    except IsADirectoryError:
+        raise LifecycleError(f'attachment is not a regular file: {_safe_filename(source)}') from None
+    except OSError as exc:
+        raise LifecycleError(f'attachment unreadable: {_safe_filename(source)} ({exc.strerror or "error"})') from None
+    if len(data) > MAX_ATTACHMENT_BYTES:
+        raise LifecycleError(f'attachment exceeds {MAX_ATTACHMENT_BYTES} bytes: {_safe_filename(source)}')
+    filename = _safe_filename(source)
+    return dict(filename=filename, mime_type=_mime(filename, data), size=len(data),
+                sha256=hashlib.sha256(data).hexdigest(), data=data)
+
+
+def finding_inputs(feedback=None, findings=None, attachments=None):
+    """Normalize one rejection to ((description, (attachment, ...)), ...), validating every file first.
+
+    `findings` items are text or {'description': text, 'attachments': [path, ...]}. `attachments`
+    is shorthand for the single-finding case and is refused when several findings would be ambiguous."""
+    raw = None if findings is None else [f if isinstance(f, dict) else dict(description=f) for f in findings]
+    descriptions = finding_descriptions(feedback, None if raw is None else [f.get('description') for f in raw])
+    per_finding = [list(f.get('attachments') or ()) for f in raw] if raw is not None else [[]]
+    if attachments:
+        if len(descriptions) != 1:
+            raise LifecycleError('attachments are ambiguous with several findings; attach per finding instead')
+        per_finding[0] += list(attachments)
+    if any(len(paths) > MAX_ATTACHMENTS_PER_FINDING for paths in per_finding):
+        raise LifecycleError(f'at most {MAX_ATTACHMENTS_PER_FINDING} attachments per finding')
+    if sum(map(len, per_finding)) > MAX_ATTACHMENTS_PER_ROUND:
+        raise LifecycleError(f'at most {MAX_ATTACHMENTS_PER_ROUND} attachments per QA round')
+    read = tuple(tuple(read_attachment(p) for p in paths) for paths in per_finding)
+    if sum(a['size'] for files in read for a in files) > MAX_ROUND_ATTACHMENT_BYTES:
+        raise LifecycleError(f'attachments exceed {MAX_ROUND_ATTACHMENT_BYTES} bytes per QA round')
+    return tuple(zip(descriptions, read))
+
+
+def _evidence_root(work_root):
+    return Path(work_root).resolve()/'qa'/'evidence'
+
+
+def _fsync_dir(path):
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def publish_evidence(work_root, attachment, *, candidate_identity, qa_round, finding_id, index):
+    """Idempotent: the ID is derived from content + linkage, so a retry reuses the same object."""
+    metadata = dict(schema_version=1, filename=attachment['filename'], mime_type=attachment['mime_type'],
+                    size=attachment['size'], sha256=attachment['sha256'], candidate_identity=candidate_identity,
+                    qa_round=qa_round, finding_id=finding_id, index=index)
+    metadata = dict(metadata, id='ev-'+hashlib.sha256(_json(metadata).encode()).hexdigest()[:32])
+    root = _evidence_root(work_root); final = root/metadata['id']
+    if final.exists():
+        if load_evidence(work_root, metadata['id'], attachment['sha256']) != metadata:
+            raise LifecycleError('evidence identity conflict; manual inspection required')
+        return metadata
+    root.mkdir(parents=True, exist_ok=True)
+    building = root/f'.{metadata["id"]}.{uuid.uuid4().hex}'
+    building.mkdir()
+    for name, data in ((metadata['filename'], attachment['data']), ('metadata.json', _json(metadata).encode())):
+        with (building/name).open('xb') as stream:
+            stream.write(data); stream.flush(); os.fsync(stream.fileno())
+    _fsync_dir(building)
+    os.rename(building, final)  # Atomic: a published ID is always complete.
+    _fsync_dir(root)
+    return metadata
+
+
+def load_evidence(work_root, evidence_id, expected_sha256=None):
+    """Verified metadata of one evidence object; the path is derived only from a validated ID."""
+    if type(evidence_id) is not str or not _EVIDENCE_ID.fullmatch(evidence_id):
+        raise WorkContractError('invalid evidence reference')
+    directory = _evidence_root(work_root)/evidence_id
+    try:
+        metadata = json.loads((directory/'metadata.json').read_bytes())
+        filename = metadata['filename']
+        if (metadata.get('id') != evidence_id or type(filename) is not str or filename != _safe_filename(filename)
+                or filename == 'metadata.json'):
+            raise WorkContractError('invalid evidence metadata')
+        data = (directory/filename).read_bytes()
+    except (OSError, ValueError, KeyError, TypeError):
+        raise WorkContractError(f'evidence unavailable: {evidence_id}') from None
+    digest = hashlib.sha256(data).hexdigest()
+    if digest != metadata['sha256'] or len(data) != metadata['size'] or expected_sha256 not in (None, digest):
+        raise WorkContractError(f'evidence integrity mismatch: {evidence_id}')
+    return metadata
+
+
+def evidence_bytes(work_root, evidence_id):
+    metadata = load_evidence(work_root, evidence_id)
+    return (_evidence_root(work_root)/evidence_id/metadata['filename']).read_bytes()
+
+
+def evidence_plan(work_root, number, identity, inputs):
+    """Publish every attachment of a not-yet-written round; returns per-finding metadata lists."""
+    return [[publish_evidence(work_root, a, candidate_identity=identity, qa_round=number, finding_id=f'qa-{number}-{i}', index=k)
+             for k, a in enumerate(files, 1)] for i, (_, files) in enumerate(inputs, 1)]
+
+
 def request_findings(request):
     """Findings defined by a rejection intent; pre-findings records read as one `qa-<round>-1`."""
     if 'findings' in request:
@@ -525,8 +665,10 @@ def fix_records(workspace):
     return requests, resolved
 
 
-def write_fix_request(workspace, *, flow, reopen_to, descriptions, candidate_workspace, identity, candidate, work_id):
-    """The round's single durable rejection intent: feedback AND its findings are one record."""
+def write_fix_request(workspace, *, flow, reopen_to, descriptions, candidate_workspace, identity, candidate, work_id,
+                      evidence=None):
+    """The round's single durable rejection intent: feedback, findings AND evidence references.
+    `evidence[i]` lists already-published evidence metadata of finding i (never unpublished files)."""
     descriptions = finding_descriptions(findings=descriptions)
     requests, resolved = fix_records(workspace)
     if len(requests) != len(resolved):
@@ -538,7 +680,14 @@ def write_fix_request(workspace, *, flow, reopen_to, descriptions, candidate_wor
     number = len(requests)+1
     # IDs are assigned once, here, scoped to the round; never derived from list position on read.
     findings = [dict(id=f'qa-{number}-{i}', round=number, description=text) for i, text in enumerate(descriptions, 1)]
-    record = dict(schema_version=3, round=number, work_id=work_id, flow=flow,
+    if evidence is not None and any(evidence):
+        for finding, items in zip(findings, evidence):
+            if any((e['qa_round'], e['finding_id'], e['candidate_identity']) != (number, finding['id'], identity) for e in items):
+                raise WorkContractError('evidence linkage mismatch')
+            for e in items:
+                load_evidence(workspace.root, e['id'], e['sha256'])  # Only durable, intact evidence is referenced.
+            finding['evidence'] = [dict(id=e['id'], sha256=e['sha256']) for e in items]
+    record = dict(schema_version=4 if any('evidence' in f for f in findings) else 3, round=number, work_id=work_id, flow=flow,
                   reopen_to=reopen_to, feedback=combined_feedback(descriptions, number), findings=findings,
                   rejected_candidate=dict(identity=identity, workspace=str(candidate_workspace),
                       sequence=candidate.get('sequence', 1), base_head=candidate['base_head'],
