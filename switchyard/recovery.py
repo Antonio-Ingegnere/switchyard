@@ -794,7 +794,9 @@ def _adoption_status(base):
     return dict(adopted=True,adopted_from_work_id=adoption['from_work_id'],adopted_from_base_sha=adoption['from_base_sha'],
                 adopted_implementation_source=adoption['implementation_source'],adoption_entry_state=adoption['entry_state'],
                 reused_request=True,reused_specification=adoption['reused_specification'],reused_implementation=True,
-                reused_artifacts=sorted(adoption['reused_artifacts']),reused_sources=adoption['reused_sources'])
+                reused_artifacts=sorted(adoption['reused_artifacts']),reused_sources=adoption['reused_sources'],
+                **({'continuity':{action.lower():[d['stage'] for d in adoption['continuity']['decisions'] if d['action']==action]
+                                  for action in ('REUSED','RERUN','INVALIDATED')}} if 'continuity' in adoption else {}))
 
 
 def _suspend_status(op):

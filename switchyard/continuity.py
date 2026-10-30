@@ -18,6 +18,7 @@ sources copied -> branch at base -> worktree -> rebuilt from base + adoption blo
 baseline (with `adoption`) -> reused artifacts -> `running` -> run from the verifier.
 """
 from dataclasses import replace
+import json
 import os
 from pathlib import Path
 import shutil
@@ -151,22 +152,91 @@ def _entry_state(project, flow):
     return entries[0]
 
 
-def _upstream(spec, entry):
-    """Artifacts the entry state needs, followed back through their producing states (request excluded)."""
-    producers = {a: name for name, s in spec.states.items() for a in s.produces}
-    needed, todo = [], list(spec.states[entry].consumes)
+# --- Continuity decisions (#5 slice 2) ----------------------------------------------------------------
+# For every product W2 reasons about, one decision: REUSED (W2 consumes W1's durable product; the producing
+# stage is NOT executed and NOT recorded in W2's event log), RERUN (W2 executes it under the current
+# runtime) or INVALIDATED (W1 has the product but a deterministic rule refuses it). Inputs are durable only:
+# W1's artifact records and contracts, the current configuration's contracts, the same base. The plan is
+# written once, before W2 runs, and is never updated by execution outcomes.
+CONTINUITY_SCHEMA = 1
+REUSED, RERUN, INVALIDATED = 'REUSED', 'RERUN', 'INVALIDATED'
+
+
+def _contract(spec):
+    return None if spec is None else dict(format=spec.format, schema=spec.schema, source=spec.source)
+
+
+def _chain(spec, entry):
+    """[(producing state, needed artifacts)] the entry depends on, request side first. Explicit rules only:
+    each needed artifact's producer, then that producer's own inputs; `request` is the root."""
+    producers = {a: name for name, state in spec.states.items() for a in state.produces}
+    order, needed, todo = [], {}, list(spec.states[entry].consumes)
     while todo:
         artifact = todo.pop(0)
-        if artifact == 'request' or artifact in needed:
+        if artifact == 'request' or any(artifact in v for v in needed.values()):
             continue
-        needed.append(artifact)
-        if artifact in producers:
-            todo.extend(spec.states[producers[artifact]].consumes)
-    return needed
+        state = producers.get(artifact)
+        if state is None:
+            raise RecoveryBlocked(B, 'no_adoption_entry: artifact without producer', [artifact])
+        needed.setdefault(state, []).append(artifact)
+        if state not in order:
+            order.append(state); todo.extend(spec.states[state].consumes)
+    return [(state, tuple(needed[state])) for state in reversed(order)]
+
+
+def _identity(work, name):
+    record = work.latest_artifact(name) if name in work.artifacts else None
+    return None if record is None else dict(artifact=name, version=record.version, sha256=record.sha256)
+
+
+def implementation_digest(changes):
+    """Stable identity of an adopted implementation: the canonical change set (paths, kinds, modes, bytes),
+    independent of the source form (permission bits, recorded only by shelves, are not part of it)."""
+    canonical = {name: {k: c[k] for k in ('kind', 'mode', 'sha256') if k in c} for name, c in changes.items()}
+    return _sha(json.dumps(canonical, sort_keys=True, separators=(',', ':')).encode('utf-8'))
+
+
+def _decisions(work, project, spec, entry, sources, implementation):
+    """Rules: REQUEST is reused exactly; frozen SOURCE_RESOLUTION is reused; each producing stage on the
+    entry's chain is REUSED when its latest artifacts exist with an unchanged contract, otherwise
+    INVALIDATED (`artifact_contract_changed`), and every later stage is INVALIDATED (`upstream_invalidated`);
+    the stage producing the entry's input carries the implementation; the entry verifier is always RERUN:
+    W1's verification is historical evidence, not current truth."""
+    decisions = [dict(stage='REQUEST', product='request', action=REUSED, reason='exact_request',
+                      artifacts=[_identity(work, 'request')])]
+    if sources is not None:
+        decisions.append(dict(stage='SOURCE_RESOLUTION', product='resolved_sources', action=REUSED,
+                              reason='frozen_sources', artifacts=[sources]))
+    chain = _chain(spec, entry)
+    implementer = next(state for state, artifacts in chain if set(artifacts) & set(spec.states[entry].consumes))
+    invalid = None
+    for state, artifacts in chain:
+        entries, reason = [], None
+        for name in artifacts:
+            identity = _identity(work, name)
+            if identity is None:
+                raise RecoveryBlocked(B, 'no_reusable_implementation: missing artifact', [name])
+            identity['contract'] = _contract(work.artifacts[name])
+            if work.artifacts[name] != project.bundle.artifacts.get(name):
+                identity['current_contract'] = _contract(project.bundle.artifacts.get(name))
+                reason = reason or 'artifact_contract_changed'
+            entries.append(identity)
+        if reason is None and invalid is not None:
+            reason = 'upstream_invalidated: '+invalid
+        decision = dict(stage=state, product='+'.join(artifacts), action=INVALIDATED if reason else REUSED,
+                        reason=reason or 'durable_product_available', artifacts=entries)
+        if state == implementer:
+            decision.update(product='implementation', implementation=implementation)
+        invalid = invalid or (state if reason else None)
+        decisions.append(decision)
+    historical = [i for i in (_identity(work, name) for name in spec.states[entry].produces) if i]
+    decisions.append(dict(stage=entry, product='+'.join(spec.states[entry].produces) or 'verification', action=RERUN,
+                          reason='current_runtime_verification_required', artifacts=[], historical=historical))
+    return decisions, invalid
 
 
 def _plan(old, project, flow):
-    """Read-only: everything W2 needs from W1, every byte verified."""
+    """Read-only: everything W2 needs from W1, every byte verified, and the continuity decisions."""
     old = Path(old).resolve()
     try:
         store = _store(old); base = _read(store, 'baseline'); op = _read(store, 'operation')
@@ -180,20 +250,28 @@ def _plan(old, project, flow):
     source, identity, changes, data = _implementation(old, store, base, op)
     work = WorkWorkspace.open(old)
     spec = project.bundle.flow(flow); entry = _entry_state(project, flow)
-    artifacts = {}
-    for name in _upstream(spec, entry):
-        record = work.latest_artifact(name) if name in work.artifacts else None
-        if record is None:
-            raise RecoveryBlocked(B, 'no_reusable_implementation: missing artifact', [name])
-        if work.artifacts[name] != project.bundle.artifacts.get(name):
-            raise RecoveryBlocked(B, 'unsupported_source_schema: artifact contract changed', [name])
-        artifacts[name] = (record, work.read_artifact(name, record.version))
-    sources = old/'sources'
-    if (sources/'manifest.jsonl').is_file():
-        WorkWorkspace.open(sources, SOURCE_CATALOG).read_artifact('resolved_sources')  # Verified, never re-fetched.
+    sources = None
+    if (old/'sources/manifest.jsonl').is_file():
+        frozen = WorkWorkspace.open(old/'sources', SOURCE_CATALOG)
+        frozen.read_artifact('resolved_sources')  # Verified, never re-fetched.
+        record = frozen.latest_artifact('resolved_sources')
+        sources = dict(artifact='resolved_sources', version=record.version, sha256=record.sha256)
+    implementation = dict(source=source, identity=identity, digest=implementation_digest(changes), paths=len(changes))
+    decisions, invalid = _decisions(work, project, spec, entry, sources, implementation)
+    continuity = dict(schema=CONTINUITY_SCHEMA, source_work_id=old.name, source_baseline_sha256=store.latest_artifact('baseline').sha256,
+                      base_sha=base['isolation']['base_sha'], flow=flow, decisions=decisions)
+    if invalid is not None:
+        # The current workflow cannot regenerate an implementation without rerunning the stages adoption
+        # exists to avoid, so this slice blocks, and the plan explains exactly what was invalidated.
+        error = RecoveryBlocked(B, 'continuity_invalidated: '+invalid,
+                                [a['artifact'] for d in decisions if d['action'] == INVALIDATED for a in d['artifacts'] if 'current_contract' in a])
+        error.continuity_plan = continuity
+        raise error
+    artifacts = {name: (work.latest_artifact(name), work.read_artifact(name)) for d in decisions
+                 if d['stage'] not in ('REQUEST', 'SOURCE_RESOLUTION') and d['action'] == REUSED for name in (a['artifact'] for a in d['artifacts'])}
     return dict(old=old, base=base, flow=flow, entry=entry, request=work.read_artifact('request'), source=source,
-                identity=identity, changes=changes, data=data, artifacts=artifacts, sources=(sources/'manifest.jsonl').is_file(),
-                baseline_sha256=store.latest_artifact('baseline').sha256)
+                identity=identity, changes=changes, data=data, artifacts=artifacts, sources=sources is not None,
+                baseline_sha256=continuity['source_baseline_sha256'], continuity=continuity)
 
 
 def _record(plan, store):
@@ -210,7 +288,16 @@ def _record(plan, store):
                 from_lifecycle_contract_version=plan['base']['lifecycle_contract_version'],
                 implementation_source=plan['source'], implementation_identity=plan['identity'], changes=plan['changes'],
                 reused_artifacts=artifacts, reused_sources=plan['sources'], entry_state=plan['entry'],
-                reused_specification=any(name == 'microspec' for name in artifacts), lifecycle_contract_version=2)
+                reused_specification=any(a.get('schema') == 'microspec' for d in plan['continuity']['decisions']
+                                         if d['action'] == REUSED for a in (x.get('contract') or {} for x in d['artifacts'])),
+                lifecycle_contract_version=2, continuity=plan['continuity'])
+
+
+def continuity_plan(work_root):
+    """Read-only: W2's durable continuity decisions (None for work that was not adopted)."""
+    store = _store(Path(work_root).resolve())
+    record = _read(store, 'baseline').get('adoption') if store.versions('baseline') else _read(store, 'operation').get('adoption')
+    return None if record is None else record.get('continuity')
 
 
 def _expected(repo, base, changes):
@@ -299,6 +386,10 @@ def adopt_v2_work(old_work_root, new_work_root, config_text, provider_runtime_co
             iso, adoption = op['isolation'], op['adoption']
             if adoption['from_work_root'] != str(old):
                 raise RecoveryBlocked(B, 'adoption_in_progress_from_another_work')
+            with _lock(old):  # Same durable inputs must give the same decisions; never overwrite a plan.
+                expected = _plan(old, project, flow)['continuity']
+            if adoption.get('continuity') != expected:
+                raise RecoveryBlocked(B, 'continuity_plan_differs: retry with the original configuration')
             request = store.read_artifact('request')
         else:
             if (new/'manifest.jsonl').exists():

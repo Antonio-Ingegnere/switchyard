@@ -652,3 +652,31 @@ configuration) that reuses the durable product of an old work W1. W1 is only rea
   `adoption_entry_state`, `reused_request`, `reused_specification`, `reused_implementation`,
   `reused_artifacts`, `reused_sources`. The full plan (source identity, changed paths, artifact versions and
   digests, W1's baseline digest) is in W2's baseline `adoption` record.
+
+### Continuity decisions (#5, slice 2)
+
+Adoption writes one durable continuity plan (W2's baseline `adoption.continuity`, schema 1) before W2 runs.
+It lists, in workflow order, one decision per product: `stage`, `product`, `action`, `reason` and the stable
+identity of the W1 product (`artifact`, `version`, `sha256`, and its `contract`; for the implementation
+`source` such as `candidate:2`, `accepted_commit:<sha>` or `shelf:1`, its `identity`, and `digest`, the SHA-256
+of the canonical change set). Paths are never identities.
+
+- `REUSED`: W2 consumes W1's durable product; the producing stage is not executed and does not appear in
+  W2's event log. `RERUN`: W2 executes it under the current runtime. `INVALIDATED`: W1 has the product, but a
+  deterministic rule refuses it.
+- **Rules** (explicit, no graph engine): `REQUEST` reused exactly; `SOURCE_RESOLUTION` reused when W1 froze
+  sources (absent otherwise); each producing stage on the verifier's input chain (the verifier's inputs,
+  then their producers' inputs) is `REUSED` while its latest artifacts exist with an unchanged artifact
+  contract, `INVALIDATED: artifact_contract_changed` otherwise, and every later stage on the chain is
+  `INVALIDATED: upstream_invalidated: <stage>`. The stage producing the verifier's input carries the
+  implementation. The verifier is always `RERUN: current_runtime_verification_required`, listing W1's
+  verification only as `historical`: old verification is evidence, new verification is truth.
+- **Invalidation blocks in this slice:** the current workflows cannot regenerate an implementation without
+  rerunning the expensive stages adoption exists to avoid, so any invalidation refuses with
+  `ADOPTION_BLOCKED: continuity_invalidated: <stage>` and nothing of W2 is written; the error carries the
+  full plan (`continuity_plan`, printed by the CLI). Missing products keep their own refusals
+  (`no_reusable_implementation`, `base_mismatch`) and produce no plan.
+- **Determinism and retry:** decisions depend only on durable identities and contracts. A retry recomputes the
+  plan from W1 and refuses `continuity_plan_differs` rather than overwriting; execution never edits it.
+- **Read:** `continuity_plan(work_root)` returns the full plan (None for ordinary work); `recovery_status` adds
+  `continuity: {reused, rerun, invalidated}` with stage names.
