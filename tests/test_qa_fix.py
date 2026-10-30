@@ -14,11 +14,14 @@ from switchyard.cli import main
 from switchyard.context_transport import StageResult, StageHandoff, ProducedArtifact
 from switchyard.observability import read_events
 from switchyard.provider_process import ProviderExecutionError
-from switchyard.provider_stages import ProviderRuntimeConfig, render_invocation
+from switchyard.provider_stages import ProviderRuntimeConfig, render_invocation, _require_image_input
 from switchyard.qa_lifecycle import (create_qa_candidate, accept_v2_work, LifecycleError, fix_records)
 from switchyard.recovery import (execute_recoverable_v2_work, attach_qa_candidate, qa_fix_v2_work,
-                                 accept_v2_candidate, resume_v2_work, recovery_status, qa_history, RecoveryBlocked)
+                                 accept_v2_candidate, resume_v2_work, recovery_status, qa_history, rollback_v2_work,
+                                 RecoveryBlocked)
 from switchyard.qa_lifecycle import fix_store, evidence_bytes, load_evidence
+from switchyard.context_transport import EvidenceDeliveryError
+import base64
 from switchyard.work_contract import WorkContractError
 import hashlib
 from runtime import RunResult
@@ -51,6 +54,8 @@ class Stages:
         owner = self
         class Stage:
             def run(self, invocation):
+                # Same boundary check the real Claude/Codex adapters run before launching a process.
+                _require_image_input(invocation, binding.provider, binding.model)
                 owner.calls.append(invocation)
                 state = binding.logical_state
                 if owner.fail_state == state:
@@ -716,6 +721,9 @@ class QaEvidenceTests(QaFixBase):
     """Durable evidence linked to findings, stored beside the work and never in the worktree."""
     def setUp(self):
         super().setUp()
+        # Image evidence must be consumable by every corrective model stage: use an audited image-capable model.
+        for agent in ('diagnoser', 'code'):
+            self.data['agents'][agent].update(provider='codex', model='gpt-6-astra')
         for state in ('DIAGNOSE', 'FIX', 'VERIFY'):
             self.data['flows']['bugfix']['states'][state]['budget']['visits'] = 3
         self.data['flows']['bugfix']['limits']['run_invocations'] = 9
@@ -872,6 +880,239 @@ class QaEvidenceTests(QaFixBase):
         request = json.loads(fix_store(WorkWorkspace.open(self.work)).read_artifact('qa_fix_request'))
         self.assertEqual((request['schema_version'], 'evidence' in request['findings'][0]), (3, False))
         self.assertEqual(self.evidence(), [])
+
+
+
+LOG = 'renderer: rename handler missing\nTypeError: cannot read properties of undefined\n'
+STATE = '{"board": {"id": 7, "renaming": false}}\n'
+
+
+class QaEvidenceDeliveryTests(QaFixBase):
+    """Current-round evidence reaches corrective model stages, or the stage refuses before launch."""
+    def setUp(self):
+        super().setUp()
+        for state in ('DIAGNOSE', 'FIX', 'VERIFY'):
+            self.data['flows']['bugfix']['states'][state]['budget']['visits'] = 3
+        self.data['flows']['bugfix']['limits']['run_invocations'] = 9
+        self.use('codex', 'gpt-6-astra')
+        self.log_file = self.root/'renderer.log'; self.log_file.write_text(LOG)
+        self.state_file = self.root/'state.json'; self.state_file.write_text(STATE)
+        self.shot = self.root/'shot.png'; self.shot.write_bytes(PNG)
+
+    def use(self, provider, model):
+        for agent in ('diagnoser', 'code'):
+            self.data['agents'][agent].update(provider=provider, model=model)
+        self.text = self.save_config()
+
+    def corrective_calls(self, since):
+        return [c for c in self.stages.calls[since:] if c.binding.provider != 'command']
+
+    def test_text_and_json_evidence_bounded_textual_context_with_labels(self):
+        self.deliver(); calls = len(self.stages.calls)
+        qa_fix_v2_work(self.work, F1, self.text, self.config, attachments=[self.log_file, self.state_file])
+        diagnose, fix = self.corrective_calls(calls)
+        self.assertEqual([(p.finding_id, p.filename, p.mime_type, p.kind, p.text, p.shown_bytes, p.data) for p in diagnose.qa_evidence],
+                         [('qa-1-1', 'renderer.log', 'text/plain', 'text', LOG, len(LOG), None),
+                          ('qa-1-1', 'state.json', 'application/json', 'text', STATE, len(STATE), None)])
+        self.assertEqual(fix.qa_evidence, diagnose.qa_evidence)  # FIX gets the same current-round evidence.
+        rendered = render_invocation(diagnose)
+        self.assertIn('QA FINDING qa-1-1\n' + F1 + '\n\nEvidence:\n- renderer.log (text/plain', rendered)
+        self.assertIn('Finding: qa-1-1\nFile: renderer.log\nMIME: text/plain\nSHA-256: '
+                      + hashlib.sha256(LOG.encode()).hexdigest() + '\n--- BEGIN EVIDENCE ---\n' + LOG + '\n--- END EVIDENCE ---', rendered)
+        self.assertNotIn(str(self.root), rendered.split('MANUAL QA EVIDENCE')[1].split('MANUAL QA REJECTION')[0])  # No paths.
+        verifier = [c for c in self.stages.calls[calls:] if c.binding.provider == 'command']
+        self.assertEqual([c.qa_evidence for c in verifier], [()])
+
+    def test_only_current_round_evidence_is_delivered(self):
+        old = self.root/'old.log'; old.write_text('round one log\n')
+        self.deliver(); qa_fix_v2_work(self.work, F1, self.text, self.config, attachments=[old])
+        calls = len(self.stages.calls)
+        qa_fix_v2_work(self.work, F2A, self.text, self.config, attachments=[self.log_file])
+        for call in self.corrective_calls(calls):
+            self.assertEqual([(p.finding_id, p.filename) for p in call.qa_evidence], [('qa-2-1', 'renderer.log')])
+            self.assertNotIn('round one log', render_invocation(call))
+        self.assertEqual(len(qa_history(self.work)['rounds'][0]['findings'][0]['evidence']), 1)  # Still history.
+
+    def test_image_is_a_separate_part_never_prompt_text(self):
+        self.deliver(); calls = len(self.stages.calls)
+        qa_fix_v2_work(self.work, F1, self.text, self.config, attachments=[self.shot, self.log_file])
+        call = self.corrective_calls(calls)[0]
+        image, text = call.qa_evidence
+        self.assertEqual((image.kind, image.data, image.text, text.kind), ('image', PNG, None, 'text'))
+        rendered = render_invocation(call)
+        self.assertNotIn(base64.b64encode(PNG).decode()[:40], rendered)
+        self.assertNotIn('fake screenshot pixels', rendered)
+        self.assertIn(f'- shot.png (image/png, {len(PNG)} bytes, {image.evidence_id}) — image input #1', rendered)
+        self.assertIn(f'#1 qa-1-1 / shot.png (image/png, {image.evidence_id}, sha256 {image.sha256})', rendered)
+
+    def test_text_truncation_is_explicit_and_deterministic(self):
+        big = [self.root/f'big{i}.log' for i in range(4)]
+        for i, path in enumerate(big):
+            path.write_text(chr(ord('a')+i) * 9000 + 'é' * 10)
+        self.deliver(); calls = len(self.stages.calls)
+        qa_fix_v2_work(self.work, F1, self.text, self.config, attachments=big)
+        first, second = self.corrective_calls(calls)
+        self.assertEqual(first.qa_evidence, second.qa_evidence)
+        self.assertEqual([p.shown_bytes for p in first.qa_evidence], [8192, 8192, 8192, 0])
+        rendered = render_invocation(first)
+        self.assertEqual(rendered.count('[TRUNCATED: showing first 8192 bytes of 9020]'), 3)
+        self.assertIn('[TRUNCATED: showing first 0 bytes of 9020]', rendered)
+
+    def assert_recorded_but_undeliverable(self, calls, diagnostic):
+        """The human decision is durable; the incapable stage was refused before its provider ran."""
+        self.assertEqual(len(self.stages.calls), calls)  # Zero provider/stage executions.
+        status = recovery_status(self.work)
+        self.assertEqual((status['terminal'], status['reason'], status['resume_allowed'], status['rollback_allowed']),
+                         ('INTERRUPTED', 'qa_evidence_undeliverable', False, True))
+        self.assertIn(diagnostic, status['diagnostic'])
+        self.assertEqual((status['current_qa_round'], status['qa_round_open'], status['qa_candidate']['decision'],
+                          status['current_candidate_sequence']), (1, True, 'REOPENED', 1))
+        (round1,) = qa_history(self.work)['rounds']
+        self.assertEqual((round1['rejected']['identity'], round1['open']), (self.first.identity, True))
+        self.assertEqual(WorkWorkspace.open(self.qa).read_artifact('qa_feedback'), F1)
+        return round1['findings'][0]
+
+    def test_unsupported_provider_records_rejection_then_refuses_stage(self):
+        self.use('claude', 'sonnet'); self.deliver(); calls = len(self.stages.calls)
+        with self.assertRaises(EvidenceDeliveryError) as ctx:
+            qa_fix_v2_work(self.work, F1, self.text, self.config, attachments=[self.log_file, self.shot])  # Mixed.
+        diagnostic = ('QA evidence cannot be consumed by selected provider/model:\n- qa-1-1 / shot.png (image/png)\n'
+                      'Provider: claude\nModel: sonnet\nRequired capability: image input')
+        self.assertEqual(str(ctx.exception), diagnostic)
+        finding = self.assert_recorded_but_undeliverable(calls, diagnostic)
+        self.assertEqual((finding['id'], finding['status'], [e['filename'] for e in finding['evidence']]),
+                         ('qa-1-1', 'open', ['renderer.log', 'shot.png']))
+        objects = sorted(p.name for p in (self.work/'qa'/'evidence').iterdir())
+        self.shot.unlink(); self.log_file.unlink()
+        self.assertEqual(evidence_bytes(self.work, finding['evidence'][1]['id']), PNG)  # Durable without the source.
+        # Retry/resume: deterministic refusal, never a second round, evidence copy, rejection or stage run.
+        with self.assertRaises(RecoveryBlocked):
+            resume_v2_work(self.work, self.text, self.config)
+        with self.assertRaises(RecoveryBlocked):
+            qa_fix_v2_work(self.work, F1, self.text, self.config)
+        self.assertEqual(len(self.stages.calls), calls)
+        self.assertEqual(sorted(p.name for p in (self.work/'qa'/'evidence').iterdir()), objects)
+        self.assertEqual(len(fix_store(WorkWorkspace.open(self.work)).versions('qa_fix_request')), 1)
+        self.assertEqual([len(WorkWorkspace.open(self.qa).versions(n)) for n in ('qa_intent', 'qa_decision')], [1, 1])
+        rollback_v2_work(self.work)  # The existing deterministic recovery contract still applies.
+        self.assertEqual(recovery_status(self.work)['terminal'], 'ROLLED_BACK')
+        self.assertEqual(len(qa_history(self.work)['rounds'][0]['findings'][0]['evidence']), 2)
+
+    def test_text_only_evidence_with_text_only_provider_is_unchanged(self):
+        self.use('claude', 'sonnet'); self.deliver(); calls = len(self.stages.calls)
+        qa_fix_v2_work(self.work, F1, self.text, self.config, attachments=[self.log_file])
+        self.assertEqual(self.corrective_calls(calls)[0].qa_evidence[0].filename, 'renderer.log')
+        self.assertEqual(recovery_status(self.work)['terminal'], 'READY_FOR_MANUAL_QA')
+
+    def test_unconsumable_types_record_rejection_then_refuse_stage(self):
+        pdf = self.root/'spec.pdf'; pdf.write_bytes(b'%PDF-1.7 binary')
+        self.deliver(); calls = len(self.stages.calls)
+        with self.assertRaises(EvidenceDeliveryError):
+            qa_fix_v2_work(self.work, F1, self.text, self.config, attachments=[pdf])
+        finding = self.assert_recorded_but_undeliverable(calls, 'unsupported evidence type application/pdf')
+        self.assertEqual(finding['evidence'][0]['mime_type'], 'application/pdf')
+
+    def test_invalid_local_paths_still_refuse_before_any_qa_write(self):
+        self.use('claude', 'sonnet'); self.deliver()
+        for paths in ([self.root/'missing.png'], [self.root], [self.shot]*11):
+            with self.assertRaises(LifecycleError):
+                qa_fix_v2_work(self.work, F1, self.text, self.config, attachments=paths)
+        self.assertFalse((self.work/'qa_fix').exists()); self.assertFalse((self.work/'qa'/'evidence').exists())
+        self.assertEqual((recovery_status(self.work)['terminal'], recovery_status(self.work)['qa_candidate']['decision']),
+                         ('READY_FOR_MANUAL_QA', None))
+
+    def test_tampered_or_missing_evidence_fails_before_provider_and_resume_rebuilds_same_input(self):
+        self.deliver(); calls = len(self.stages.calls)
+        self.stages.fail_state = 'FIX'
+        with self.assertRaises(Exception):
+            qa_fix_v2_work(self.work, F1, self.text, self.config, attachments=[self.log_file, self.shot])
+        before = self.corrective_calls(calls)[0].qa_evidence
+        objects = sorted(p.name for p in (self.work/'qa'/'evidence').iterdir())
+        self.log_file.unlink(); self.shot.unlink()  # Never reread from the user's paths.
+        resume_v2_work(self.work, self.text, self.config)
+        retried = self.corrective_calls(calls)[2]
+        self.assertEqual((retried.binding.logical_state, retried.qa_evidence), ('FIX', before))
+        self.assertEqual(sorted(p.name for p in (self.work/'qa'/'evidence').iterdir()), objects)  # No new identities.
+        # Next round: tamper with durable bytes; the stage fails before its provider runs.
+        self.stages.fail_state = 'DIAGNOSE'
+        with self.assertRaises(Exception):
+            self.qa_fix(F2A)
+        stored = self.work/'qa'/'evidence'/before[0].evidence_id/'renderer.log'
+        stored.chmod(0o644); stored.write_text('tampered')
+        launched = len(self.stages.calls)
+        # Round 2 has no evidence: unaffected. Tamper only matters where it is delivered.
+        resume_v2_work(self.work, self.text, self.config)
+        self.assertGreater(len(self.stages.calls), launched)
+
+    def test_tampered_current_evidence_blocks_stage(self):
+        self.deliver(); self.stages.fail_state = 'DIAGNOSE'
+        with self.assertRaises(Exception):
+            qa_fix_v2_work(self.work, F1, self.text, self.config, attachments=[self.log_file])
+        (item,) = qa_history(self.work)['rounds'][0]['findings'][0]['evidence']
+        stored = self.work/'qa'/'evidence'/item['id']/'renderer.log'
+        stored.chmod(0o644); stored.write_text('tampered')
+        launched = len(self.stages.calls)
+        with self.assertRaises(Exception):
+            resume_v2_work(self.work, self.text, self.config)
+        self.assertEqual(len(self.stages.calls), launched)  # Stage executor never invoked.
+        status = recovery_status(self.work)
+        self.assertEqual((status['terminal'], status['reason'], status['resume_allowed']), ('INTERRUPTED', 'qa_evidence_undeliverable', False))
+        self.assertIn('integrity mismatch', status['diagnostic'])
+        self.assertTrue(status['rollback_allowed'])
+
+    def test_no_evidence_cycle_has_no_evidence_parts(self):
+        self.deliver(); calls = len(self.stages.calls)
+        self.qa_fix(F1)
+        self.assertTrue(all(c.qa_evidence == () for c in self.stages.calls[calls:]))
+        self.assertNotIn('MANUAL QA EVIDENCE', render_invocation(self.corrective_calls(calls)[0]))
+
+
+@unittest.skipIf(os.name == 'nt', 'fake executable requires POSIX shebang')
+class EvidenceAdapterTests(unittest.TestCase):
+    """Real adapter processes (fake CLIs): Codex receives image files; Claude refuses before launch."""
+    def setUp(self):
+        from switchyard.workflow_compiler import ExecutionBinding
+        from switchyard.context_transport import StageInvocation, StageOutputContract, StageHandoffContract, EvidencePart
+        self.temp = TemporaryDirectory(); self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name); bin_dir = self.root/'bin'; bin_dir.mkdir()
+        script = (Path(__file__).parent/'fixtures/provider_cli.py').read_text().replace(
+            "argv=sys.argv[1:]\n", "argv=sys.argv[1:]\nimport hashlib\n"
+            "images=[a for a in argv if a.startswith('--image=')]\n"
+            "Path(os.environ['FAKE_LOG']+'.images').write_text(json.dumps([{'name':Path(p).name,'sha256':hashlib.sha256(Path(p).read_bytes()).hexdigest(),"
+            "'writable':os.access(p,os.W_OK)} for a in images for p in a[len('--image='):].split(',')]))\n", 1)
+        for name in ('claude', 'codex'):
+            path = bin_dir/name; path.write_text('#!'+sys.executable+'\n'+script); path.chmod(0o755)
+        self.log = self.root/'calls.jsonl'; plan = self.root/'plan.json'; plan.write_text(json.dumps({'artifacts': {'A': []}}))
+        self.config = ProviderRuntimeConfig(str(self.root), str(bin_dir/'claude'), str(bin_dir/'codex'),
+                                            {'PATH': str(bin_dir), 'FAKE_LOG': str(self.log), 'FAKE_PLAN': str(plan)}, timeout_seconds=5)
+        self.parts = (EvidencePart('qa-2-1', F1, 'ev-'+'a'*32, 'shot.png', 'image/png', len(PNG), hashlib.sha256(PNG).hexdigest(), 'image', data=PNG),
+                      EvidencePart('qa-2-1', F1, 'ev-'+'b'*32, 'renderer.log', 'text/plain', len(LOG), hashlib.sha256(LOG.encode()).hexdigest(), 'text', text=LOG, shown_bytes=len(LOG)))
+        self.invocation = lambda binding: StageInvocation(binding, (), output_contract=StageOutputContract(('ready',), (), StageHandoffContract(True, ())),
+                                                          qa_evidence=self.parts)
+        self.binding = lambda provider, model: ExecutionBinding('test', 'A', 'worker', 0, 'profile', provider, model, None, None, None)
+
+    def adapter(self, provider, model):
+        from switchyard.provider_stages import ProviderStageExecutorResolver
+        from switchyard.workflow_bundle import ExecutionProfile
+        binding = self.binding(provider, model)
+        return ProviderStageExecutorResolver({'profile': ExecutionProfile(provider, model, None)}, self.config)(binding), binding
+
+    def test_codex_receives_original_image_bytes_labeled_and_read_only(self):
+        adapter, binding = self.adapter('codex', 'gpt-6-astra')
+        self.assertEqual(adapter.run(self.invocation(binding)).outcome, 'ready')
+        call = json.loads(self.log.read_text().splitlines()[-1])
+        self.assertEqual(call['argv'][-1], '-')
+        (image,) = json.loads(Path(str(self.log)+'.images').read_text())
+        self.assertEqual(image, dict(name='01-ev-'+'a'*32+'.png', sha256=hashlib.sha256(PNG).hexdigest(), writable=False))
+        self.assertIn('#1 qa-2-1 / shot.png', call['input']); self.assertIn(LOG, call['input'])  # Mixed: both delivered.
+
+    def test_unsupported_models_refuse_before_any_process(self):
+        for provider, model in (('claude', 'sonnet'), ('codex', 'unaudited-model')):
+            with self.subTest(provider=provider):
+                adapter, binding = self.adapter(provider, model)
+                with self.assertRaisesRegex(EvidenceDeliveryError, f'Provider: {provider}\nModel: {model}\nRequired capability: image input'):
+                    adapter.run(self.invocation(binding))
+                self.assertFalse(self.log.exists())
 
 
 if __name__ == '__main__':

@@ -458,3 +458,31 @@ Several `--finding` with `--attach` is refused as ambiguous; the API maps files 
   the same retry reuses; the request never references unpublished evidence.
 - `qa_history()` lists each finding's verified evidence metadata (never bytes); `evidence_bytes(work, id)`
   returns verified bytes. Evidence changes no candidate, finding status, budget or transition.
+
+### QA evidence delivery to corrective stages
+
+While a QA round is open, every model stage receives that round's evidence, read-only, as
+provider-neutral `StageInvocation.qa_evidence` parts (`EvidencePart`). They are rebuilt each invocation from
+the open request's evidence references through the verified read path; nothing is copied into the store and no
+identities are created. Earlier rounds' evidence is not delivered. Command stages (verifiers) receive none.
+
+- Classes by durable MIME metadata: text (`text/*`, JSON, XML, JavaScript, YAML; strict UTF-8) and images
+  (`image/png`, `image/jpeg`, `image/webp`). Anything else cannot be consumed.
+- Text is shown inline under a `MANUAL QA EVIDENCE` section with finding ID, filename, MIME and SHA-256, at most
+  8 KiB per file and 24 KiB per invocation, cut on a character boundary and marked
+  `[TRUNCATED: showing first N bytes of M]`. It counts toward the stage context budget.
+- Images are never prompt text: the section only labels them (`#k finding / filename (MIME, evidence ID, sha256)`).
+  Each adapter translates image parts into its own transport.
+- Capability: `switchyard.model_capabilities.IMAGE_INPUT_MODELS`, an audited table of exact resolved model IDs per
+  provider adapter (Codex CLI 0.163.0 `exec --image`; the Claude adapter has no audited image transport).
+  Codex receives read-only temporary copies of the verified bytes via `--image=<files>`; Claude and unaudited
+  models refuse.
+- Never silently dropped, and never at the cost of the human decision: `qa-fix` validates attachments only
+  structurally (exists, regular, readable, limits, mapping) before writing. The rejection, finding, evidence and
+  REOPENED candidate are then recorded normally. Before the first model stage whose provider/model cannot consume the
+  evidence (unsupported type, invalid UTF-8 text, image without `image input`, or missing/tampered bytes) is
+  launched, `EvidenceDeliveryError` stops it: zero provider processes, work `INTERRUPTED` with reason
+  `qa_evidence_undeliverable` and the explicit diagnostic
+  (`QA evidence cannot be consumed by selected provider/model: … Required capability: image input`).
+  The configuration is frozen, so resume stays blocked (it would refuse identically); rollback remains available
+  and the round, finding and evidence stay in history. Retrying `qa-fix` never opens a second round.

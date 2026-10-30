@@ -8,7 +8,7 @@ from runtime import (DiagnosticInput, DiagnosticPayload, ExecutorResult,
                      InvocationRequest, InvocationResponse)
 from .source_resolution import prepare_sources
 from .human_input import clarification_snapshots
-from .qa_lifecycle import qa_fix_snapshots
+from .qa_lifecycle import qa_fix_snapshots, open_round_evidence, evidence_kind
 from .workflow_compiler import ExecutionBinding
 from .work_contract import (ArtifactProducer, ArtifactRecord, HandoffRecord,
                             WorkContractError, WorkWorkspace, MicroSpecField, MICROSPEC_FIELDS,
@@ -109,6 +109,63 @@ class StageOutputContract:
         _require(size <= MAX_OUTPUT_CONTRACT_BYTES, 'output contract exceeds byte limit')
 
 
+class EvidenceDeliveryError(WorkContractError):
+    """Current-round QA evidence cannot be consumed by this stage; raised before any provider launch."""
+
+
+MAX_TEXT_EVIDENCE_BYTES = 8192            # Per file shown to a stage.
+MAX_TEXT_EVIDENCE_TOTAL_BYTES = 24576     # All text evidence of one stage invocation.
+
+
+@dataclass(frozen=True, slots=True)
+class EvidencePart:
+    """Provider-neutral, read-only QA evidence. Text is bounded UTF-8; images are original bytes."""
+    finding_id: str
+    description: str
+    evidence_id: str
+    filename: str
+    mime_type: str
+    size: int
+    sha256: str
+    kind: str                      # 'text' | 'image'
+    text: str | None = None        # Shown prefix for text evidence.
+    shown_bytes: int | None = None # < size means explicitly truncated.
+    data: bytes | None = field(default=None, repr=False)  # Image bytes only.
+
+
+def _utf8_prefix(data, limit):
+    """Longest prefix of at most `limit` bytes that ends on a character boundary."""
+    end = min(limit, len(data))
+    while 0 < end < len(data) and (data[end] & 0xC0) == 0x80:  # Next byte continues a character.
+        end -= 1
+    return data[:end].decode('utf-8')
+
+
+def qa_evidence_parts(workspace):
+    """Deterministically rebuilt from durable records each invocation; no copies, no new identities."""
+    parts, remaining = [], MAX_TEXT_EVIDENCE_TOTAL_BYTES
+    try:
+        current = open_round_evidence(workspace)  # Verified read path only; never the user's source path.
+    except WorkContractError as exc:
+        raise EvidenceDeliveryError(f'QA evidence missing or tampered; refusing to invoke the stage: {exc}') from None
+    for finding, items in current:
+        for metadata, data in items:
+            kind, reason = evidence_kind(metadata['mime_type'], data)
+            if kind is None:
+                raise EvidenceDeliveryError(f"QA evidence cannot be consumed: {finding['id']} / "
+                                            f"{metadata['filename']} ({metadata['mime_type']}): {reason}")
+            common = dict(finding_id=finding['id'], description=finding['description'], evidence_id=metadata['id'],
+                          filename=metadata['filename'], mime_type=metadata['mime_type'], size=metadata['size'],
+                          sha256=metadata['sha256'], kind=kind)
+            if kind == 'image':
+                parts.append(EvidencePart(**common, data=data))
+            else:
+                text = _utf8_prefix(data, min(MAX_TEXT_EVIDENCE_BYTES, remaining))
+                shown = len(text.encode('utf-8')); remaining -= shown
+                parts.append(EvidencePart(**common, text=text, shown_bytes=shown))
+    return tuple(parts)
+
+
 @dataclass(frozen=True, slots=True)
 class StageInvocation:
     binding: ExecutionBinding
@@ -119,9 +176,11 @@ class StageInvocation:
     sources: tuple[ArtifactSnapshot, ...] = field(default=(), kw_only=True)
     human_clarification: tuple[ArtifactSnapshot, ...] = field(default=(), kw_only=True)
     qa_feedback: tuple[ArtifactSnapshot, ...] = field(default=(), kw_only=True)
+    qa_evidence: tuple[EvidencePart, ...] = field(default=(), kw_only=True)
 
     def __post_init__(self):
-        _tuples(self, 'artifacts', 'sources', 'human_clarification', 'qa_feedback')
+        _tuples(self, 'artifacts', 'sources', 'human_clarification', 'qa_feedback', 'qa_evidence')
+        _require(all(type(p) is EvidencePart for p in self.qa_evidence), 'expected EvidencePart')
         _require(type(self.output_contract) is StageOutputContract, 'expected StageOutputContract')
 
 
@@ -187,6 +246,7 @@ class ContextualExecutor:
             snapshots.insert(0, ArtifactSnapshot(record, self.workspace.read_artifact('request', record.version)))
         # Open corrective QA cycle: bounded latest feedback for model stages; verifiers do not read prose.
         qa_feedback = qa_fix_snapshots(self.workspace) if self.binding.provider != 'command' else ()
+        qa_evidence = qa_evidence_parts(self.workspace) if qa_feedback else ()
         if qa_feedback and not any(a.record.name == 'request' for a in snapshots):
             record = self.workspace.latest_artifact('request')
             snapshots.insert(0, ArtifactSnapshot(record, self.workspace.read_artifact('request', record.version)))
@@ -197,7 +257,7 @@ class ContextualExecutor:
             sources = (ArtifactSnapshot(record, self.source_workspace.read_artifact(record.name, record.version)),)
         context = StageInvocation(self.binding, tuple(snapshots), previous, request.diagnostics,
                                   output_contract=self.output_contract, sources=sources, human_clarification=clarification,
-                                  qa_feedback=qa_feedback)
+                                  qa_feedback=qa_feedback, qa_evidence=qa_evidence)
         # Canonical size accounting only, not a provider prompt format.
         input_data = asdict(context)
         del input_data['output_contract']
@@ -205,6 +265,12 @@ class ContextualExecutor:
             del input_data['human_clarification']
         if not qa_feedback:
             del input_data['qa_feedback']
+        if qa_evidence:
+            # Text counts toward the context budget; image bytes are separate provider inputs.
+            for part in input_data['qa_evidence']:
+                part['data'] = None
+        else:
+            del input_data['qa_evidence']
         if not sources:
             del input_data['sources']  # preserve legacy byte accounting
         del input_data['binding']['executor_allowed_outcomes']

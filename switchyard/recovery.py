@@ -29,6 +29,7 @@ from .context_transport import workspace_resolver
 from .human_input import HumanInputRecorder, active_request, write_answer, validate_answer, request_targets, select_target, answer_target
 from .provider_stages import ProviderStageExecutorResolver
 from .provider_process import ProviderExecutionError
+from .context_transport import EvidenceDeliveryError
 from .git_safety import GitRepository
 from .qa_lifecycle import (withdraw_qa_candidate, finish_reopen_v2_work, accept_v2_work, create_qa_candidate,
                            fix_records, write_fix_request, resolve_fix_request, qa_rounds,
@@ -284,6 +285,8 @@ def _drive(project,flow,request,root,config,store,repo,history=None,recover_to=N
         while cause is not None:
             if isinstance(cause,ProviderExecutionError):
                 reason='provider_timeout' if str(cause)=='process timeout' else 'provider_failure';break
+            if isinstance(cause,EvidenceDeliveryError):
+                reason='qa_evidence_undeliverable';break  # Refused before launch; keep its exact diagnostic.
             cause=cause.__cause__
         old=_read(store,'operation') if store.versions('operation') else {}
         if old.get('provider_pid') is not None:
@@ -302,6 +305,8 @@ def _drive(project,flow,request,root,config,store,repo,history=None,recover_to=N
         _operation(store,'interrupted',reason=reason,state=old.get('state'),rung=old.get('rung'),
                    manifest_before=old.get('manifest_before'),diagnostic=str(cause or exc)[:2048],
                    returncode=getattr(cause,'returncode',None),resume_safe=safe,**fields)
+        if reason=='qa_evidence_undeliverable':
+            raise EvidenceDeliveryError(str(cause)) from exc  # Callers see the explicit diagnostic.
         raise
     _checkpoint(store,repo,root)
     if result.paused:
@@ -839,7 +844,9 @@ def qa_fix_v2_work(work_root,feedback,config_text,provider_runtime_config,*,find
     Durable order: validate + snapshot attachments, preflight (no writes) -> publish evidence (immutable,
     atomic) -> qa_fix_request (intent: feedback + findings + evidence refs) -> candidate REOPENED ->
     operation `reopened` -> corrective run. An interrupted call is finished by retrying with the same
-    input or by `resume`; it never opens a second round or rejects a candidate twice."""
+    input or by `resume`; it never opens a second round or rejects a candidate twice.
+    Only structural attachment validity is checked here: whether a provider/model can CONSUME the
+    evidence is an execution concern, refused at the stage boundary after the rejection is durable."""
     inputs=finding_inputs(feedback,findings,attachments)
     descriptions=tuple(text for text,_ in inputs)
     fingerprint=tuple((text,tuple(a['sha256'] for a in files)) for text,files in inputs)

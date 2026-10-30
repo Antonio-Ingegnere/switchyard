@@ -509,7 +509,25 @@ _EVIDENCE_ID = re.compile(r'ev-[0-9a-f]{32}')
 # Deterministic, host-independent MIME detection (mimetypes depends on system databases).
 _MIME = {'.png':'image/png', '.jpg':'image/jpeg', '.jpeg':'image/jpeg', '.gif':'image/gif', '.webp':'image/webp',
          '.txt':'text/plain', '.log':'text/plain', '.md':'text/markdown', '.csv':'text/csv',
-         '.json':'application/json', '.html':'text/html', '.pdf':'application/pdf'}
+         '.json':'application/json', '.html':'text/html', '.pdf':'application/pdf', '.xml':'application/xml',
+         '.js':'application/javascript', '.yaml':'application/yaml', '.yml':'application/yaml'}
+# Delivery classes for corrective stages; anything else cannot be consumed and is refused, never dropped.
+TEXT_EVIDENCE_TYPES = frozenset({'application/json', 'application/xml', 'application/javascript',
+                                 'application/x-yaml', 'application/yaml'})
+IMAGE_EVIDENCE_TYPES = frozenset({'image/png', 'image/jpeg', 'image/webp'})
+
+
+def evidence_kind(mime_type, data):
+    """('text'|'image', None) or (None, reason): classification by durable MIME metadata only."""
+    if mime_type in IMAGE_EVIDENCE_TYPES:
+        return 'image', None
+    if mime_type.startswith('text/') or mime_type in TEXT_EVIDENCE_TYPES:
+        try:
+            data.decode('utf-8')
+        except UnicodeDecodeError:
+            return None, 'text evidence is not valid UTF-8'
+        return 'text', None
+    return None, f'unsupported evidence type {mime_type}'
 _MAGIC = ((b'\x89PNG\r\n\x1a\n', 'image/png'), (b'\xff\xd8\xff', 'image/jpeg'), (b'GIF8', 'image/gif'), (b'%PDF-', 'application/pdf'))
 
 
@@ -607,6 +625,11 @@ def publish_evidence(work_root, attachment, *, candidate_identity, qa_round, fin
 
 def load_evidence(work_root, evidence_id, expected_sha256=None):
     """Verified metadata of one evidence object; the path is derived only from a validated ID."""
+    return read_evidence(work_root, evidence_id, expected_sha256)[0]
+
+
+def read_evidence(work_root, evidence_id, expected_sha256=None):
+    """(metadata, bytes) from ONE read, verified against metadata and the referencing record."""
     if type(evidence_id) is not str or not _EVIDENCE_ID.fullmatch(evidence_id):
         raise WorkContractError('invalid evidence reference')
     directory = _evidence_root(work_root)/evidence_id
@@ -622,12 +645,20 @@ def load_evidence(work_root, evidence_id, expected_sha256=None):
     digest = hashlib.sha256(data).hexdigest()
     if digest != metadata['sha256'] or len(data) != metadata['size'] or expected_sha256 not in (None, digest):
         raise WorkContractError(f'evidence integrity mismatch: {evidence_id}')
-    return metadata
+    return metadata, data
 
 
 def evidence_bytes(work_root, evidence_id):
-    metadata = load_evidence(work_root, evidence_id)
-    return (_evidence_root(work_root)/evidence_id/metadata['filename']).read_bytes()
+    return read_evidence(work_root, evidence_id)[1]
+
+
+def open_round_evidence(workspace):
+    """Verified evidence of the CURRENT open round only: ((finding, ((metadata, bytes), ...)), ...)."""
+    requests, resolved = fix_records(workspace)
+    if len(requests) == len(resolved):
+        return ()
+    return tuple((f, tuple(read_evidence(workspace.root, e['id'], e['sha256']) for e in f.get('evidence', ())))
+                 for f in request_findings(requests[-1]))
 
 
 def evidence_plan(work_root, number, identity, inputs):
