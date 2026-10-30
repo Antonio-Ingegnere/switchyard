@@ -257,7 +257,7 @@ class RecoverySourceTests(unittest.TestCase):
     def test_startup_failure_no_events_no_provider_no_new_terminal(self):
         with patch('switchyard.github_sources.http_get', side_effect=HTTPError('url', 401, 'secret', {}, None)):
             with self.assertRaises(SourceResolutionError):
-                execute_recoverable_v2_work(self.text, 'feature', URL, self.work, self.config)
+                execute_recoverable_v2_work(self.text, 'feature', URL, self.work, self.config, isolation=False)
         self.assertFalse(self.log.exists())
         self.assertFalse((self.work/'events.jsonl').exists())
         status = recovery_status(self.work)
@@ -274,7 +274,7 @@ class RecoverySourceTests(unittest.TestCase):
         self.text = self.save_config()
         transport = Transport(dict(ISSUE, body=ISSUE['body']+' echoed-auth-secret'))
         with patch('switchyard.github_sources.http_get', transport), patch.dict('os.environ', {'GH_TOKEN':'echoed-auth-secret'}):
-            result = execute_recoverable_v2_work(self.text, 'feature', URL, self.work, self.config)
+            result = execute_recoverable_v2_work(self.text, 'feature', URL, self.work, self.config, isolation=False)
         self.assertEqual(result.result.terminal_state, 'READY_FOR_MANUAL_QA')
         calls = [json.loads(line) for line in self.log.read_text().splitlines()]
         self.assertIn('SQL-inspired query syntax extensions', calls[0]['input'])
@@ -287,7 +287,7 @@ class RecoverySourceTests(unittest.TestCase):
         transport = Transport()
         with patch('switchyard.github_sources.http_get', transport):
             with self.assertRaises(ExecutionError):
-                execute_recoverable_v2_work(self.text, 'feature', URL, self.work, self.config)
+                execute_recoverable_v2_work(self.text, 'feature', URL, self.work, self.config, isolation=False)
         store = WorkWorkspace.open(self.work/'sources')
         snapshot = store.read_artifact('resolved_sources')
         self.data['agents']['code']['timeout'] = 5

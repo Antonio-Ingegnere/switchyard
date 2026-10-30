@@ -79,7 +79,7 @@ class HumanTransitionTests(unittest.TestCase):
         self.resolver.start(); self.addCleanup(self.resolver.stop)
 
     def start(self):
-        return execute_recoverable_v2_work(self.text, 'feature', 'Investigate reported failure', self.work, self.config)
+        return execute_recoverable_v2_work(self.text, 'feature', 'Investigate reported failure', self.work, self.config,isolation=False)
 
     def answer(self, target=None, text=ANSWER):
         return answer_v2_work(self.work, recovery_status(self.work)['human_input_request_id'], text,
@@ -320,7 +320,7 @@ class HumanTransitionTests(unittest.TestCase):
         from test_source_resolution import URL, Transport
         transport=Transport()
         with patch('switchyard.github_sources.http_get',transport):
-            execute_recoverable_v2_work(self.text,'feature',URL,self.work,self.config)
+            execute_recoverable_v2_work(self.text,'feature',URL,self.work,self.config,isolation=False)
             self.answer('DIAGNOSE')
         self.assertEqual(len(transport.calls),1)
         self.assertTrue(self.stages.calls[1].sources)
@@ -383,7 +383,7 @@ work,target,action=sys.argv[1:]
 text=(Path(target)/'.switchyard/config.yaml').read_text()
 config=ProviderRuntimeConfig(target)
 with patch('switchyard.recovery.ProviderStageExecutorResolver',return_value=ReviewStages()):
-    if action=='start': execute_recoverable_v2_work(text,'feature','Investigate reported failure',work,config)
+    if action=='start': execute_recoverable_v2_work(text,'feature','Investigate reported failure',work,config,isolation=False)
     elif action=='answer': answer_v2_work(work,recovery_status(work)['human_input_request_id'],ANSWER,text,config,resume_to='DIAGNOSE')
     print(json.dumps(recovery_status(work)))
 '''

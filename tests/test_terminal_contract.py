@@ -208,7 +208,7 @@ class TerminalContractRecoveryTests(unittest.TestCase):
         states['RECHECK_REQUIRED'] = states.pop('NEEDS_REDIAGNOSIS')
         states['VERIFY']['on']['fail'] = 'RECHECK_REQUIRED'
         self.text = self.save()
-        recovery.execute_recoverable_v2_work(self.text,'feature','request',self.work,self.config)
+        recovery.execute_recoverable_v2_work(self.text,'feature','request',self.work,self.config,isolation=False)
         before = self.events()
         status = recovery.recovery_status(self.work)
         self.assertEqual((status['state_kind'],status['resume_to'],status['resume_allowed']),
@@ -235,7 +235,7 @@ class TerminalContractRecoveryTests(unittest.TestCase):
         del states['NEEDS_REDIAGNOSIS']
         states['BANANA'] = dict(terminal=True);states['VERIFY']['on']['fail'] = 'BANANA'
         self.text = self.save()
-        recovery.execute_recoverable_v2_work(self.text,'feature','request',self.work,self.config)
+        recovery.execute_recoverable_v2_work(self.text,'feature','request',self.work,self.config,isolation=False)
         status = recovery.recovery_status(self.work)
         self.assertEqual((status['terminal'],status['state_kind'],status['resume_allowed'],status['resume_to']),
                          ('BANANA','terminal',False,None))

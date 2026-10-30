@@ -50,6 +50,11 @@ class Stages:
     def __init__(self, target):
         self.target, self.calls, self.fixes, self.fail_state, self.stuck, self.verdict = target, [], 0, None, False, 'pass'
 
+    def resolve(self, profiles, config):
+        # Like the real adapters: the runtime hands over the execution workspace via the provider config.
+        self.target = Path(config.working_directory)
+        return self
+
     def __call__(self, binding):
         owner = self
         class Stage:
@@ -104,11 +109,18 @@ class QaFixBase(unittest.TestCase):
             self.git(*args)
         self.config = ProviderRuntimeConfig(str(self.target), sys.executable, sys.executable)
         self.stages = Stages(self.target)
-        patcher = patch('switchyard.recovery.ProviderStageExecutorResolver', return_value=self.stages)
+        patcher = patch('switchyard.recovery.ProviderStageExecutorResolver', side_effect=self.stages.resolve)
         patcher.start(); self.addCleanup(patcher.stop)
 
-    def git(self, *args):
-        return subprocess.check_output(['git', *args], cwd=self.target, stderr=subprocess.DEVNULL).decode().strip()
+    def git(self, *args, cwd=None):
+        return subprocess.check_output(['git', *args], cwd=cwd or self.target, stderr=subprocess.DEVNULL).decode().strip()
+
+    @property
+    def delivery(self):
+        return self.work/'workspace'  # The isolated delivery worktree; the source checkout stays untouched.
+
+    def dgit(self, *args):
+        return self.git(*args, cwd=self.delivery)
 
     def save_config(self):
         text = json.dumps(self.data); self.configfile.write_text(text); return text
@@ -116,7 +128,7 @@ class QaFixBase(unittest.TestCase):
     def deliver(self):
         execution = execute_recoverable_v2_work(self.text, 'bugfix', 'Rename board from the menu.', self.work, self.config)
         if execution.result.terminal_state == 'READY_FOR_MANUAL_QA':
-            self.first = create_qa_candidate(self.target, execution.workspace, execution.result, 'bugfix', self.qa)
+            self.first = create_qa_candidate(self.delivery, execution.workspace, execution.result, 'bugfix', self.qa)
             attach_qa_candidate(self.work, self.qa)
         return execution
 
@@ -244,12 +256,12 @@ class QaFixTests(QaFixBase):
 
         # The rejected candidate can no longer be accepted; accept applies to candidate #2 only.
         with self.assertRaisesRegex(LifecycleError, 'already finalized'):
-            accept_v2_work(self.target, self.qa)
-        self.assertEqual(self.git('rev-list', '--count', 'HEAD'), '1')
+            accept_v2_work(self.delivery, self.qa)
+        self.assertEqual(self.dgit('rev-list', '--count', 'HEAD'), '1')
         decision = accept_v2_candidate(self.work)
         self.assertEqual((decision.terminal, decision.candidate_identity), ('ACCEPTED', second['identity']))
-        self.assertEqual(self.git('show', 'HEAD:source.py'), 'fixed-2')
-        self.assertEqual(self.git('rev-list', '--count', 'HEAD'), '2')
+        self.assertEqual(self.dgit('show', 'HEAD:source.py'), 'fixed-2')
+        self.assertEqual(self.dgit('rev-list', '--count', 'HEAD'), '2')
         self.assertEqual(recovery_status(self.work)['terminal'], 'ACCEPTED')
 
     def test_candidate_identity_advances_even_when_bytes_are_identical(self):
@@ -285,7 +297,7 @@ class QaFixTests(QaFixBase):
         status = recovery_status(self.work)
         self.assertEqual((status['qa_candidate']['sequence'], status['qa_fix_rounds']), (3, 2))
         self.assertEqual(accept_v2_candidate(self.work).terminal, 'ACCEPTED')
-        self.assertEqual(self.git('show', 'HEAD:source.py'), 'fixed-3')
+        self.assertEqual(self.dgit('show', 'HEAD:source.py'), 'fixed-3')
 
     def test_interrupted_corrective_cycle_resumes_with_feedback_and_publishes_candidate(self):
         self.deliver(); self.stages.fail_state = 'FIX'
@@ -422,8 +434,8 @@ class QaFixTests(QaFixBase):
         self.assertEqual((status['terminal'], status['qa_candidate']['sequence'], status['qa_fix_rounds']), ('READY_FOR_MANUAL_QA', 1, 0))
         self.assertEqual(self.first.identity, status['qa_candidate']['identity'])
         self.assertEqual(self.events()[-1].state, 'READY_FOR_MANUAL_QA')
-        self.assertEqual(accept_v2_work(self.target, self.qa).terminal, 'ACCEPTED')
-        self.assertEqual(self.git('show', 'HEAD:source.py'), 'fixed-1')
+        self.assertEqual(accept_v2_work(self.delivery, self.qa).terminal, 'ACCEPTED')
+        self.assertEqual(self.dgit('show', 'HEAD:source.py'), 'fixed-1')
         self.assertNotIn('sequence', json.loads(WorkWorkspace.open(self.qa).read_artifact('qa_candidate')))
 
     def test_cli_qa_fix_and_accept(self):
@@ -499,10 +511,10 @@ class RepeatedQaRoundTests(QaFixBase):
         c1, c2, c3 = self.assert_lineage()
         for old in (c1, c2):
             with self.assertRaisesRegex(LifecycleError, 'already finalized'):
-                accept_v2_work(self.target, old['workspace'])
+                accept_v2_work(self.delivery, old['workspace'])
         decision = accept_v2_candidate(self.work)
         self.assertEqual((decision.terminal, decision.candidate_identity), ('ACCEPTED', c3['identity']))
-        self.assertEqual(self.git('show', 'HEAD:source.py'), 'fixed-3')
+        self.assertEqual(self.dgit('show', 'HEAD:source.py'), 'fixed-3')
         self.assertEqual(qa_history(self.work)['candidates'][2]['decision'], 'ACCEPTED')
 
     def test_crash_during_round_two_reject_is_not_duplicated(self):
@@ -550,7 +562,7 @@ class RepeatedQaRoundTests(QaFixBase):
         self.deliver(); self.qa_fix(ROUND1)
         # An embedder attaching an unrelated (sequence-1) candidate must not silently fork the lineage.
         history = tuple(read_events(self.work/'events.jsonl'))
-        foreign = create_qa_candidate(self.target, WorkWorkspace.open(self.work), RunResult(history[-1].state, history),
+        foreign = create_qa_candidate(self.delivery, WorkWorkspace.open(self.work), RunResult(history[-1].state, history),
                                       'bugfix', self.root/'foreign')
         attach_qa_candidate(self.work, self.root/'foreign')
         frozen = {p: p.read_bytes() for p in (self.root/'foreign'/'manifest.jsonl', self.work/'qa_fix'/'manifest.jsonl')}
@@ -756,7 +768,7 @@ class QaEvidenceTests(QaFixBase):
         # Outside the product worktree; never seen by Git.
         stored = self.work/'qa'/'evidence'/shot['id']/'shot.png'
         self.assertTrue(stored.is_file()); self.assertFalse(stored.resolve().is_relative_to(self.target))
-        self.assertNotIn('shot.png', self.git('status', '--porcelain', '--untracked-files=all'))
+        self.assertNotIn('shot.png', self.dgit('status', '--porcelain', '--untracked-files=all'))
         # Evidence does not change lifecycle facts.
         self.assertEqual(self.findings_status(), ['fixed'])
         self.assertEqual(len([e for e in self.events() if e.kind == 'invocation_started']), 6)
@@ -858,8 +870,8 @@ class QaEvidenceTests(QaFixBase):
         self.assertEqual(r2['findings'][0]['evidence'], [])
         self.assertEqual(r1['findings'][0]['evidence'], first)
         self.assertEqual(hashlib.sha256(evidence_bytes(self.work, first[0]['id'])).hexdigest(), hashlib.sha256(PNG).hexdigest())
-        self.assertNotIn('shot.png', self.git('show', '--name-only', '--format=', 'HEAD'))  # Not in the accepted commit.
-        self.assertNotIn('shot.png', self.git('ls-files'))
+        self.assertNotIn('shot.png', self.dgit('show', '--name-only', '--format=', 'HEAD'))  # Not in the accepted commit.
+        self.assertNotIn('shot.png', self.dgit('ls-files'))
         self.assertEqual([c['sequence'] for c in history['candidates']], [1, 2, 3])
 
     def test_cli_attach_single_finding_and_ambiguous_refusal(self):

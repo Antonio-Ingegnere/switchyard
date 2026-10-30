@@ -67,7 +67,7 @@ class TerminalRecoveryTests(unittest.TestCase):
     def events(self): return tuple(read_events(self.work/'events.jsonl'))
 
     def stopped(self):
-        execution = execute_recoverable_v2_work(self.text, 'feature', 'Human task', self.work, self.config)
+        execution = execute_recoverable_v2_work(self.text, 'feature', 'Human task', self.work, self.config,isolation=False)
         self.assertEqual(execution.result.terminal_state, 'NEEDS_REDIAGNOSIS')
         return execution
 

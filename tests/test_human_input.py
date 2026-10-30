@@ -78,7 +78,7 @@ class HumanInputTests(unittest.TestCase):
         self.http.start();self.addCleanup(self.http.stop)
 
     def start(self):
-        return execute_recoverable_v2_work(self.text,'feature',URL,self.work,self.config)
+        return execute_recoverable_v2_work(self.text,'feature',URL,self.work,self.config,isolation=False)
 
     def answer(self, text=ANSWER, request_id=None):
         request_id = request_id or recovery_status(self.work)['human_input_request_id']

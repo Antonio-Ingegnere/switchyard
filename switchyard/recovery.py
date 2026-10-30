@@ -112,6 +112,19 @@ class _Repo(GitRepository):
         if not stat.S_ISREG(info.st_mode):raise RecoveryBlocked('RECOVERY_BLOCKED','unsupported_file_type',[name])
         return path.read_bytes(),'100755' if info.st_mode & stat.S_IXUSR else '100644'
 
+    def probe(self,*args):
+        """(returncode, stdout) for questions Git answers with an exit status; never raises on nonzero."""
+        try:
+            result=subprocess.run([self.git_executable,'-c','core.filemode=true','--literal-pathspecs',*args],
+                cwd=self.workspace,env=self.env,capture_output=True,timeout=30)
+        except (OSError,subprocess.SubprocessError):
+            raise RecoveryBlocked('RECOVERY_BLOCKED','git_inspection_failed') from None
+        return result.returncode,result.stdout
+
+    def common_dir(self):
+        p=Path(os.fsdecode(self.git('rev-parse','--git-common-dir').strip()))
+        return str((p if p.is_absolute() else self.workspace/p).resolve())
+
     def index_path(self):
         p=Path(os.fsdecode(self.git('rev-parse','--git-path','index').strip()))
         return p if p.is_absolute() else self.workspace/p
@@ -152,7 +165,114 @@ def _bytes(store,digest):
     return data
 
 
-def _baseline(repo,store,config,flow):
+# --- Delivery isolation (#3): one branch + one Git worktree per work -------------------------
+# Provenance (`isolation`) is recorded in the `provisioning` operation BEFORE any Git mutation and
+# frozen into the baseline afterwards. Every later operation routes to the recorded worktree and
+# never derives it from the caller's checkout. Git is required; there is no filesystem-copy mode.
+DELIVERY_WORKTREE='workspace'
+_WORK_ID=re.compile(r'[A-Za-z0-9][A-Za-z0-9_-]*(\.[A-Za-z0-9_-]+)*')
+DIRTY_SOURCE=('dirty_source_worktree: Cannot start isolated delivery from a dirty source worktree. '
+              'Commit, stash, or remove local changes first.')
+
+
+def _source_isolation(source,root):
+    """Exact committed base + deterministic identities; reads the source checkout, never writes it."""
+    repo=_Repo(source)
+    try:identity=repo.identity()
+    except RecoveryBlocked:raise RecoveryBlocked('DELIVERY_BLOCKED','source_not_a_git_branch_checkout') from None
+    except ValueError as exc:raise RecoveryBlocked('DELIVERY_BLOCKED','source_repository_unsupported: '+str(exc)) from None
+    # Same visibility as the recovery snapshot (.gitignore/exclude). The config file alone is exempt,
+    # as in drift checks: the work runs on the config text frozen into its baseline, not the file.
+    raw=repo.git('status','--porcelain=v1','-z','--no-renames','--untracked-files=all')
+    dirty=sorted({os.fsdecode(e[3:]) for e in raw.split(b'\0') if e}-{CONFIG_PATH})
+    if dirty:raise RecoveryBlocked('DELIVERY_BLOCKED',DIRTY_SOURCE,dirty)
+    work_id=root.name
+    if not _WORK_ID.fullmatch(work_id) or len(work_id)>100 or work_id.endswith('.lock'):
+        raise RecoveryBlocked('DELIVERY_BLOCKED','work_id_not_a_safe_branch_name')
+    if root==repo.workspace or root.is_relative_to(repo.workspace):
+        raise RecoveryBlocked('DELIVERY_BLOCKED','work_root_inside_source_worktree')
+    return dict(version=1,repository=repo.common_dir(),source_worktree=str(repo.workspace),source_branch=identity['branch'],
+                base_sha=identity['head'],delivery_branch='refs/heads/switchyard/'+work_id,
+                delivery_worktree=str(root/DELIVERY_WORKTREE))
+
+
+def _branch_head(repo,branch):
+    code,out=repo.probe('rev-parse','--verify','--quiet',branch+'^{commit}')
+    return out.decode().strip() if code==0 else None
+
+
+def _worktrees(repo):
+    """{resolved worktree path: checked-out ref or None} as the repository itself records them."""
+    listed,path={},None
+    for line in repo.git('worktree','list','--porcelain','-z').split(b'\0'):
+        if line.startswith(b'worktree '):path=str(Path(os.fsdecode(line[9:])).resolve());listed[path]=None
+        elif line.startswith(b'branch ') and path:listed[path]=os.fsdecode(line[7:])
+    return listed
+
+
+def _check_isolation(iso,terminal,*,pristine=False):
+    """The recorded worktree still exists, belongs to the recorded repository, has the delivery
+    branch checked out, and descends from base_sha (exactly base_sha and clean when `pristine`)."""
+    path=Path(iso['delivery_worktree'])
+    if path.is_symlink() or not path.is_dir():
+        raise RecoveryBlocked(terminal,'delivery_worktree_missing',[str(path)])
+    repo=_Repo(path)
+    code,top=repo.probe('rev-parse','--show-toplevel')
+    if code or Path(os.fsdecode(top.strip())).resolve()!=path or repo.common_dir()!=iso['repository']:
+        raise RecoveryBlocked(terminal,'delivery_worktree_not_owned',[str(path)])
+    if _worktrees(repo).get(str(path))!=iso['delivery_branch']:
+        raise RecoveryBlocked(terminal,'delivery_branch_mismatch',[iso['delivery_branch']])
+    head=_branch_head(repo,'HEAD')
+    if pristine:
+        if head!=iso['base_sha'] or repo.git('status','--porcelain=v1','-z','--untracked-files=all'):
+            raise RecoveryBlocked(terminal,'delivery_worktree_not_pristine',[str(path)])
+    elif head is None or repo.probe('merge-base','--is-ancestor',iso['base_sha'],head)[0]!=0:
+        raise RecoveryBlocked(terminal,'delivery_base_mismatch',[iso['base_sha']])
+    return repo
+
+
+def _provision_preflight(iso):
+    """A fresh start owns nothing yet: any existing branch or path is someone else's."""
+    path=Path(iso['delivery_worktree'])
+    if _branch_head(_Repo(iso['source_worktree']),iso['delivery_branch']) is not None:
+        raise RecoveryBlocked('DELIVERY_BLOCKED','delivery_branch_exists',[iso['delivery_branch']])
+    if path.exists() or path.is_symlink():
+        raise RecoveryBlocked('DELIVERY_BLOCKED','delivery_worktree_path_exists',[str(path)])
+
+
+def _provision(iso):
+    """Idempotent after the durable intent: create the branch at base_sha, then its worktree. A retry
+    adopts an existing branch/worktree only if it exactly matches the recorded provenance (branch at
+    base_sha, clean worktree of this repository on that branch). Nothing is ever reset or deleted."""
+    source=_Repo(iso['source_worktree'])
+    if source.common_dir()!=iso['repository']:raise RecoveryBlocked('DELIVERY_BLOCKED','source_repository_changed')
+    path=Path(iso['delivery_worktree']);branch=iso['delivery_branch']
+    head=_branch_head(source,branch)
+    if head is None:
+        zero='0'*len(iso['base_sha'])  # Create-only compare-and-swap: never moves an existing ref.
+        source.git('update-ref','-m','switchyard: delivery branch for '+path.parent.name,branch,iso['base_sha'],zero)
+    elif head!=iso['base_sha']:
+        raise RecoveryBlocked('DELIVERY_BLOCKED','delivery_branch_conflict',[branch])
+    if not (path.exists() or path.is_symlink()):
+        if iso['delivery_branch'] in _worktrees(source).values():
+            raise RecoveryBlocked('DELIVERY_BLOCKED','delivery_branch_checked_out_elsewhere',[branch])
+        # Repository hooks do not run for Switchyard's own checkout.
+        source.git('-c','core.hooksPath='+os.devnull,'worktree','add',str(path),branch[len('refs/heads/'):])
+    return _check_isolation(iso,'DELIVERY_BLOCKED',pristine=True)
+
+
+def _execution(baseline,config,terminal):
+    """The work's execution workspace and the provider config routed into it. Isolated work always
+    runs in its recorded delivery worktree; legacy in-place work keeps the caller's checkout."""
+    iso=baseline.get('isolation')
+    if iso is None:return _Repo(config.working_directory),config
+    repo=_check_isolation(iso,terminal)
+    if str(Path(config.working_directory).resolve()) not in (iso['source_worktree'],iso['delivery_worktree']):
+        raise RecoveryBlocked(terminal,'provider_workspace_mismatch')
+    return repo,replace(config,working_directory=iso['delivery_worktree'])
+
+
+def _baseline(repo,store,config,flow,isolation=None):
     snap,tree=repo.snapshot();sources={}
     for name,fp in snap['files'].items():
         data,mode=repo.content(name)
@@ -163,7 +283,8 @@ def _baseline(repo,store,config,flow):
         else:sources[name]={'blob':_blob(store,data)}
     index=repo.index_path().read_bytes()
     if repo.snapshot()[0]!=snap:raise RecoveryBlocked('RECOVERY_BLOCKED','worktree_moved_during_baseline')
-    _put(store,'baseline',dict(snapshot=snap,sources=sources,index_blob=_blob(store,index),config=config,flow=flow,lifecycle_contract_version=2))
+    _put(store,'baseline',dict(snapshot=snap,sources=sources,index_blob=_blob(store,index),config=config,flow=flow,lifecycle_contract_version=2,
+                                **({'isolation':isolation} if isolation else {})))
     _put(store,'checkpoint',dict(snapshot=snap,manifest=None))
 
 
@@ -318,18 +439,48 @@ def _drive(project,flow,request,root,config,store,repo,history=None,recover_to=N
     return WorkflowExecution(result,workspace,compiled)
 
 
-def execute_recoverable_v2_work(config_text,flow_name,request,work_root,provider_runtime_config):
-    """New delivery with a baseline before any provider invocation."""
+def execute_recoverable_v2_work(config_text,flow_name,request,work_root,provider_runtime_config,*,isolation=True):
+    """New delivery with a baseline before any provider invocation.
+
+    Isolated (default): `provider_runtime_config.working_directory` is the clean source checkout.
+    Durable order: source preflight (no writes) -> `provisioning` operation with the provenance ->
+    branch at base_sha -> worktree -> baseline of the worktree (provenance frozen) -> `running`.
+    Retrying the same start after a crash anywhere before `running` converges on the same branch
+    and worktree. `isolation=False` is the legacy in-place mode (dirty baselines, caller's checkout)."""
     root=Path(work_root).resolve()
     project=simple_config_from_text(config_text)
     project.bundle.flow(flow_name)
     with _lock(root):
-        if (root/'recovery/manifest.jsonl').exists() or (root/'manifest.jsonl').exists():
-            raise RecoveryBlocked('RECOVERY_BLOCKED','workspace_not_fresh')
-        store=WorkWorkspace.open(root/'recovery',CATALOG)
-        store.initialize_request(request)
-        repo=_Repo(provider_runtime_config.working_directory)
-        _baseline(repo,store,config_text,flow_name)
+        if (root/'manifest.jsonl').exists():raise RecoveryBlocked('RECOVERY_BLOCKED','workspace_not_fresh')
+        retry=(root/'recovery/manifest.jsonl').exists()
+        if retry:
+            store=WorkWorkspace.open(root/'recovery',CATALOG)
+            op=_read(store,'operation') if store.versions('operation') else {}
+            if not isolation or op.get('phase')!='provisioning':
+                raise RecoveryBlocked('RECOVERY_BLOCKED','workspace_not_fresh')
+            if store.read_artifact('request')!=request:raise RecoveryBlocked('RECOVERY_BLOCKED','delivery_start_differs')
+            iso=op['isolation']
+        elif isolation:
+            iso=_source_isolation(provider_runtime_config.working_directory,root)  # Refuses before any write.
+            _provision_preflight(iso)
+            store=WorkWorkspace.open(root/'recovery',CATALOG)
+            store.initialize_request(request)
+            _operation(store,'provisioning',isolation=iso)
+        else:
+            store=WorkWorkspace.open(root/'recovery',CATALOG)
+            store.initialize_request(request)
+        if isolation:
+            repo=_provision(iso)
+            if store.versions('baseline'):
+                baseline=_read(store,'baseline')
+                if (baseline['config'],baseline['flow'],baseline.get('isolation'))!=(config_text,flow_name,iso):
+                    raise RecoveryBlocked('RECOVERY_BLOCKED','delivery_start_differs')
+                _drift(baseline['snapshot'],repo.snapshot()[0],'DELIVERY_BLOCKED')
+            else:_baseline(repo,store,config_text,flow_name,iso)
+            provider_runtime_config=replace(provider_runtime_config,working_directory=iso['delivery_worktree'])
+        else:
+            repo=_Repo(provider_runtime_config.working_directory)
+            _baseline(repo,store,config_text,flow_name)
         _operation(store,'running')
         return _drive(project,flow_name,request,root,provider_runtime_config,store,repo)
 
@@ -481,7 +632,7 @@ def resume_v2_work(work_root,config_text,provider_runtime_config,reason=''):
             raise RecoveryBlocked('RESUME_BLOCKED','invalid_configuration: '+str(exc)[:512]) from None
         if _semantic(config_text)!=_semantic(baseline['config']):
             raise RecoveryBlocked('RESUME_BLOCKED','semantic_configuration_changed_new_delivery_required')
-        repo=_Repo(provider_runtime_config.working_directory);snap,_=repo.snapshot()
+        repo,provider_runtime_config=_execution(baseline,provider_runtime_config,'RESUME_BLOCKED');snap,_=repo.snapshot()
         checkpoint=_read(store,'checkpoint')
         _drift(checkpoint['snapshot'],snap,'RESUME_BLOCKED',ignore=(CONFIG_PATH,))
         history=tuple(read_events(root/'events.jsonl'));summarize_runs(history)
@@ -510,7 +661,10 @@ def resume_v2_work(work_root,config_text,provider_runtime_config,reason=''):
 
 
 def recovery_status(work_root):
-    store=_store(work_root);op=_read(store,'operation');base=_read(store,'baseline')
+    store=_store(work_root);op=_read(store,'operation')
+    if op['phase']=='provisioning':
+        raise RecoveryBlocked('RECOVERY_BLOCKED','delivery_provisioning_incomplete: retry the same delivery start')
+    base=_read(store,'baseline')
     phase=op['phase']
     if phase=='running':
         try:
@@ -587,10 +741,21 @@ def recovery_status(work_root):
                              origin_state=question['origin_state'],origin_outcome=question['origin_outcome'])
     return dict(work_id=Path(work_root).name,target=base['snapshot']['identity']['target'],flow=base['flow'],phase=phase,terminal=terminal,
                 state=op.get('state'),workflow_state=workflow_state,reason=op.get('reason'),diagnostic=op.get('diagnostic'),resume_allowed=resumable,resume_to=route,
-                recovery_source=recovery_source,**lifecycle,
+                recovery_source=recovery_source,**lifecycle,**_isolation_status(base),
                 **accounting,**human_history,**qa_status,**({'resume_blocked':blocked} if blocked else {}),
                 **({'provider_failure':op['provider_failure']} if phase=='interrupted' and 'provider_failure' in op else {}),
                 rollback_allowed=phase in ('interrupted','delivery_done','rollback_running','reopened') and not op.get('checkpoint_uncertain',False) and terminal!='ACCEPTED')
+
+
+def _isolation_status(base):
+    """Debug view of the frozen isolation provenance; a failed check is reported, never repaired."""
+    iso=base.get('isolation')
+    if iso is None:return dict(isolated=False)
+    try:_check_isolation(iso,'RECOVERY_BLOCKED');problem=None
+    except RecoveryBlocked as exc:problem=exc.reason
+    return dict(isolated=True,base_sha=iso['base_sha'],delivery_branch=iso['delivery_branch'],
+                delivery_worktree=iso['delivery_worktree'],source_worktree=iso['source_worktree'],
+                **({'isolation_blocked':problem} if problem else {}))
 
 
 def attach_qa_candidate(work_root,qa_root):
@@ -600,6 +765,10 @@ def attach_qa_candidate(work_root,qa_root):
         from .qa_lifecycle import _load
         _,candidate,identity=_load(qa_root)
         if candidate['source_workspace']!=str(Path(work_root).resolve()):raise RecoveryBlocked('RECOVERY_BLOCKED','qa_source_mismatch')
+        iso=_read(store,'baseline').get('isolation')
+        if iso is not None and candidate['target']!=iso['delivery_worktree']:
+            # A candidate captured from the source checkout would later be accepted THERE.
+            raise RecoveryBlocked('RECOVERY_BLOCKED','qa_candidate_not_from_delivery_worktree')
         _put(store,'qa_reference',dict(workspace=str(Path(qa_root).resolve()),identity=identity))
 
 
@@ -618,6 +787,7 @@ def rollback_v2_work(work_root,reason=''):
                 raise RecoveryBlocked('ROLLBACK_BLOCKED','accepted_history_use_git_revert_or_corrective_delivery')
         if op.get('checkpoint_uncertain'):
             raise RecoveryBlocked('ROLLBACK_BLOCKED','uncertain_checkpoint_after_controller_crash')
+        if 'isolation' in base:_check_isolation(base['isolation'],'ROLLBACK_BLOCKED')
         baseline=base['snapshot'];repo=_Repo(baseline['identity']['target']);current,_=repo.snapshot()
         checkpoint=_read(store,'checkpoint')['snapshot']
         owned={p for p in set(baseline['files'])|set(checkpoint['files']) if baseline['files'].get(p)!=checkpoint['files'].get(p)}
@@ -716,7 +886,7 @@ def _human_status(root, store):
     return dict(work_id=Path(root).name,target=base['snapshot']['identity']['target'],flow=base['flow'],
         phase='waiting_for_human' if answer is None else 'human_answer_ready', terminal=None,
         state=question['wait_state'],workflow_state=question['wait_state'],human_input_pending=answer is None,
-        **_state_status(project,base['flow'],question['wait_state']),recovery_source='human_input',
+        **_state_status(project,base['flow'],question['wait_state']),recovery_source='human_input',**_isolation_status(base),
         human_input_request_id=question['request_id'],human_input_round=question['round'],
         question=question['question'],blockers=question['blockers'],resume_to=declaration.single_resume_to,
         resume_targets=list(declaration.resume_targets),selected_resume_to=answer_target(question,answer) if answer else None,
@@ -751,7 +921,7 @@ def _continue_human(root,store,config_text,config,request_id=None,answer_text=No
     declaration = frozen.bundle.flow(base['flow']).states[question['wait_state']]
     if declaration.wait_for != 'human_input' or declaration.resume_targets != request_targets(question):
         raise RecoveryBlocked('RESUME_BLOCKED','human_wait_contract_mismatch')
-    repo = _Repo(config.working_directory)
+    repo, config = _execution(base, config, 'RESUME_BLOCKED')
     checkpoint = _read(store,'checkpoint')
     _drift(checkpoint['snapshot'],repo.snapshot()[0],'RESUME_BLOCKED',ignore=(CONFIG_PATH,))
     if _manifest(root) != checkpoint['manifest']:
@@ -799,7 +969,7 @@ def _corrective_plan(root,store,baseline,config_text,config):
         raise RecoveryBlocked('RESUME_BLOCKED','invalid_configuration: '+str(exc)[:512]) from None
     if _semantic(config_text)!=_semantic(baseline['config']):
         raise RecoveryBlocked('RESUME_BLOCKED','semantic_configuration_changed_new_delivery_required')
-    repo=_Repo(config.working_directory);snap,_=repo.snapshot()
+    repo,config=_execution(baseline,config,'RESUME_BLOCKED');snap,_=repo.snapshot()
     checkpoint=_read(store,'checkpoint')
     _drift(checkpoint['snapshot'],snap,'RESUME_BLOCKED',ignore=(CONFIG_PATH,))
     history=tuple(read_events(root/'events.jsonl'));summarize_runs(history)
@@ -813,12 +983,12 @@ def _corrective_plan(root,store,baseline,config_text,config):
     if _manifest(root)!=checkpoint['manifest']:raise RecoveryBlocked('RESUME_BLOCKED','artifact_history_changed')
     missing=[a for a in project.bundle.flow(baseline['flow']).states[target].consumes if not workspace.versions(a)]
     if missing:raise RecoveryBlocked('RESUME_BLOCKED','recovery_inputs_missing',missing)
-    return project,repo,history,void,enter,target
+    return project,repo,config,history,void,enter,target
 
 
 def _continue_corrective(root,store,baseline,config_text,config,reason=''):
     """REOPENED -> declared corrective entry, same run, same budgets, same history."""
-    project,repo,history,void,enter,target=_corrective_plan(root,store,baseline,config_text,config)
+    project,repo,config,history,void,enter,target=_corrective_plan(root,store,baseline,config_text,config)
     requests,resolved=fix_records(WorkWorkspace.open(root))
     _operation(store,'running',recovery=dict(from_terminal=QA_READY,resume_to=target,reason=reason,qa_fix_round=len(requests)))
     workspace=WorkWorkspace.open(root)
@@ -936,7 +1106,7 @@ def _publish_corrective_candidate(root,store,repo,flow,workspace,result):
 
 def _finish_publication(root,store,baseline,config):
     """Resume an interrupted/failed candidate publication; no stage is executed."""
-    repo=_Repo(config.working_directory)
+    repo,_=_execution(baseline,config,'RESUME_BLOCKED')
     checkpoint=_read(store,'checkpoint')
     _drift(checkpoint['snapshot'],repo.snapshot()[0],'RESUME_BLOCKED',ignore=(CONFIG_PATH,))
     history=tuple(read_events(root/'events.jsonl'));summarize_runs(history)
@@ -990,4 +1160,7 @@ def accept_v2_candidate(work_root,*,git_executable=None):
         ref=_read(store,'qa_reference')
         _,_,identity=_load_candidate(ref['workspace'])
         if identity!=ref['identity']:raise RecoveryBlocked('ACCEPT_BLOCKED','qa_candidate_identity_mismatch')
+        # Isolated work: the candidate lives in the delivery worktree, so acceptance records its commit on
+        # the delivery branch there; the source checkout is never written. Integration is a later slice.
+        if 'isolation' in baseline:_check_isolation(baseline['isolation'],'ACCEPT_BLOCKED')
         return accept_v2_work(baseline['snapshot']['identity']['target'],ref['workspace'],git_executable=git_executable)

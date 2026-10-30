@@ -68,7 +68,7 @@ class RecoveryTests(unittest.TestCase):
     def git(self,*args):return subprocess.check_output(['git',*args],cwd=self.target,stderr=subprocess.DEVNULL).decode().strip()
     def save_config(self):
         text=json.dumps(self.data);self.configfile.write_text(text);return text
-    def start(self):return execute_recoverable_v2_work(self.text,'feature','Human task',self.work,self.config)
+    def start(self):return execute_recoverable_v2_work(self.text,'feature','Human task',self.work,self.config,isolation=False)
     def interrupt(self):
         with self.assertRaises(ExecutionError):self.start()
         self.assertEqual(recovery_status(self.work)['terminal'],'INTERRUPTED')

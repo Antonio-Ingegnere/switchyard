@@ -25,6 +25,46 @@ After a successful delivery, the consumer creates the usual external QA candidat
 and calls `attach_qa_candidate(work_root, qa_root)`. Accept/reopen remain separate
 human decisions through the existing lifecycle APIs. Recovery owns no commit.
 
+## Delivery isolation (#3)
+
+A new delivery runs in its own Git branch and worktree; `provider_runtime_config.working_directory`
+names the user's **source checkout**, which delivery execution never writes. Switchyard requires
+Git (there is no filesystem-copy isolation).
+
+- **Clean source.** The source checkout must be a branch checkout with no staged, modified or
+  untracked (not `.gitignore`d) paths: `DELIVERY_BLOCKED: dirty_source_worktree …` lists them. Only
+  `.switchyard/config.yaml` is exempt (as in drift checks: the work runs on the config text frozen in its
+  baseline). Nothing is stashed, committed, copied or reset.
+- **Provenance** (`isolation` in the baseline, shown by `recovery_status`): `repository` (common Git dir),
+  `source_worktree`, `source_branch`, `base_sha` (full commit SHA of the source `HEAD`),
+  `delivery_branch` = `refs/heads/switchyard/<work-id>` (work id = work-root name, which must be a safe
+  ref component), `delivery_worktree` = `<work_root>/workspace`. The work root may not lie inside the
+  source checkout. Status also reports `isolated` and, when the recorded worktree no longer matches,
+  `isolation_blocked`.
+- **Provisioning order.** Preflight (clean source, branch and path absent; no writes) -> `provisioning`
+  operation holding the provenance -> branch created at `base_sha` (create-only ref update) ->
+  `git worktree add` (repository hooks disabled) -> baseline of the worktree -> `running`. Retrying the
+  same start after a crash anywhere before `running` adopts the branch/worktree only if they still match
+  exactly (branch at `base_sha`, clean worktree of the same repository on that branch); otherwise it
+  refuses (`delivery_branch_conflict`, `delivery_worktree_not_owned`, …). A fresh start refuses an
+  existing branch (`delivery_branch_exists`) or path (`delivery_worktree_path_exists`). Nothing is ever
+  force-reset or deleted.
+- **Routing.** Every model stage, the verifier command, checkpoints, rollback and QA candidates use the
+  recorded delivery worktree: the runtime replaces the provider config's working directory, which must be
+  either the source checkout or the delivery worktree (`provider_workspace_mismatch`). Candidates are
+  relative to `base_sha`; a candidate captured elsewhere is refused at attach
+  (`qa_candidate_not_from_delivery_worktree`).
+- **Base drift.** Advancing or editing the source checkout after the start has no effect: the work stays
+  based on `base_sha`; it is never rebased.
+- **Recovery** validates before acting: the worktree exists, belongs to the recorded repository, has the
+  delivery branch checked out, and descends from `base_sha` (`delivery_worktree_missing`,
+  `delivery_worktree_not_owned`, `delivery_branch_mismatch`, `delivery_base_mismatch`). A deleted or
+  repointed worktree is never recreated.
+- **Accept** commits the reviewed candidate on the delivery branch inside the delivery worktree; the
+  source checkout and its branch are untouched. Integrating that branch is a later slice.
+- **Legacy.** Work whose baseline has no `isolation` (and `isolation=False` starts) keeps the in-place
+  semantics: the caller's checkout, dirty baselines and in-place rollback.
+
 ## Timeouts and budgets
 
 `agents.<name>.timeout` is seconds: a finite positive number, never a boolean or

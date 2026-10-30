@@ -143,9 +143,12 @@ def _work_command(args):
             accept_v2_candidate(args.work_root)
             status = recovery_status(args.work_root)
         elif args.action in ('answer', 'resume', 'qa-fix'):
-            config_path = Path(args.config) if args.config else Path(status['target'])/'.switchyard/config.yaml'
+            # Isolated work: the user edits config in their source checkout; the runtime itself routes
+            # execution into the recorded delivery worktree.
+            checkout = status.get('source_worktree') or status['target']
+            config_path = Path(args.config) if args.config else Path(checkout)/'.switchyard/config.yaml'
             config_text = config_path.read_text(encoding='utf-8')
-            provider = ProviderRuntimeConfig(status['target'], args.claude_executable, args.codex_executable)
+            provider = ProviderRuntimeConfig(checkout, args.claude_executable, args.codex_executable)
             if args.action == 'qa-fix':
                 qa_fix_v2_work(args.work_root, args.feedback, config_text, provider, findings=args.findings,
                                attachments=args.attachments)
