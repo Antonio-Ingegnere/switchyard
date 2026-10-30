@@ -31,7 +31,8 @@ from .provider_stages import ProviderStageExecutorResolver
 from .provider_process import ProviderExecutionError
 from .context_transport import EvidenceDeliveryError
 from .git_safety import GitRepository
-from .qa_lifecycle import (withdraw_qa_candidate, finish_reopen_v2_work, accept_v2_work, create_qa_candidate,
+from .qa_lifecycle import (withdraw_qa_candidate, finish_reopen_v2_work, accept_v2_work, finish_accept_v2_work, create_qa_candidate,
+                           QaDecision,
                            fix_records, write_fix_request, resolve_fix_request, qa_rounds,
                            finding_inputs, evidence_plan, load_evidence, request_findings, finding_states,
                            revalidate_candidate, _load as _load_candidate, LifecycleError)
@@ -684,7 +685,7 @@ def recovery_status(work_root):
         except RecoveryBlocked:pass  # Another controller still owns the active invocation.
     if phase=='waiting_for_human':
         return _human_status(work_root,store)
-    terminal={'running':'RUNNING','interrupted':'INTERRUPTED','reopened':'REOPENED','rolled_back':'ROLLED_BACK','rollback_running':'ROLLBACK_BLOCKED'}.get(phase,op.get('terminal'))
+    terminal={'running':'RUNNING','interrupted':'INTERRUPTED','reopened':'REOPENED','rolled_back':'ROLLED_BACK','rollback_running':'ROLLBACK_BLOCKED','accepted':'ACCEPTED'}.get(phase,op.get('terminal'))
     if phase=='delivery_done' and op.get('terminal')==QA_READY and store.versions('qa_reference'):
         ref=_read(store,'qa_reference')
         if not (Path(ref['workspace'])/'manifest.jsonl').is_file():
@@ -693,7 +694,7 @@ def recovery_status(work_root):
         if qa.versions('qa_decision'):terminal=_read(qa,'qa_decision')['terminal']
         if _rejection_pending(store,op,work_root):terminal='REOPENED'  # Durably requested, not yet finalized.
     project=_frozen_project(base)
-    workflow_state=op.get('terminal') if phase=='delivery_done' else (QA_READY if phase=='reopened' else op.get('state'))
+    workflow_state=op.get('terminal') if phase=='delivery_done' else (QA_READY if phase in ('reopened','accepted') else op.get('state'))
     lifecycle=_state_status(project,base['flow'],workflow_state)
     recovery_source='runtime_interruption' if phase=='interrupted' else ('workflow' if phase=='delivery_done' else None)
     resumable=False;route=None;accounting={};blocked=None
@@ -726,6 +727,12 @@ def recovery_status(work_root):
                         qa_fix_rounds=len(requests),qa_fix_open=len(requests)>len(resolved),
                         current_candidate_sequence=sequence,current_qa_round=len(requests) or None,
                         qa_round_open=len(requests)>len(resolved))
+        if phase=='accepted':
+            qa_status.update({k:op[k] for k in ('accepted_commit_sha','accepted_candidate_identity','accepted_candidate_sequence')})
+        elif base.get('isolation') and qa_status['qa_candidate']['decision']=='ACCEPTED':
+            # Durable decision, work record not yet written: an explicitly recoverable state (retry accept).
+            qa_status.update(accepted_commit_sha=_read(qa_ws,'qa_decision')['committed_head'],
+                             accepted_candidate_identity=ref['identity'],acceptance_finalization_pending=True)
         counts={state:0 for state in ('open','fixed','verified')}
         for item in qa_history(work_root,include_evidence=False)['rounds']:
             for finding in item['findings']:counts[finding['status']]+=1
@@ -779,7 +786,7 @@ def rollback_v2_work(work_root,reason=''):
     root=Path(work_root).resolve()
     with _lock(root):
         store=_store(root);base=_read(store,'baseline');op=_read(store,'operation')
-        if op['phase'] not in ('interrupted','delivery_done','rollback_running','waiting_for_human','reopened'):
+        if op['phase'] not in ('interrupted','delivery_done','rollback_running','waiting_for_human','reopened','accepted'):
             raise RecoveryBlocked('ROLLBACK_BLOCKED','delivery_not_in_rollback_state')
         if store.versions('qa_reference'):
             ref=_read(store,'qa_reference');qa=WorkWorkspace.open(ref['workspace'])
@@ -1030,6 +1037,7 @@ def qa_fix_v2_work(work_root,feedback,config_text,provider_runtime_config,*,find
             if op['phase']=='reopened':
                 return _continue_corrective(root,store,baseline,config_text,provider_runtime_config,'qa_fix')
             return _complete_qa_fix(root,store,baseline,config_text,provider_runtime_config)
+        if op['phase']=='accepted':raise RecoveryBlocked('QA_FIX_BLOCKED','candidate_already_finalized')
         if op['phase']!='delivery_done' or op.get('terminal')!=QA_READY or not store.versions('qa_reference'):
             raise RecoveryBlocked('QA_FIX_BLOCKED','work_not_ready_for_manual_qa')
         ref=_read(store,'qa_reference')
@@ -1148,19 +1156,74 @@ def qa_history(work_root,*,include_evidence=True):
     return dict(candidates=candidates,rounds=rounds)
 
 
+_DRIFT=('base_head_changed','worktree_identity_changed','unexpected_staged_paths','unexpected_worktree_paths','candidate_drift','empty_candidate')
+
+
+def _acceptance_message(work_id,identity,candidate):
+    """Stable, prompt-free commit message: the candidate's own subject plus work/candidate linkage."""
+    return (f"{candidate['commit_message']}\n\nSwitchyard-Work: {work_id}\n"
+            f"Switchyard-Candidate: {identity}\nSwitchyard-Candidate-Sequence: {candidate.get('sequence',1)}\n")
+
+
+def _accepted(store,iso,identity,sequence,commit):
+    return _operation(store,'accepted',terminal='ACCEPTED',accepted_candidate_identity=identity,
+                      accepted_candidate_sequence=sequence,accepted_commit_sha=commit,
+                      delivery_branch=iso['delivery_branch'],base_sha=iso['base_sha'])
+
+
 def accept_v2_candidate(work_root,*,git_executable=None):
-    """Human ACCEPT of the work's CURRENT candidate; rejected or superseded candidates are unreachable."""
+    """Human ACCEPT of the work's CURRENT candidate; rejected or superseded candidates are unreachable.
+
+    Isolated work: exactly one commit C on the delivery branch (parent = the candidate's base_head),
+    recorded as the delivery result. Durable order: validate (isolation, lineage, candidate == worktree;
+    no writes) -> qa_intent started -> commit object -> qa_intent prepared(C) -> branch CAS base->C ->
+    index -> qa_decision ACCEPTED(C) -> operation `accepted`(C). A retry after a crash converges on the
+    same C; it never commits twice and never resets the branch."""
     root=Path(work_root).resolve()
     with _lock(root):
         store=_store(root);baseline=_read(store,'baseline');op=_read(store,'operation')
+        if op['phase']=='accepted':raise RecoveryBlocked('ACCEPT_BLOCKED','already_accepted: '+op['accepted_commit_sha'])
         if op['phase']!='delivery_done' or op.get('terminal')!=QA_READY or not store.versions('qa_reference'):
             raise RecoveryBlocked('ACCEPT_BLOCKED','work_not_ready_for_manual_qa')
         requests,resolved=fix_records(WorkWorkspace.open(root))
         if len(requests)!=len(resolved):raise RecoveryBlocked('ACCEPT_BLOCKED','corrective_cycle_open')
         ref=_read(store,'qa_reference')
-        _,_,identity=_load_candidate(ref['workspace'])
+        qa,candidate,identity=_load_candidate(ref['workspace'])
         if identity!=ref['identity']:raise RecoveryBlocked('ACCEPT_BLOCKED','qa_candidate_identity_mismatch')
-        # Isolated work: the candidate lives in the delivery worktree, so acceptance records its commit on
-        # the delivery branch there; the source checkout is never written. Integration is a later slice.
-        if 'isolation' in baseline:_check_isolation(baseline['isolation'],'ACCEPT_BLOCKED')
-        return accept_v2_work(baseline['snapshot']['identity']['target'],ref['workspace'],git_executable=git_executable)
+        iso=baseline.get('isolation')
+        if iso is None:  # Legacy in-place work: unchanged semantics.
+            return accept_v2_work(baseline['snapshot']['identity']['target'],ref['workspace'],git_executable=git_executable)
+        repo=_check_isolation(iso,'ACCEPT_BLOCKED')
+        if (candidate['target'],candidate['branch'])!=(iso['delivery_worktree'],iso['delivery_branch']):
+            raise RecoveryBlocked('ACCEPT_BLOCKED','candidate_not_on_delivery_branch')
+        if repo.probe('merge-base','--is-ancestor',iso['base_sha'],candidate['base_head'])[0]!=0:
+            raise RecoveryBlocked('ACCEPT_BLOCKED','delivery_base_mismatch')
+        sequence=candidate.get('sequence',1)
+        message=_acceptance_message(root.name,identity,candidate)
+        if qa.versions('qa_decision'):
+            decision=_read(qa,'qa_decision')
+            if decision['terminal']=='ACCEPTED' and decision.get('committed_head'):
+                # Crash after the decision, before the work record: finish without touching Git.
+                _accepted(store,iso,identity,sequence,decision['committed_head'])
+                return QaDecision(identity,'accept','ACCEPTED',None,decision['committed_head'])
+            raise RecoveryBlocked('ACCEPT_BLOCKED','candidate_already_finalized')
+        pending=bool(qa.versions('qa_intent'))
+        if not pending or _branch_head(repo,iso['delivery_branch'])==candidate['base_head']:
+            # Nothing published yet: refuse unexplained drift before any (further) durable step.
+            try:revalidate_candidate(iso['delivery_worktree'],ref['workspace'],git_executable=git_executable)
+            except LifecycleError as exc:
+                if str(exc) in _DRIFT:raise RecoveryBlocked('ACCEPT_BLOCKED','candidate_worktree_drift: '+str(exc)) from None
+                raise RecoveryBlocked('ACCEPT_BLOCKED','git_inspection_failed: '+str(exc)) from None
+        # The work lock excludes every Switchyard controller of this work, and the delivery worktree and
+        # candidate are Switchyard-owned, so lock files a dead controller left behind are stale.
+        (Path(ref['workspace'])/'.lifecycle.lock').unlink(missing_ok=True)
+        try:
+            if pending:  # Interrupted accept: its index lock (taken only after the intent) is stale too.
+                Path(str(repo.index_path())+'.lock').unlink(missing_ok=True)
+                decision=finish_accept_v2_work(iso['delivery_worktree'],ref['workspace'],git_executable=git_executable,commit_message=message)
+            else:
+                decision=accept_v2_work(iso['delivery_worktree'],ref['workspace'],git_executable=git_executable,commit_message=message)
+        except LifecycleError as exc:
+            raise RecoveryBlocked('ACCEPT_BLOCKED',str(exc)[:512]) from None
+        if decision.terminal=='ACCEPTED':_accepted(store,iso,identity,sequence,decision.committed_head)
+        return decision

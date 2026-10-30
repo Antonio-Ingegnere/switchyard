@@ -60,8 +60,28 @@ Git (there is no filesystem-copy isolation).
   delivery branch checked out, and descends from `base_sha` (`delivery_worktree_missing`,
   `delivery_worktree_not_owned`, `delivery_branch_mismatch`, `delivery_base_mismatch`). A deleted or
   repointed worktree is never recreated.
-- **Accept** commits the reviewed candidate on the delivery branch inside the delivery worktree; the
-  source checkout and its branch are untouched. Integrating that branch is a later slice.
+- **Accept** (`accept_v2_candidate`) produces exactly one commit C on the delivery branch: parent = the
+  candidate's `base_head` (the recorded base, never a newer source HEAD), tree = exactly the candidate's
+  paths/bytes/modes, message = the candidate subject plus `Switchyard-Work`, `Switchyard-Candidate` and
+  `Switchyard-Candidate-Sequence` trailers (no request or QA text). The source checkout and its branch are
+  untouched; integrating the delivery branch is a later slice.
+  - Before any durable step it validates the isolation provenance, that the candidate was captured in the
+    delivery worktree on the delivery branch from a descendant of `base_sha`, that it is the current
+    candidate with no open QA round, and that the worktree still exactly matches it. Drift is refused with
+    `ACCEPT_BLOCKED: candidate_worktree_drift: <reason>` and records nothing; files are never restored or
+    cleaned.
+  - Durable order: `qa_intent` started -> commit object -> `qa_intent` prepared(C) -> branch CAS
+    `base_head` -> C -> index -> `qa_decision` ACCEPTED(C) -> operation `accepted` with
+    `accepted_candidate_identity`, `accepted_candidate_sequence`, `accepted_commit_sha`, `delivery_branch`,
+    `base_sha` (shown by `recovery_status`). The delivery worktree is clean afterwards.
+  - A retry after a crash converges on one commit: nothing published -> accept now (an unpublished commit
+    object stays unreferenced); branch at the prepared C and C provably is this acceptance (parent,
+    paths, content, modes, message) -> reuse C, install its index, record it; anything else on the branch
+    -> `accept_reconciliation_ambiguous`, never reset. A decision recorded without the work record is
+    reported with `acceptance_finalization_pending` and finished by the retry without Git. Under the work
+    lock, lock files left by a dead controller in the candidate and delivery worktree are removed.
+  - Accepting again is refused with `already_accepted: <sha>`; a Git failure yields `COMMIT_BLOCKED` with no
+    accepted commit, as before.
 - **Legacy.** Work whose baseline has no `isolation` (and `isolation=False` starts) keeps the in-place
   semantics: the caller's checkout, dirty baselines and in-place rollback.
 

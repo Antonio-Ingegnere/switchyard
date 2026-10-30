@@ -188,7 +188,7 @@ class _Git(GitRepository):
         return sorted(p.decode('utf-8') for p in self.git('diff-tree', '--no-commit-id', '--no-renames',
                           '--name-only', '-r', '-z', head, tree, '--').split(b'\0') if p)
 
-    def accept(self, candidate, before_publish):
+    def accept(self, candidate, before_publish, message=None):
         """Private index and immutable tree; real index is installed only after CAS."""
         self.revalidate(candidate)
         try:
@@ -221,7 +221,7 @@ class _Git(GitRepository):
                     self.git('diff', '--quiet', '--', index=staged)
                 except ScopeBlocked:
                     raise _Blocked('candidate_drift') from None
-                commit = self.commit_tree(tree, candidate['base_head'], candidate['commit_message'])
+                commit = self.commit_tree(tree, candidate['base_head'], message or candidate['commit_message'])
                 _require(self.git('rev-parse', commit+'^').decode().strip() == candidate['base_head'], 'commit_failed')
                 # Persist planned commit BEFORE publishing ref; crash/replay cannot double-commit.
                 before_publish(commit)
@@ -258,6 +258,26 @@ class _Git(GitRepository):
             raise
         except LifecycleError:
             raise _Blocked('unexpected_staged_paths') from None
+
+    def published_acceptance(self, candidate, commit, message):
+        """Is `commit` provably the acceptance of `candidate`: the branch HEAD, one parent = base_head,
+        exactly the candidate's paths/content/modes, and the expected message."""
+        try:
+            _require(self.git('rev-parse', '--verify', candidate['branch']).decode().strip() == commit, 'accept_reconciliation_ambiguous')
+            parents = self.git('rev-list', '--parents', '-n', '1', commit).decode().split()
+            _require(parents == [commit, candidate['base_head']], 'accept_reconciliation_ambiguous')
+            raw = self.git('cat-file', 'commit', commit)
+            _require(raw.split(b'\n\n', 1)[1] == (message or candidate['commit_message']).encode('utf-8'), 'accept_reconciliation_ambiguous')
+            _require(self.staged_paths(candidate['base_head'], commit) == sorted(candidate['files']), 'accept_reconciliation_ambiguous')
+            self.verify_tree(candidate, commit+'^{tree}')
+        except (_Blocked, ScopeBlocked, IndexError):
+            raise _Blocked('accept_reconciliation_ambiguous') from None
+
+    def install_accepted_index(self, commit):
+        """Finish a published acceptance interrupted before its index was installed; files are untouched."""
+        self.git('read-tree', commit)
+        self.git('update-index', '-q', '--refresh')
+        _require(not self.git('status', '--porcelain=v1', '--untracked-files=all'), 'post_commit_verification_failed')
 
     def verify_tree(self, candidate, tree):
         entries = {}
@@ -332,7 +352,7 @@ def _load(work_root):
     return workspace, candidate, versions[0].sha256
 
 
-def _decision(target, work_root, decision, feedback=None, git_executable=None):
+def _decision(target, work_root, decision, feedback=None, git_executable=None, message=None, resume=False):
     if decision == 'reopen':
         try:
             valid = type(feedback) is str and bool(feedback.strip()) and len(feedback.encode('utf-8')) <= 65536
@@ -344,16 +364,43 @@ def _decision(target, work_root, decision, feedback=None, git_executable=None):
     with _exclusive(workspace.root/'.lifecycle.lock'):
         if workspace.versions('qa_decision'):
             raise LifecycleError('candidate already finalized')
-        if workspace.versions('qa_intent') or workspace.versions('qa_feedback'):
-            raise LifecycleError('unresolved lifecycle intent; manual inspection required')
-        # Durable reservation precedes any Git mutation. Every decision is terminal, even blocked.
         intent = {'candidate_identity':identity, 'decision':decision, 'phase':'started'}
-        workspace.write_artifact('qa_intent', _json(intent))
+        if resume:
+            # An interrupted ACCEPT: every recorded intent must be this candidate's accept.
+            intents = [json.loads(workspace.read_artifact('qa_intent', r.version)) for r in workspace.versions('qa_intent')]
+            if (decision != 'accept' or not intents or workspace.versions('qa_feedback')
+                    or any({k:i.get(k) for k in intent if k != 'phase'} != {'candidate_identity':identity, 'decision':'accept'}
+                           or i.get('phase') not in ('started', 'prepared') for i in intents)):
+                raise LifecycleError('unresolved lifecycle intent; manual inspection required')
+            pending = next((i['commit'] for i in reversed(intents) if i['phase'] == 'prepared'), None)
+        else:
+            if workspace.versions('qa_intent') or workspace.versions('qa_feedback'):
+                raise LifecycleError('unresolved lifecycle intent; manual inspection required')
+            # Durable reservation precedes any Git mutation. Every decision is terminal, even blocked.
+            workspace.write_artifact('qa_intent', _json(intent))
+            pending = None
         commit = None
         prepared_commit = None
         try:
             _require(str(Path(target).resolve()) == candidate['target'], 'worktree_identity_changed')
-            if decision == 'reopen':
+            if resume:
+                git = _Git(target, git_executable)
+                head = git.git('rev-parse', '--verify', candidate['branch']).decode().strip()
+            if resume and head != candidate['base_head']:
+                # Published before the crash: reuse it only if it provably is this acceptance.
+                if pending is None or head != pending:
+                    raise LifecycleError('accept_reconciliation_ambiguous: delivery branch moved; never reset')
+                try:
+                    git.published_acceptance(candidate, pending, message)
+                except _Blocked:
+                    raise LifecycleError('accept_reconciliation_ambiguous: branch head is not the pending acceptance') from None
+                commit, prepared_commit = pending, pending
+                try:
+                    git.install_accepted_index(pending); reason = None
+                except (_Blocked, ScopeBlocked, OSError):
+                    reason = 'post_commit_verification_failed'
+                terminal = 'COMMIT_BLOCKED' if reason else 'ACCEPTED'
+            elif decision == 'reopen':
                 workspace.write_artifact('qa_feedback', feedback)
                 terminal, reason = 'REOPENED', None
             else:
@@ -362,7 +409,8 @@ def _decision(target, work_root, decision, feedback=None, git_executable=None):
                     nonlocal prepared_commit
                     workspace.write_artifact('qa_intent', _json({**intent, 'phase':'prepared', 'commit':commit}))
                     prepared_commit = commit
-                commit, reason = git.accept(candidate, publishing)
+                # Resumed with nothing published: any earlier commit object stays unreferenced.
+                commit, reason = git.accept(candidate, publishing, message)
                 terminal = 'COMMIT_BLOCKED' if reason else 'ACCEPTED'
         except _Blocked as exc:
             terminal, reason = 'COMMIT_BLOCKED', exc.reason
@@ -386,9 +434,16 @@ def _decision(target, work_root, decision, feedback=None, git_executable=None):
         return result
 
 
-def accept_v2_work(target, work_root, *, git_executable=None) -> QaDecision:
+def accept_v2_work(target, work_root, *, git_executable=None, commit_message=None) -> QaDecision:
     """Explicit human ACCEPT. No model selects or invokes this operation."""
-    return _decision(target, work_root, 'accept', git_executable=git_executable)
+    return _decision(target, work_root, 'accept', git_executable=git_executable, message=commit_message)
+
+
+def finish_accept_v2_work(target, work_root, *, git_executable=None, commit_message=None) -> QaDecision:
+    """Converge an ACCEPT interrupted after its durable intent onto exactly one published commit:
+    nothing published -> accept now; the prepared commit published -> reuse it; anything else on
+    the branch -> refuse (never reset). The caller owns stale lock handling."""
+    return _decision(target, work_root, 'accept', git_executable=git_executable, message=commit_message, resume=True)
 
 
 def reopen_v2_work(target, work_root, feedback: str) -> QaDecision:

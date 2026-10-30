@@ -608,8 +608,9 @@ class QaFindingTests(QaFixBase):
         accept_v2_candidate(self.work)
         self.assertEqual(self.findings(), [[('qa-1-1', F1, 'verified')]])
         self.assertEqual(self.counts(), (0, 0, 1))
-        with self.assertRaises(LifecycleError):
-            accept_v2_candidate(self.work)  # Retried accept: refused by candidate semantics, verified unchanged.
+        with self.assertRaises(RecoveryBlocked) as ctx:
+            accept_v2_candidate(self.work)  # Retried accept: refused, no second commit, verified unchanged.
+        self.assertTrue(ctx.exception.reason.startswith('already_accepted: '))
         self.assertEqual(self.findings(), [[('qa-1-1', F1, 'verified')]])
 
     def test_findings_open_until_a_candidate_is_published(self):
