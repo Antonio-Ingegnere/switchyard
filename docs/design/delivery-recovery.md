@@ -546,3 +546,43 @@ identities are created. Earlier rounds' evidence is not delivered. Command stage
   (`QA evidence cannot be consumed by selected provider/model: … Required capability: image input`).
   The configuration is frozen, so resume stays blocked (it would refuse identically); rollback remains available
   and the round, finding and evidence stay in history. Retrying `qa-fix` never opens a second round.
+
+## Delivery suspend (#4, slice 1)
+
+`suspend_v2_work(work_root, reason='')` / `switchyard work suspend <work_root> [reason]` shelves an isolated
+delivery worktree as Switchyard-owned data, records `SUSPENDED`, then removes the worktree. It needs no
+provider configuration. Restoring a suspended work is the next slice.
+
+- **Eligible:** isolated work whose operation is `interrupted`, `delivery_done` (e.g. `READY_FOR_MANUAL_QA`,
+  `NEEDS_HUMAN`), `waiting_for_human` or `reopened`. Refused: `running` or a live provider
+  (`delivery_running`; there is no asynchronous cancellation), `accepted`, `rolled_back`, rollback or
+  provisioning phases (`work_not_suspendable: <phase>`), an in-progress QA decision
+  (`qa_decision_in_progress`), and legacy in-place work (`legacy_work_not_isolated`).
+- **Shelf** `<work_root>/suspend/shelf-<n>/`: `manifest.json` (schema 1) holds `work_id`, `shelf`,
+  `repository`, `delivery_branch`, `base_sha`, `head` (delivery branch HEAD at suspend), `files`, `deleted`
+  and `index`. `files` describes the COMPLETE Git-visible worktree (tracked plus untracked files not
+  `.gitignore`d, as for recovery snapshots and candidates), keyed by repository-relative path:
+  `type` (`file`/`symlink`), Git `mode` (`100644`/`100755`/`120000`), `permissions`, `sha256`, `size`,
+  `tracked` (in HEAD), and `git_blob` (bytes unchanged from HEAD, kept on the branch) or `blob` (bytes in
+  `blobs/<sha256>`, raw, never re-encoded). `deleted` lists HEAD paths absent from the worktree. `index` is
+  `{"matches_head": true}` or, if something was staged, every index entry with its own bytes. Symlinks are
+  shelved as links. Submodules, in-progress merges/rebases, unmerged or sparse indexes, symlinked parents
+  and special files are refused before any write (`unsupported_git_state: …`).
+- **Order:** eligibility and representability (no writes) -> operation `suspending` (shelf id, reason, the
+  operation being suspended) -> build `.shelf-<n>.<random>` -> verify every byte -> atomic rename to
+  `shelf-<n>` -> operation `suspended` (shelf id, path, manifest SHA-256) -> `git worktree remove --force`
+  run from the shared Git directory (only while the worktree still equals the shelf) -> operation
+  `suspended` with `worktree_removed: true`. The delivery branch and source checkout are never touched.
+- **Retry:** `suspend` again finishes whatever is pending: it removes an unpublished build directory, reuses a
+  published shelf only if the worktree still equals it (otherwise `worktree_changed_since_shelf`), and
+  finishes cleanup. A failed removal leaves `SUSPENDED` with `workspace_cleanup_pending: true`
+  (`workspace_cleanup_pending: worktree_remove_failed`). A completed suspend is a no-op.
+- **Status:** `terminal: SUSPENDED` (or `SUSPENDING` while incomplete, never `SUSPENDED` without a verified
+  shelf), `suspended`, `suspend_reason`, `shelf_id`, `shelf_manifest_sha256`, `workspace_cleanup_pending`,
+  `delivery_worktree_state` (`present`/`removed`/`invalid`), `workflow_state` of the suspended position,
+  `resume_allowed: false`, `resume_blocked: suspended_restore_not_implemented`. A worktree removed by suspend
+  is healthy; a missing worktree of active work is still `isolation_blocked: delivery_worktree_missing`.
+  `resume`, `answer`, `qa-fix`, `accept` and `rollback` refuse with `suspended_restore_not_implemented`.
+- History, budgets, QA rounds, findings, evidence, candidates and human input are untouched; only the
+  recovery operation log gains records. Files ignored by `.gitignore` are not product state and are removed
+  with the worktree.

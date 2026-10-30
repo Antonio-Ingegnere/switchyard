@@ -613,6 +613,7 @@ def resume_v2_work(work_root,config_text,provider_runtime_config,reason=''):
     root=Path(work_root).resolve()
     with _lock(root):
         store=_store(root);baseline=_read(store,'baseline');op=_read(store,'operation')
+        _not_suspended(op,'RESUME_BLOCKED')
         target=None
         if op['phase']=='waiting_for_human':
             return _continue_human(root,store,config_text,provider_runtime_config)
@@ -685,7 +686,8 @@ def recovery_status(work_root):
         except RecoveryBlocked:pass  # Another controller still owns the active invocation.
     if phase=='waiting_for_human':
         return _human_status(work_root,store)
-    terminal={'running':'RUNNING','interrupted':'INTERRUPTED','reopened':'REOPENED','rolled_back':'ROLLED_BACK','rollback_running':'ROLLBACK_BLOCKED','accepted':'ACCEPTED'}.get(phase,op.get('terminal'))
+    terminal={'running':'RUNNING','interrupted':'INTERRUPTED','reopened':'REOPENED','rolled_back':'ROLLED_BACK','rollback_running':'ROLLBACK_BLOCKED','accepted':'ACCEPTED',
+              'suspending':'SUSPENDING','suspended':'SUSPENDED'}.get(phase,op.get('terminal'))
     if phase=='delivery_done' and op.get('terminal')==QA_READY and store.versions('qa_reference'):
         ref=_read(store,'qa_reference')
         if not (Path(ref['workspace'])/'manifest.jsonl').is_file():
@@ -694,7 +696,8 @@ def recovery_status(work_root):
         if qa.versions('qa_decision'):terminal=_read(qa,'qa_decision')['terminal']
         if _rejection_pending(store,op,work_root):terminal='REOPENED'  # Durably requested, not yet finalized.
     project=_frozen_project(base)
-    workflow_state=op.get('terminal') if phase=='delivery_done' else (QA_READY if phase in ('reopened','accepted') else op.get('state'))
+    held=op['previous_operation'] if phase in SUSPEND_PHASES else op  # Suspension keeps the workflow position.
+    workflow_state=held.get('terminal') if held['phase']=='delivery_done' else (QA_READY if held['phase'] in ('reopened','accepted') else held.get('state'))
     lifecycle=_state_status(project,base['flow'],workflow_state)
     recovery_source='runtime_interruption' if phase=='interrupted' else ('workflow' if phase=='delivery_done' else None)
     resumable=False;route=None;accounting={};blocked=None
@@ -748,21 +751,44 @@ def recovery_status(work_root):
                              origin_state=question['origin_state'],origin_outcome=question['origin_outcome'])
     return dict(work_id=Path(work_root).name,target=base['snapshot']['identity']['target'],flow=base['flow'],phase=phase,terminal=terminal,
                 state=op.get('state'),workflow_state=workflow_state,reason=op.get('reason'),diagnostic=op.get('diagnostic'),resume_allowed=resumable,resume_to=route,
-                recovery_source=recovery_source,**lifecycle,**_isolation_status(base),
+                recovery_source=recovery_source,**lifecycle,**_isolation_status(base,op),**_suspend_status(op),
                 **accounting,**human_history,**qa_status,**({'resume_blocked':blocked} if blocked else {}),
                 **({'provider_failure':op['provider_failure']} if phase=='interrupted' and 'provider_failure' in op else {}),
                 rollback_allowed=phase in ('interrupted','delivery_done','rollback_running','reopened') and not op.get('checkpoint_uncertain',False) and terminal!='ACCEPTED')
 
 
-def _isolation_status(base):
-    """Debug view of the frozen isolation provenance; a failed check is reported, never repaired."""
+def _isolation_status(base,op=None):
+    """Debug view of the frozen isolation provenance; a failed check is reported, never repaired.
+    A worktree removed by a durable suspend is healthy; a missing active worktree stays an error."""
     iso=base.get('isolation')
     if iso is None:return dict(isolated=False)
-    try:_check_isolation(iso,'RECOVERY_BLOCKED');problem=None
-    except RecoveryBlocked as exc:problem=exc.reason
+    removed=op is not None and op['phase']=='suspended' and op.get('worktree_removed') is True
+    problem=None
+    if not removed:
+        try:_check_isolation(iso,'RECOVERY_BLOCKED')
+        except RecoveryBlocked as exc:problem=exc.reason
     return dict(isolated=True,base_sha=iso['base_sha'],delivery_branch=iso['delivery_branch'],
                 delivery_worktree=iso['delivery_worktree'],source_worktree=iso['source_worktree'],
+                delivery_worktree_state='removed' if removed else ('invalid' if problem else 'present'),
                 **({'isolation_blocked':problem} if problem else {}))
+
+
+SUSPEND_PHASES=('suspending','suspended')
+
+
+def _suspend_status(op):
+    if op['phase'] not in SUSPEND_PHASES:return {}
+    shelf=op.get('shelf') or {}
+    return dict(suspended=op['phase']=='suspended',suspend_reason=op.get('reason') or None,
+                shelf_id=shelf.get('id',op.get('shelf_id')),shelf_manifest_sha256=shelf.get('manifest_sha256'),
+                workspace_cleanup_pending=op['phase']=='suspended' and op.get('worktree_removed') is not True,
+                resume_blocked='suspended_restore_not_implemented' if op['phase']=='suspended' else 'suspend_in_progress: retry suspend')
+
+
+def _not_suspended(op,terminal):
+    """SUSPENDED is intentional, not a missing worktree; restoring it is not implemented yet."""
+    if op['phase']=='suspended':raise RecoveryBlocked(terminal,'suspended_restore_not_implemented')
+    if op['phase']=='suspending':raise RecoveryBlocked(terminal,'suspend_in_progress: retry suspend')
 
 
 def attach_qa_candidate(work_root,qa_root):
@@ -786,6 +812,7 @@ def rollback_v2_work(work_root,reason=''):
     root=Path(work_root).resolve()
     with _lock(root):
         store=_store(root);base=_read(store,'baseline');op=_read(store,'operation')
+        _not_suspended(op,'ROLLBACK_BLOCKED')
         if op['phase'] not in ('interrupted','delivery_done','rollback_running','waiting_for_human','reopened','accepted'):
             raise RecoveryBlocked('ROLLBACK_BLOCKED','delivery_not_in_rollback_state')
         if store.versions('qa_reference'):
@@ -961,6 +988,7 @@ def answer_v2_work(work_root, request_id, answer, config_text, provider_runtime_
     root = Path(work_root).resolve()
     with _lock(root):
         store = _store(root)
+        _not_suspended(_read(store,'operation'),'ANSWER_BLOCKED')
         if _read(store,'operation')['phase'] != 'waiting_for_human':
             raise RecoveryBlocked('ANSWER_BLOCKED','work_not_waiting_for_human')
         return _continue_human(root,store,config_text,provider_runtime_config,request_id,answer,resume_to)
@@ -1037,6 +1065,7 @@ def qa_fix_v2_work(work_root,feedback,config_text,provider_runtime_config,*,find
             if op['phase']=='reopened':
                 return _continue_corrective(root,store,baseline,config_text,provider_runtime_config,'qa_fix')
             return _complete_qa_fix(root,store,baseline,config_text,provider_runtime_config)
+        _not_suspended(op,'QA_FIX_BLOCKED')
         if op['phase']=='accepted':raise RecoveryBlocked('QA_FIX_BLOCKED','candidate_already_finalized')
         if op['phase']!='delivery_done' or op.get('terminal')!=QA_READY or not store.versions('qa_reference'):
             raise RecoveryBlocked('QA_FIX_BLOCKED','work_not_ready_for_manual_qa')
@@ -1182,6 +1211,7 @@ def accept_v2_candidate(work_root,*,git_executable=None):
     root=Path(work_root).resolve()
     with _lock(root):
         store=_store(root);baseline=_read(store,'baseline');op=_read(store,'operation')
+        _not_suspended(op,'ACCEPT_BLOCKED')
         if op['phase']=='accepted':raise RecoveryBlocked('ACCEPT_BLOCKED','already_accepted: '+op['accepted_commit_sha'])
         if op['phase']!='delivery_done' or op.get('terminal')!=QA_READY or not store.versions('qa_reference'):
             raise RecoveryBlocked('ACCEPT_BLOCKED','work_not_ready_for_manual_qa')

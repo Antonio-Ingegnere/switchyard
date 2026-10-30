@@ -27,13 +27,15 @@ def _parser():
     commands = parser.add_subparsers(dest='command', required=True)
     work = commands.add_parser('work', allow_abbrev=False)
     actions = work.add_subparsers(dest='action', required=True)
-    for action in ('status', 'answer', 'resume', 'rollback', 'qa-fix', 'accept'):
+    for action in ('status', 'answer', 'resume', 'rollback', 'qa-fix', 'accept', 'suspend'):
         operation = actions.add_parser(action, allow_abbrev=False)
         operation.add_argument('work_root')
         if action == 'answer':
             operation.add_argument('request_id')
             operation.add_argument('answer')
             operation.add_argument('--resume-to', help='select a declared human continuation target')
+        if action == 'suspend':
+            operation.add_argument('reason', nargs='?', default='', help='optional human reason, at most 4096 bytes')
         if action == 'qa-fix':
             operation.add_argument('feedback', nargs='?', help='one free-text manual QA finding for the current candidate')
             operation.add_argument('--finding', action='append', dest='findings', metavar='TEXT',
@@ -139,6 +141,9 @@ def _work_command(args):
         status = recovery_status(args.work_root)
         if args.action == 'rollback':
             status = rollback_v2_work(args.work_root)
+        elif args.action == 'suspend':
+            from .suspend import suspend_v2_work
+            status = suspend_v2_work(args.work_root, args.reason)
         elif args.action == 'accept':
             accept_v2_candidate(args.work_root)
             status = recovery_status(args.work_root)
