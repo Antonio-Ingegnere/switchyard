@@ -775,9 +775,12 @@ def _integration_status(work_root,phase):
     """Compact latest integration assessment (#9) of an accepted work, with its freshness; nothing if never assessed."""
     if phase!='accepted':return {}
     from .integration import integration_summary
+    from .publication import remote_push_status
     try:summary=integration_summary(work_root)
-    except ValueError:return {}
-    return {'integration':summary} if summary else {}
+    except ValueError:summary=None
+    try:pushed=remote_push_status(work_root)  # Local records only: status never contacts a remote.
+    except ValueError:pushed=None
+    return {**({'integration':summary} if summary else {}),**({'remote_integration':pushed} if pushed else {})}
 
 
 def _isolation_status(base,op=None):

@@ -44,6 +44,12 @@ def _parser():
     integrate.add_argument('--target', help='local branch to move (default: the source branch recorded when the '
                            'delivery started); must match the latest fresh integration-status assessment')
     integrate.add_argument('--json', action='store_true', help='print the structured integration record')
+    push = actions.add_parser('push', allow_abbrev=False)
+    push.add_argument('work_root')
+    push.add_argument('--remote', required=True, help='configured Git remote to publish the local integration to')
+    push.add_argument('--target', help='integrated local branch to publish to the same branch on the remote '
+                      '(default: the source branch recorded when the delivery started)')
+    push.add_argument('--json', action='store_true', help='print the structured push record')
     for action in ('status', 'answer', 'resume', 'rollback', 'qa-fix', 'accept', 'suspend'):
         operation = actions.add_parser(action, allow_abbrev=False)
         operation.add_argument('work_root')
@@ -196,6 +202,15 @@ def _work_command(args):
             assessment = integration_readiness(args.work_root, args.target)
             print(json.dumps(assessment, ensure_ascii=True, indent=2) if args.json else _integration_text(assessment))
             return 0 if assessment['readiness'] in INTEGRABLE else 1
+        if args.action == 'push':
+            from .publication import push_v2_work
+            record = push_v2_work(args.work_root, args.remote, args.target)
+            print(json.dumps(record, ensure_ascii=True, indent=2) if args.json else '\n'.join([
+                'Push '+('ALREADY_PRESENT' if record['pushed_by'] == 'already_present' else 'PUSHED'),
+                'Remote: %s (%s)' % (record['remote'], _safe_display(record['remote_identity'], 512)),
+                'Ref: %s %s -> %s' % (record['remote_ref'], record['remote_before_sha'], record['remote_after_sha']),
+                'Integrated commit: '+record['local_integrated_commit_sha']]))
+            return 0
         if args.action == 'integrate':
             from .integration import integrate_v2_work
             record = integrate_v2_work(args.work_root, args.target)
@@ -229,6 +244,8 @@ def _work_command(args):
         print('switchyard: '+_safe_display(str(exc), 2048), file=sys.stderr)
         if getattr(exc, 'transplant', None):
             print(json.dumps(exc.transplant, ensure_ascii=True, sort_keys=True), file=sys.stderr)
+        if getattr(exc, 'push', None):
+            print(json.dumps(exc.push, ensure_ascii=True, sort_keys=True), file=sys.stderr)
         if getattr(exc, 'integration', None):
             print(json.dumps(exc.integration, ensure_ascii=True, sort_keys=True), file=sys.stderr)
         if getattr(exc, 'continuity_plan', None):

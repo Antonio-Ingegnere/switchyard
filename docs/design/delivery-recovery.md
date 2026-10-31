@@ -900,3 +900,47 @@ branch the user asked to move**, including the source checkout.
 - `ALREADY_INTEGRATED` never touches a checkout: the record observes `target_worktree_clean` (and
   `target_worktree_problem`) instead of repairing it. Status adds `target_worktree_updated` and
   `target_worktree`.
+
+## Push: publish a local integration by lease (#9, slice 4)
+
+`push_v2_work(work_root, remote, target_ref=None)` / `switchyard work push <work_root> --remote NAME
+[--target BRANCH] [--json]` is the only operation that mutates a remote ref. Lifecycle stays
+ACCEPT != INTEGRATE != PUSH != PR: accept never touches the target, integrate moves only the local branch, and
+nothing pushes implicitly. The remote is always named explicitly (no `branch.<name>.remote` guessing), and
+the remote branch has the same name as the local target.
+
+- **Product:** the latest local integration record for the branch, `integrated_by: switchyard` (`not_integrated`,
+  `integration_pending`, `no_integrated_commit` for an already-present integration). N = its
+  `integrated_commit_sha` is re-proven: C re-proven, N exists, contains C and the record's T, and is C
+  (fast-forward) or exactly the deterministic M of the record (`integration_invalid`). The local branch must
+  still be exactly N (`local_target_moved`): the current branch head is never published instead. Delivery
+  branches are not published.
+- **Remote state** is read live with `git ls-remote <push url> <ref>` (nothing fetched; tracking refs are not
+  trusted) and must be exactly the integration's T. `R == T` -> push; `R == N` -> already published (recorded
+  `pushed_by: already_present`, nothing sent); missing -> `remote_target_missing` (a branch is never created);
+  anything else -> `remote_moved` with `expected_remote_sha`/`actual_remote_sha` (reassess and integrate again
+  locally). All of these refusals precede any record.
+- **Compare-and-swap:** `git push --porcelain --force-with-lease=<ref>:<T> <remote> <N>:<ref>`. The lease only
+  guards the expected old value; N descends from T, so the update is a fast-forward. No `--force`, no
+  `--no-verify` (the user's pre-push hook and every server-side rule run normally; branch protection is never
+  bypassed). Authentication is Git's own (credential helper, SSH agent); `GIT_TERMINAL_PROMPT=0`, so Switchyard
+  never prompts for, stores or echoes a credential.
+- **Remote identity:** the endpoint Git actually pushes to, as Git resolves it with `git remote get-url --push
+  --all <name>`: `remote.<name>.pushurl` when set, otherwise `remote.<name>.url`, with `pushInsteadOf` (Git
+  applies it to `url` only, never to an explicit `pushurl`) and `insteadOf` expanded. Several push URLs -- Git
+  would push to every one -- are refused before anything is recorded (`ambiguous_push_destination`). The remote
+  state check (`ls-remote`) reads that same push endpoint, not the fetch URL. The identity is recorded as
+  `remote_identity` with userinfo, query and fragment dropped (`https://host/path`, scp-like -> `ssh://host/path`, local path -> `file://...`).
+  Diagnostics are stripped of `scheme://user:secret@` and bounded to 1024 characters.
+- **Records** (`<work>/publication/`, versioned `push_record`): `intent` (work, remote, `remote_identity`,
+  `remote_ref`, `expected_remote_sha` T, `local_integrated_commit_sha` N, C, the consumed integration record's
+  version and SHA-256, `strategy: force_with_lease_cas`, `lease`) -> push -> `pushed` (`remote_before_sha`,
+  `remote_after_sha`, `pushed_by`). Failures: `remote_moved` and `remote_rejected` (a server or hook refusal,
+  with its sanitized diagnostic) are definite and recorded `failed`; `remote_unavailable` (network, auth,
+  timeout) keeps the intent because the remote may have applied the push.
+- **Retry with a pending intent** reads the remote: T -> push again with the same lease; N -> finalize without
+  pushing; anything else -> `push_reconciliation_ambiguous` (the remote is never reset). After `pushed`, push is
+  idempotent; later remote development does not invalidate the record.
+- **Status** is local only and never contacts a remote: `recovery_status()['remote_integration']` /
+  `remote_push_status()` -> `state: PUSHED | PUSH_PENDING | NOT_PUSHED`, `remote`, `remote_identity`, `ref`,
+  `pushed_commit_sha`, `remote_before_sha`, `pushed_by`, and `last_attempt` after a failed one.
