@@ -820,7 +820,7 @@ ref, fetches, pushes or opens a PR (later slices).
   dirty-source preflight is not applied.
 - **Durable, immutable assessments:** each distinct result is a new version of `integration_assessment` in the
   work's own `integration/` store (never the recovery store or operation history). Its `assessment_id` is the
-  SHA-256 of the canonical inputs and outcome (work, C, A, target ref, T, readiness, drift, strategy, result
+  SHA-256 of the canonical inputs and outcome (durable work id, C, A, target ref, T, readiness, drift, strategy, result
   tree, conflicts); no timestamps. An unchanged re-assessment reproduces the latest id and writes nothing.
 - **Freshness:** `integration_status(work_root)` (and `recovery_status()['integration']` for accepted work:
   `target_ref`, `target_sha`, `readiness`, `drift`, `conflicts` count, `current_target_sha`, `stale`,
@@ -828,3 +828,41 @@ ref, fetches, pushes or opens a PR (later slices).
   explicit `integration-status` call re-assesses against the current T.
 - **CLI:** human summary by default (`--json` for the structured assessment); exit 0 for `READY` /
   `READY_WITH_DRIFT`, 1 for any other readiness, 2 for `INTEGRATION_BLOCKED`.
+
+## Integrate: compare-and-swap integration (#9, slice 2)
+
+`integrate_v2_work(work_root, target_ref=None)` / `switchyard work integrate <work_root> [--target BRANCH]
+[--json]` is the first mutation: it moves a local target branch to the accepted delivery by consuming the
+work's **latest** readiness assessment. It never reassesses, rebases, squashes, pushes, fetches or invokes a
+provider; the delivery branch and C are never moved, and delivery stays `ACCEPTED` (integration is its own
+lifecycle in `recovery_status()['integration']`).
+
+- **Gate:** the work is accepted and C re-proven; the target is a local branch (`target_not_found`,
+  `target_not_a_branch`); the latest assessment exists (`assessment_missing`), is intact (its id recomputes),
+  names the same branch (`assessment_target_mismatch`; `main` and `refs/heads/main` are the same branch) and
+  the same work, C and A (`assessment_product_changed`), and the branch still points at its T
+  (`target_moved`, with `expected_target_sha`/`actual_target_sha`; reassess with `integration-status`). Only
+  `READY` and `READY_WITH_DRIFT` integrate (`assessment_not_ready: <readiness>`).
+- **Checked-out targets are refused** (`target_checked_out` with the worktree paths), including the source
+  checkout: a ref is never moved behind a checkout. A dirty checkout of another branch is irrelevant.
+- **Policy** (C keeps its identity): `READY` -> fast-forward A -> C (`strategy: fast_forward`, no new commit);
+  `READY_WITH_DRIFT` -> one merge commit M (`strategy: merge`) with parents T, C and exactly the assessment's
+  `result_tree` (never recomputed). M is written as raw commit bytes with a fixed identity and epoch
+  (`Switchyard <switchyard@invalid> 0 +0000`) and the message `switchyard: integrate work <id> into <ref>`
+  plus `Switchyard-Work` (the durable work id from the delivery branch, not the directory name),
+  `Switchyard-Accepted-Commit` and `Switchyard-Assessment` trailers, so the same inputs always give the same M.
+  `ALREADY_INTEGRATED` creates nothing and is recorded `integrated_by: already_present`
+  (`already_integrated_at`).
+- **Compare-and-swap:** `git update-ref <branch> <new> <T>` (hooks disabled). A lost race records `aborted`
+  and refuses `target_moved`; nothing is retried or reset.
+- **Durable order:** M object -> `integration_record` version `intent` (assessment id and version, expected
+  T, C, A, strategy, result tree, planned commit) -> CAS -> `integrated` record (`target_before_sha`,
+  `target_after_sha`, `integrated_commit_sha`, `integrated_by: switchyard`, `consumed_assessment_id`). The
+  assessment itself is never rewritten. A retry with a pending intent recomputes M from the intent alone and
+  requires it to be the recorded M: target still T -> the same M is reused and the CAS retried; target == M ->
+  finalized without a second commit; anything else -> `integration_reconciliation_ambiguous` (target never
+  reset; status `INTEGRATION_PENDING`). After success, `integrate` is idempotent for that branch.
+- **Status:** `integration: {state: INTEGRATED, integrated_by, target_ref, target_before_sha,
+  integrated_commit_sha, strategy, consumed_assessment_id, current_target_sha, target_contains_integration}`;
+  normal later target movement keeps this provenance. Before integration: `state: ASSESSED` with the
+  assessment summary (and `last_integration_attempt` after an aborted one).

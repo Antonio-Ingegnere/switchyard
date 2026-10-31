@@ -39,6 +39,11 @@ def _parser():
     integration.add_argument('--target', help='local branch, ref or commit to assess against '
                              '(default: the source branch recorded when the delivery started)')
     integration.add_argument('--json', action='store_true', help='print the structured assessment')
+    integrate = actions.add_parser('integrate', allow_abbrev=False)
+    integrate.add_argument('work_root')
+    integrate.add_argument('--target', help='local branch to move (default: the source branch recorded when the '
+                           'delivery started); must match the latest fresh integration-status assessment')
+    integrate.add_argument('--json', action='store_true', help='print the structured integration record')
     for action in ('status', 'answer', 'resume', 'rollback', 'qa-fix', 'accept', 'suspend'):
         operation = actions.add_parser(action, allow_abbrev=False)
         operation.add_argument('work_root')
@@ -161,6 +166,15 @@ def _integration_text(a):
     return '\n'.join(lines)
 
 
+def _integrated_text(r):
+    present = r['integrated_by'] == 'already_present'
+    return '\n'.join(['Integration '+('ALREADY_PRESENT' if present else 'INTEGRATED'),
+                      'Target: %s %s -> %s' % (_safe_display(r['target_ref_full'], 256), r['target_before_sha'], r['target_after_sha']),
+                      'Strategy: '+(r['strategy'] or 'none').replace('_', '-'), 'Accepted: '+r['accepted_commit_sha'],
+                      'Integrated commit: '+(r['integrated_commit_sha'] or '- (already in target)'),
+                      'Assessment: '+r['consumed_assessment_id']])
+
+
 def _work_command(args):
     from .recovery import (recovery_status, answer_v2_work, resume_v2_work, rollback_v2_work,
                            qa_fix_v2_work, accept_v2_candidate)
@@ -182,6 +196,11 @@ def _work_command(args):
             assessment = integration_readiness(args.work_root, args.target)
             print(json.dumps(assessment, ensure_ascii=True, indent=2) if args.json else _integration_text(assessment))
             return 0 if assessment['readiness'] in INTEGRABLE else 1
+        if args.action == 'integrate':
+            from .integration import integrate_v2_work
+            record = integrate_v2_work(args.work_root, args.target)
+            print(json.dumps(record, ensure_ascii=True, indent=2) if args.json else _integrated_text(record))
+            return 0
         status = recovery_status(args.work_root)
         if args.action == 'rollback':
             status = rollback_v2_work(args.work_root)
@@ -210,6 +229,8 @@ def _work_command(args):
         print('switchyard: '+_safe_display(str(exc), 2048), file=sys.stderr)
         if getattr(exc, 'transplant', None):
             print(json.dumps(exc.transplant, ensure_ascii=True, sort_keys=True), file=sys.stderr)
+        if getattr(exc, 'integration', None):
+            print(json.dumps(exc.integration, ensure_ascii=True, sort_keys=True), file=sys.stderr)
         if getattr(exc, 'continuity_plan', None):
             print(json.dumps(exc.continuity_plan, ensure_ascii=True, sort_keys=True), file=sys.stderr)
         if getattr(exc, 'human_input_request', None):
