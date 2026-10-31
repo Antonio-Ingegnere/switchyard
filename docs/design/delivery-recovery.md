@@ -843,8 +843,10 @@ lifecycle in `recovery_status()['integration']`).
   the same work, C and A (`assessment_product_changed`), and the branch still points at its T
   (`target_moved`, with `expected_target_sha`/`actual_target_sha`; reassess with `integration-status`). Only
   `READY` and `READY_WITH_DRIFT` integrate (`assessment_not_ready: <readiness>`).
-- **Checked-out targets are refused** (`target_checked_out` with the worktree paths), including the source
-  checkout: a ref is never moved behind a checkout. A dirty checkout of another branch is irrelevant.
+- **Checked-out targets:** a branch checked out in no worktree is moved ref-only (`mode: ref_only`); in exactly
+  one clean worktree it is installed there (`mode: checked_out_worktree`, slice 3 below); in more than one it is
+  refused (`target_worktree_ambiguous`). A ref is never moved behind a checkout. A dirty checkout of another
+  branch is irrelevant.
 - **Policy** (C keeps its identity): `READY` -> fast-forward A -> C (`strategy: fast_forward`, no new commit);
   `READY_WITH_DRIFT` -> one merge commit M (`strategy: merge`) with parents T, C and exactly the assessment's
   `result_tree` (never recomputed). M is written as raw commit bytes with a fixed identity and epoch
@@ -866,3 +868,35 @@ lifecycle in `recovery_status()['integration']`).
   integrated_commit_sha, strategy, consumed_assessment_id, current_target_sha, target_contains_integration}`;
   normal later target movement keeps this provenance. Before integration: `state: ASSESSED` with the
   assessment summary (and `last_integration_attempt` after an aborted one).
+
+### Checked-out target (#9, slice 3)
+
+The usual layout -- `main` checked out in the source checkout -- integrates in place. **Delivery and accept
+never change the source checkout; an explicit `integrate` may update the one clean checkout of the target
+branch the user asked to move**, including the source checkout.
+
+- **Clean means:** HEAD on the branch at exactly T (`target_moved` otherwise), no `index.lock`
+  (`target_worktree_locked`), no merge/rebase/cherry-pick/revert/bisect marker, unmerged entry or submodule,
+  an empty `git status --porcelain --untracked-files=all`, and no file (ignored included) at a path N adds:
+  `target_worktree_dirty[: detail]` with the paths. Nothing is stashed, cleaned or forced.
+- **Ownership boundary:** the checkout is validated, then the intent records `mode`, `target_worktree` and its
+  Git admin dir (`target_worktree_git_dir`; a retry must find the same one). Nothing changes before that.
+- **Order:** intent -> CAS branch T -> N (the race decision: a lost CAS records `aborted` and changes no file)
+  -> `git read-tree -m -u T N` in the checkout (Git's two-tree switch of index and files; it refuses to clobber
+  untracked files; no `git merge`, so N is exactly the planned C or M) -> verified clean at N (HEAD, index and
+  files == N) -> `integrated` record with `target_worktree_updated: true`.
+- **Retry with a pending intent** inspects branch, checkout HEAD, index and files against T and N:
+  branch T + checkout clean at T -> run again; branch N + checkout at T -> install; branch N + an interrupted
+  install (index T, no `index.lock`, and every other difference a path T -> N changes holding exactly N's
+  bytes and mode, or absent where N deletes) -> `read-tree --reset -u N`; an existing `index.lock` is never
+  removed -- nothing proves which process holds it -- so the retry refuses `target_worktree_locked` until a
+  human removes a stale lock; branch N +
+  checkout clean at N -> finalize (files not touched again). Anything else -- including any local change
+  after the crash -- is `integration_reconciliation_ambiguous`; nothing is reset.
+- **Concurrency boundary:** the work lock excludes Switchyard controllers of the work, Git's index lock
+  excludes concurrent index writers during the install, and the CAS excludes concurrent ref updates. Between
+  the CAS and the install the checkout's HEAD is N while its files are T; a Git command run in that checkout
+  during that window is outside the supported contract (the retry then refuses as ambiguous rather than reset).
+- `ALREADY_INTEGRATED` never touches a checkout: the record observes `target_worktree_clean` (and
+  `target_worktree_problem`) instead of repairing it. Status adds `target_worktree_updated` and
+  `target_worktree`.

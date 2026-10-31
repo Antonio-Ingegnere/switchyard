@@ -257,6 +257,123 @@ def _merge_commit(repo, intent, write):
     return out.decode().strip()
 
 
+# --- Checked-out target (#9 slice 3) ----------------------------------------------------------------
+# A target branch checked out in exactly one clean worktree is integrated by installing the predetermined N
+# (C or M) there; never by `git merge`. Ownership boundary: the checkout is proven clean at exactly T (HEAD on
+# the branch, index == worktree == T, no untracked or ignored file where N adds a path, no Git operation in
+# progress) and the intent naming it (path + Git admin dir) is durable; only then does anything change. Order:
+# intent -> CAS branch T -> N (the race decision: a lost CAS touches no file) -> `read-tree -m -u T N` in the
+# checkout (Git's own two-tree switch: refuses to overwrite untracked files) -> verified clean at N -> final
+# record. Between the CAS and the install the checkout shows N's HEAD with T's files; a concurrent Git command
+# in that checkout during that window is outside the supported concurrency contract.
+def _target_worktree(repo, full):
+    """The one worktree with `full` checked out, or None. More than one is never guessed between."""
+    owners = sorted(path for path, branch in _worktrees(repo).items() if branch == full)
+    if len(owners) > 1:
+        raise _blocked('target_worktree_ambiguous', owners)
+    return owners[0] if owners else None
+
+
+def _checkout(repo, path, git_dir=None):
+    """(worktree repo, identity) of a checkout of this repository; with `git_dir`, it must be that same one."""
+    p = Path(path)
+    if p.is_symlink() or not p.is_dir():
+        raise _blocked('target_worktree_unavailable', [str(p)])
+    wt = _Repo(p)
+    code, top = wt.probe('rev-parse', '--show-toplevel')
+    code2, admin = wt.probe('rev-parse', '--absolute-git-dir')
+    if code or code2 or Path(os.fsdecode(top.strip())).resolve() != p.resolve() or wt.common_dir() != repo.common_dir():
+        raise _blocked('target_worktree_unavailable', [str(p)])
+    identity = dict(target_worktree=str(p.resolve()), target_worktree_git_dir=str(Path(os.fsdecode(admin.strip())).resolve()))
+    if git_dir is not None and identity['target_worktree_git_dir'] != git_dir:
+        raise _blocked('integration_reconciliation_ambiguous: target worktree identity changed', [str(p)])
+    return wt, identity
+
+
+def _entries(repo, rev):
+    entries = {}
+    for raw in repo.git('ls-tree', '-r', '-z', rev).split(b'\0'):
+        if raw:
+            meta, path = raw.split(b'\t', 1); mode, _, oid = meta.decode().split()
+            entries[os.fsdecode(path)] = (mode, oid)
+    return entries
+
+
+def _lines(raw):
+    return sorted({os.fsdecode(p) for p in raw.split(b'\0') if p})
+
+
+def _clean_at(wt, full, t, n):
+    """The ownership precondition: the checkout is on `full` at exactly T with nothing local to lose."""
+    if wt.probe('symbolic-ref', '--quiet', 'HEAD')[1].decode().strip() != full:
+        raise _blocked('target_moved: target worktree left the branch', [str(wt.workspace)])
+    head = _commit(wt, 'HEAD')
+    if head != t:
+        raise _blocked('target_moved', [str(wt.workspace)], expected_target_sha=t, actual_target_sha=head)
+    if Path(str(wt.index_path())+'.lock').exists():
+        raise _blocked('target_worktree_locked: another Git process may be running', [str(wt.workspace)])
+    try:
+        wt.check_repository()  # Merge/rebase/cherry-pick/revert/bisect markers, unmerged index, submodules.
+    except (ValueError, RecoveryBlocked) as exc:
+        raise _blocked('target_worktree_dirty: '+str(exc)[:200], [str(wt.workspace)]) from None
+    dirty = wt.git('status', '--porcelain=v1', '-z', '--no-renames', '--untracked-files=all')
+    if dirty:
+        raise _blocked('target_worktree_dirty', [os.fsdecode(e[3:]) for e in dirty.split(b'\0') if e][:50])
+    before, after = _entries(wt, t), _entries(wt, n)
+    collisions = [p for p in sorted(set(after)-set(before)) if os.path.lexists(wt.workspace/p)]
+    if collisions:  # Ignored files in N's way would be overwritten silently by the switch.
+        raise _blocked('target_worktree_dirty: ignored files where the integration adds paths', collisions)
+
+
+def _checkout_state(wt, t, n):
+    """'N' / 'T' (index == worktree == that tree, nothing untracked), 'partial' (index T; every other
+    difference is a path T -> N changes holding exactly N's content: an interrupted install), else None."""
+    wt.probe('update-index', '-q', '--refresh')  # Owned checkout: stat refresh only, no content change.
+    untracked = _lines(wt.git('ls-files', '--others', '--exclude-standard', '-z'))
+    files_clean = wt.probe('diff-files', '--quiet')[0] == 0
+    for tree, name in ((n, 'N'), (t, 'T')):
+        if files_clean and not untracked and wt.probe('diff-index', '--cached', '--quiet', tree, '--')[0] == 0:
+            return name
+    if wt.probe('diff-index', '--cached', '--quiet', t, '--')[0] != 0:
+        return None
+    before, after = _entries(wt, t), _entries(wt, n)
+    changed = {p for p in set(before) | set(after) if before.get(p) != after.get(p)}
+    for path in _lines(wt.git('diff-files', '--name-only', '-z')) + untracked:
+        target = wt.workspace/path
+        if path not in changed:
+            return None
+        if path not in after:
+            if os.path.lexists(target):
+                return None
+            continue
+        mode, oid = after[path]
+        if not os.path.lexists(target):
+            return None
+        if mode == '120000':
+            code, out = _plumb(wt, 'hash-object', '--stdin', input=os.fsencode(os.readlink(target)), terminal=I) if target.is_symlink() else (1, b'')
+        else:
+            code, out = wt.probe('hash-object', '--no-filters', '--', path) if target.is_file() and not target.is_symlink() else (1, b'')
+            if code == 0 and (mode == '100755') != bool(target.stat().st_mode & 0o100):
+                return None
+        if code or out.decode().strip() != oid:
+            return None
+    return 'partial'
+
+
+def _install(wt, t, n, state):
+    """Install N into the owned checkout from the proven state, then require it clean at N."""
+    if state == 'T':
+        before, after = _entries(wt, t), _entries(wt, n)
+        collisions = [p for p in sorted(set(after)-set(before)) if os.path.lexists(wt.workspace/p)]
+        if collisions:
+            raise _blocked('integration_reconciliation_ambiguous: files appeared where the integration adds paths', collisions)
+        wt.git('read-tree', '-m', '-u', t, n)  # Two-tree switch; refuses to clobber untracked files.
+    elif state == 'partial':
+        wt.git('read-tree', '--reset', '-u', n)  # Every deviation from T was proven to be N's own bytes.
+    if _checkout_state(wt, t, n) != 'N':
+        raise _blocked('integration_failed: target worktree is not clean at the integrated commit', [str(wt.workspace)])
+
+
 def _not_checked_out(repo, full):
     owners = sorted(path for path, branch in _worktrees(repo).items() if branch == full)
     if owners:
@@ -285,33 +402,76 @@ def _history(records, full=None):
 def _finalize(records, intent):
     record = {k: v for k, v in intent.items() if k != 'planned_commit_sha'}
     record.update(phase='integrated', integrated_by='switchyard', target_before_sha=intent['expected_target_sha'],
-                  target_after_sha=intent['planned_commit_sha'], integrated_commit_sha=intent['planned_commit_sha'])
+                  target_after_sha=intent['planned_commit_sha'], integrated_commit_sha=intent['planned_commit_sha'],
+                  target_worktree_updated=intent.get('mode') == 'checked_out_worktree')
     return _put(records, record)
 
 
+def _abort(records, intent, reason, error):
+    _put(records, dict(intent, phase='aborted', reason=reason))
+    raise error
+
+
 def _complete(repo, records, intent):
+    """From the old state (ref == T, checkout at T if any): CAS, install, finalize."""
     full, t, new = intent['target_ref_full'], intent['expected_target_sha'], intent['planned_commit_sha']
-    _not_checked_out(repo, full)
+    wt = None
+    if intent.get('mode') == 'checked_out_worktree':
+        wt, _ = _checkout(repo, intent['target_worktree'], intent['target_worktree_git_dir'])
+        try:
+            _clean_at(wt, full, t, new)
+        except RecoveryBlocked as exc:
+            _abort(records, intent, exc.reason, exc)  # Still before any change: give the operation up.
+    else:
+        try:
+            _not_checked_out(repo, full)
+        except RecoveryBlocked as exc:
+            _abort(records, intent, exc.reason, exc)
     if not _cas(repo, full, new, t, intent['work_id']):
         actual = _commit(repo, full)
-        _put(records, dict(intent, phase='aborted', reason='target_moved', actual_target_sha=actual))
-        raise _blocked('target_moved', expected_target_sha=t, actual_target_sha=actual)
+        _abort(records, intent, 'target_moved', _blocked('target_moved', expected_target_sha=t, actual_target_sha=actual))
+    if wt is not None:
+        _install(wt, t, new, 'T')
     return _finalize(records, intent)
 
 
 def _reconcile(repo, records, intent):
     """A pending intent (crash between intent and final record): prove and finish it, never redo it."""
-    t, new = intent['expected_target_sha'], intent['planned_commit_sha']
+    full, t, new = intent['target_ref_full'], intent['expected_target_sha'], intent['planned_commit_sha']
     if intent['strategy'] == 'merge' and _merge_commit(repo, intent, write=False) != new:
         raise _blocked('integration_reconciliation_ambiguous: recorded merge commit is not the intent\'s')
-    current = _commit(repo, intent['target_ref_full'])
-    if current == new:
-        return _finalize(records, intent)  # The ref moved before the crash: same M, no second commit.
-    if current != t:
-        raise _blocked('integration_reconciliation_ambiguous', expected_target_sha=t, planned_commit_sha=new, actual_target_sha=current)
-    if intent['strategy'] == 'merge':
-        _merge_commit(repo, intent, write=True)  # Same bytes, same object: reused, never a second M.
-    return _complete(repo, records, intent)
+    current = _commit(repo, full)
+    ambiguous = lambda detail='': _blocked('integration_reconciliation_ambiguous'+detail, expected_target_sha=t,
+                                           planned_commit_sha=new, actual_target_sha=current)
+    if current not in (t, new):
+        raise ambiguous()
+    if intent.get('mode') != 'checked_out_worktree':
+        if current == new:
+            return _finalize(records, intent)  # The ref moved before the crash: same M, no second commit.
+        if intent['strategy'] == 'merge':
+            _merge_commit(repo, intent, write=True)  # Same bytes, same object: reused, never a second M.
+        return _complete(repo, records, intent)
+    wt, _ = _checkout(repo, intent['target_worktree'], intent['target_worktree_git_dir'])
+    if wt.probe('symbolic-ref', '--quiet', 'HEAD')[1].decode().strip() != full:
+        raise ambiguous(': target worktree left the branch')
+    lock = Path(str(wt.index_path())+'.lock')
+    if current == t:
+        if lock.exists() or _checkout_state(wt, t, new) != 'T':
+            raise ambiguous(': checkout changed although the branch was never moved')
+        if intent['strategy'] == 'merge':
+            _merge_commit(repo, intent, write=True)
+        return _complete(repo, records, intent)
+    # current == N: Switchyard's own CAS happened; the checkout is ours until it is clean at N. A Git lock is
+    # never ours to remove: nothing proves which process holds it now, so recovery waits for a human.
+    if lock.exists():
+        raise _blocked('target_worktree_locked: remove the stale Git index lock only after verifying no Git process '
+                       'uses this checkout, then retry', [str(wt.workspace)])
+    state = _checkout_state(wt, t, new)
+    if state is None:
+        raise ambiguous(': checkout holds changes that are not part of this integration')
+    if state != 'N':
+        _install(wt, t, new, state)
+    return _finalize(records, intent)
 
 
 def integrate_v2_work(work_root, target_ref=None):
@@ -352,11 +512,20 @@ def integrate_v2_work(work_root, target_ref=None):
                     expected_target_sha=t, accepted_commit_sha=c, delivery_base_sha=a, consumed_assessment_id=assessment['assessment_id'],
                     consumed_assessment_version=latest.version, result_tree=assessment['result_tree'])
         readiness = assessment['readiness']
+        owner = _target_worktree(repo, full)
         if readiness == ALREADY_INTEGRATED:
             if not _ancestor(repo, c, t):
                 raise _blocked('assessment_invalid')
-            return _put(records, dict(base, phase='integrated', integrated_by='already_present', strategy=None,
-                                      target_before_sha=t, target_after_sha=t, integrated_commit_sha=None, already_integrated_at=t))
+            observed = {}
+            if owner is not None:  # Observed, never repaired: an inconsistent checkout is reported, not reset.
+                wt, identity = _checkout(repo, owner)
+                try:
+                    _clean_at(wt, full, t, t); observed = dict(identity, target_worktree_clean=True)
+                except RecoveryBlocked as exc:
+                    observed = dict(identity, target_worktree_clean=False, target_worktree_problem=exc.reason)
+            return _put(records, dict(base, phase='integrated', integrated_by='already_present', strategy=None, mode=None,
+                                      target_before_sha=t, target_after_sha=t, integrated_commit_sha=None, already_integrated_at=t,
+                                      target_worktree_updated=False, **observed))
         if readiness not in INTEGRABLE:
             raise _blocked('assessment_not_ready: '+readiness)
         if readiness == READY:
@@ -368,8 +537,13 @@ def integrate_v2_work(work_root, target_ref=None):
                 raise _blocked('assessment_invalid: result tree unavailable')
             intent = dict(base, phase='intent', strategy='merge')
             intent['planned_commit_sha'] = _merge_commit(repo, intent, write=True)  # M before the intent and the ref.
-        _not_checked_out(repo, full)
-        _put(records, intent)
+        if owner is None:
+            intent['mode'] = 'ref_only'
+        else:
+            wt, identity = _checkout(repo, owner)
+            _clean_at(wt, full, t, intent['planned_commit_sha'])  # Before the intent: nothing owned, nothing changed.
+            intent.update(mode='checked_out_worktree', **identity)
+        _put(records, intent)  # Ownership boundary: from here the clean target checkout belongs to this operation.
         return _complete(repo, records, intent)
 
 
@@ -397,6 +571,8 @@ def integration_summary(work_root):
                     target_before_sha=record['target_before_sha'], integrated_commit_sha=record['integrated_commit_sha'],
                     strategy=record['strategy'], consumed_assessment_id=record['consumed_assessment_id'], current_target_sha=current,
                     target_contains_integration=bool(repo and current and _ancestor(repo, landed, current)),
+                    target_worktree_updated=record.get('target_worktree_updated', False),
+                    **({'target_worktree': record['target_worktree']} if record.get('target_worktree') else {}),
                     **({'already_integrated_at': record['already_integrated_at']} if record['integrated_by'] == 'already_present' else {}))
     status = integration_status(work_root)
     if status is None:

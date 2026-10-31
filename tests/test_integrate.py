@@ -58,6 +58,7 @@ class FastForwardTests(IntegrateBase):
         self.release(); a = self.assess(); calls = self.model_calls(); commits = self.commits()
         assessment = WorkWorkspace.open(self.work/'integration').read_artifact('integration_assessment')
         r = self.integrate()
+        self.assertEqual((r['mode'], r['target_worktree_updated']), ('ref_only', False))  # Not checked out: ref-only CAS.
         self.assertEqual((r['phase'], r['integrated_by'], r['strategy'], r['target_ref_full'], r['target_before_sha'],
                           r['target_after_sha'], r['integrated_commit_sha'], r['accepted_commit_sha'], r['consumed_assessment_id']),
                          ('integrated', 'switchyard', 'fast_forward', 'refs/heads/main', self.base, c, c, c, a['assessment_id']))
@@ -133,18 +134,17 @@ class MergeTests(IntegrateBase):
 
 
 class SafetyTests(IntegrateBase):
-    # 8
-    def test_a_checked_out_target_is_never_moved_behind_the_checkout(self):
-        self.accepted(); self.assess()
+    # 8 (slice 3: one clean checkout is installed into; two are never guessed between)
+    def test_a_branch_checked_out_twice_is_ambiguous_and_never_moved(self):
+        self.accepted(); self.assess(); other = self.root/'other-wt'
+        self.git('worktree', 'add', '-q', '-f', str(other), 'main')  # Forced second checkout of the same branch.
+        source = self.source_state()
         e = self.blocked(self.integrate)
-        self.assertEqual((e.terminal, e.reason, e.paths), (I, 'target_checked_out', (str(self.target),)))
-        self.release(); other = self.root/'other-wt'
-        self.git('worktree', 'add', '-q', str(other), 'main')
-        e = self.blocked(self.integrate)
-        self.assertEqual((e.reason, e.paths), ('target_checked_out', (str(other),)))
-        self.assertEqual((self.git('rev-parse', 'main'), self.history()), (self.base, []))
+        self.assertEqual((e.terminal, e.reason, e.paths), (I, 'target_worktree_ambiguous', tuple(sorted((str(self.target), str(other))))))
+        self.assertEqual((self.git('rev-parse', 'main'), self.history(), self.source_state()), (self.base, [], source))
         self.git('worktree', 'remove', str(other))
-        self.assertEqual(self.integrate()['strategy'], 'fast_forward')
+        r = self.integrate()
+        self.assertEqual((r['mode'], r['target_worktree'], r['target_worktree_updated']), ('checked_out_worktree', str(self.target), True))
 
     # 9
     def test_dirty_unrelated_source_checkout_does_not_matter(self):
