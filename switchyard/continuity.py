@@ -16,6 +16,9 @@ Durable order: W1 read and every byte verified (no writes) -> source preflight (
 W2 recovery store: request, adoption blobs, operation `provisioning` (isolation + adoption plan) ->
 sources copied -> branch at base -> worktree -> rebuilt from base + adoption blobs and verified ->
 baseline (with `adoption`) -> reused artifacts -> `running` -> run from the verifier.
+
+`adopt_v2_work` and the explicit `transplant_v2_work` (#8: A -> B, A != B, `TRANSPLANT_BLOCKED`) are two
+intents over this one path (`_derive`); the intent is recorded in W2's adoption record.
 """
 from dataclasses import replace
 import json
@@ -43,6 +46,11 @@ from .workflow_compiler import compile_workflow
 
 ADOPTION_SCHEMA = 1
 B = 'ADOPTION_BLOCKED'
+# Derivation intents (#8). Both are one operation over one engine: `adopt` reuses W1's durable product on
+# whatever base the target checkout has (same base, or a transplant when it descends from W1's base);
+# `transplant` is the explicit intent to move it from base A to a different base B, and refuses A == B.
+ADOPT, TRANSPLANT = 'adopt', 'transplant'
+TRANSPLANT_BLOCKED = 'TRANSPLANT_BLOCKED'
 
 
 @contextmanager
@@ -351,14 +359,14 @@ def _plan(old, project, flow):
                 baseline_sha256=continuity['source_baseline_sha256'], continuity=continuity)
 
 
-def _record(plan, store):
+def _record(plan, store, intent):
     """Durable adoption plan: every byte in W2's own content-addressed blobs (W1 is never needed again)."""
     for content in plan['data'].values():
         _blob(store, content)
     artifacts = {}
     for name, (record, content) in plan['artifacts'].items():
         artifacts[name] = dict(version=record.version, sha256=record.sha256, blob=_blob(store, content.encode('utf-8')))
-    return dict(schema=ADOPTION_SCHEMA, from_work_id=plan['old'].name, from_work_root=str(plan['old']),
+    return dict(schema=ADOPTION_SCHEMA, intent=intent, from_work_id=plan['old'].name, from_work_root=str(plan['old']),
                 from_baseline_sha256=plan['baseline_sha256'], from_base_sha=plan['source_base'],
                 from_repository=plan['repository'], from_flow=plan['base']['flow'],
                 from_lifecycle_contract_version=plan['base']['lifecycle_contract_version'],
@@ -371,11 +379,30 @@ def _record(plan, store):
                 **({'transplant': plan['transplant']} if plan.get('transplant') else {}))
 
 
+def _derivation(work_root):
+    store = _store(Path(work_root).resolve())
+    return _read(store, 'baseline').get('adoption') if store.versions('baseline') else _read(store, 'operation').get('adoption')
+
+
 def continuity_plan(work_root):
     """Read-only: W2's durable continuity decisions (None for work that was not adopted)."""
-    store = _store(Path(work_root).resolve())
-    record = _read(store, 'baseline').get('adoption') if store.versions('baseline') else _read(store, 'operation').get('adoption')
+    record = _derivation(work_root)
     return None if record is None else record.get('continuity')
+
+
+def derivation_chain(work_root, limit=64):
+    """Read-only: [work, its immediate source, that source's source, ...]. Each derived work records only its
+    immediate source (`from_work_root`); the walk stops at a work that was not derived or is unreadable."""
+    chain = [Path(work_root).resolve()]
+    while len(chain) <= limit:
+        try:
+            record = _derivation(chain[-1])
+        except (RecoveryBlocked, ValueError, OSError):
+            break
+        if record is None or Path(record['from_work_root']) in chain:
+            break
+        chain.append(Path(record['from_work_root']))
+    return chain
 
 
 # --- Changed-base transplant (#5 slice 3) --------------------------------------------------------------
@@ -476,7 +503,8 @@ def _transplant(plan, iso):
         transplant['conflicts'] = _conflicts(out, b, commit)
         decision.update(action=INVALIDATED, reason='transplant_conflict', transplant=transplant)
         error = RecoveryBlocked(B, 'transplant_conflict', [c['path'] for c in transplant['conflicts']])
-        error.transplant = dict(transplant, implementation=implement['implementation'])
+        # Read-only structured conflict result (source work, bases, implementation identity, conflicts).
+        error.transplant = dict(transplant, source_work_id=plan['old'].name, implementation=implement['implementation'])
         error.continuity_plan = continuity
         raise error  # Before anything of W2 exists: no partial or conflicted W2.
     result_tree = out.split(b'\0')[0].decode()
@@ -558,9 +586,43 @@ def adopt_v2_work(old_work_root, new_work_root, config_text, provider_runtime_co
     """New isolated work W2 reusing W1's request, specification chain and implementation. W2's base is the
     clean source checkout's HEAD (`provider_runtime_config.working_directory`): W1's base, or a descendant
     of it onto which the implementation is transplanted deterministically."""
+    return _derive(old_work_root, new_work_root, config_text, provider_runtime_config, flow, ADOPT)
+
+
+def transplant_v2_work(old_work_root, new_work_root, config_text, provider_runtime_config, *, flow=None):
+    """Explicit TRANSPLANT (#8): new isolated work W2 at the target checkout's HEAD B carrying W1's preserved
+    implementation moved from W1's base A (A an ancestor of B, A != B) by the same deterministic 3-way engine
+    as changed-base adoption. W1 is only read (a suspended W1 stays suspended); no provider is invoked for
+    the transplant. Refusals are `TRANSPLANT_BLOCKED` with the engine's reasons and structured diagnostics."""
+    try:
+        return _derive(old_work_root, new_work_root, config_text, provider_runtime_config, flow, TRANSPLANT)
+    except RecoveryBlocked as exc:
+        if exc.terminal != B:
+            raise
+        error = RecoveryBlocked(TRANSPLANT_BLOCKED, exc.reason, exc.paths)
+        for name in ('transplant', 'continuity_plan'):
+            if hasattr(exc, name):
+                setattr(error, name, getattr(exc, name))
+        raise error from None
+
+
+def default_source(old_work_root, terminal=B):
+    """Read-only: the source checkout W1 was started from, from its frozen baseline alone (isolated work: the
+    recorded `source_worktree`; schema-2 in-place work: its recorded target). Never reads live status, which
+    may reconcile (e.g. mark a dead RUNNING work INTERRUPTED) and so write into W1."""
+    try:
+        base = _read(_store(Path(old_work_root).resolve()), 'baseline')
+        return base['isolation']['source_worktree'] if 'isolation' in base else base['snapshot']['identity']['target']
+    except (RecoveryBlocked, ValueError, OSError, KeyError, TypeError):
+        raise RecoveryBlocked(terminal, 'unsupported_source_schema: no recovery baseline') from None
+
+
+def _derive(old_work_root, new_work_root, config_text, provider_runtime_config, flow, intent):
     new = Path(new_work_root).resolve(); old = Path(old_work_root).resolve()
     if new == old or new.is_relative_to(old) or old.is_relative_to(new):
         raise RecoveryBlocked(B, 'new_work_root_overlaps_old_work')
+    if new in derivation_chain(old):
+        raise RecoveryBlocked(B, 'derivation_cycle')  # W2 would name itself as an ancestor.
     project = simple_config_from_text(config_text)
     with _lock(new):
         if (new/'events.jsonl').exists():
@@ -573,6 +635,8 @@ def adopt_v2_work(old_work_root, new_work_root, config_text, provider_runtime_co
             iso, adoption = op['isolation'], op['adoption']
             if adoption['from_work_root'] != str(old):
                 raise RecoveryBlocked(B, 'adoption_in_progress_from_another_work')
+            if adoption.get('intent', ADOPT) != intent:
+                raise RecoveryBlocked(B, 'derivation_in_progress: retry the same '+adoption.get('intent', ADOPT))
             with _source_lock(old):  # Same durable inputs (incl. the RECORDED target base) -> same decisions.
                 expected = _transplant(_plan(old, project, flow), iso)
             if expected['origin']['product_digest'] != adoption.get('source', {}).get('product_digest'):
@@ -587,10 +651,13 @@ def adopt_v2_work(old_work_root, new_work_root, config_text, provider_runtime_co
                 plan = _plan(old, project, flow)
             iso = _source_isolation(provider_runtime_config.working_directory, new)
             plan = _transplant(plan, iso)  # After the continuity rules; refuses before any W2 write.
+            if intent == TRANSPLANT and 'transplant' not in plan:
+                raise RecoveryBlocked(B, 'transplant_not_required: same_base (use work adopt to reuse it on this base, '
+                                         'or work resume)', [plan['source_base']])
             _provision_preflight(iso)
             store = WorkWorkspace.open(new/'recovery', CATALOG)
             request = plan['request']; store.initialize_request(request)
-            adoption = _record(plan, store)
+            adoption = _record(plan, store, intent)
             _operation(store, 'provisioning', isolation=iso, adoption=adoption)
         flow_name = flow or adoption['from_flow']
         if adoption['reused_sources']:

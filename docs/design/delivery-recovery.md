@@ -742,3 +742,42 @@ or written in W1, and W1's event history is never copied.
   `source_work_schema_version`, `target_runtime_version`, `target_work_schema_version`. A retry
   re-canonicalizes W1 and refuses `source_product_changed` if the product digest differs.
 - Reading W1 takes its work lock only if the lock file already exists, so adoption creates nothing in W1.
+
+## Transplant: move preserved work onto a new base (#8)
+
+`transplant_v2_work(old_work_root, new_work_root, config_text, provider_runtime_config)` /
+`switchyard work transplant <old_work_root> <new_work_root> [--source DIR] [--config FILE]` is the explicit
+intent to move W1's preserved implementation from its base A onto the target checkout's HEAD B. It is the
+same operation as changed-base adoption (one function, `continuity._derive`): the same per-schema readers and
+source rules, continuity plan, `git merge-tree` 3-way engine, W2 blobs, provisioning, materialization,
+verification and retry. Only the intent differs:
+
+- **adopt** reuses W1's durable product on whatever base the target has (same base, or a transplant when it
+  descends from A). **transplant** requires A != B and refuses a same base before anything is written:
+  `TRANSPLANT_BLOCKED: transplant_not_required: same_base` (use `work adopt`, or `work resume` for a
+  suspended W1). Same-base suspend/resume is unaffected.
+- **Surface:** every engine refusal is reported as `TRANSPLANT_BLOCKED` with the engine's reason, paths and
+  structured diagnostics unchanged (`no_reusable_implementation`, `implementation_uncertain: ...`,
+  `repository_mismatch`, `incompatible_base_lineage`, `transplant_conflict`, ...). Isolation preflight
+  refusals keep their own terminal (`DELIVERY_BLOCKED: dirty_source_worktree`). A conflict carries the same
+  `transplant` result as adoption -- `source_work_id`, `from_base`, `to_base`, `strategy`, `implementation`
+  (source, identity, digest), `conflicts: [{path, kind}]` -- and the plan with IMPLEMENT `INVALIDATED`; the
+  CLI prints both and exits 2. Nothing of W2 except its lock file exists; no resolution is attempted.
+- **Sources:** any work the readers prove (accepted commit, verified shelf, proven QA-ready candidate;
+  supported historical schemas), including a work that was itself adopted or transplanted. A SUSPENDED W1
+  is read from its shelf and stays SUSPENDED with no worktree.
+- **Provenance:** W2's adoption record gains `intent` (`adopt` | `transplant`; absent on works adopted before
+  #8, meaning `adopt`) next to the existing facts: `from_work_id`/`from_work_root` (the immediate source only),
+  `from_baseline_sha256` and `source.product_digest` (source identity), `implementation_identity`, the
+  plan's implementation `digest`, and `transplant` (`from_base`, `to_base`, `result_digest`, ...).
+  `continuity.derivation_chain(work)` walks the immediate-source links; a new work already in its source's
+  chain is refused (`derivation_cycle`).
+- **Default `--source`** (adopt and transplant): `continuity.default_source(W1)`, read from W1's frozen
+  baseline only (`isolation.source_worktree`; schema 2: the recorded target). W1's live status is never
+  consulted, because it may reconcile (e.g. mark a dead RUNNING work INTERRUPTED) and so write into W1.
+- **Retry:** a pending derivation is finished only by the same intent (`derivation_in_progress: retry the same
+  transplant`); status of a pending one is `transplant_incomplete: retry the same transplant`. The recorded
+  target B is kept even if the target branch moves on.
+- **Status** (both intents): `derived`, `derivation`, `derived_from_work_id`, plus for a transplant
+  `transplant_strategy` and `transplant_result_digest` next to `transplanted`, `transplant_from_base_sha`,
+  `transplant_to_base_sha`. The `adopted*` fields are unchanged.

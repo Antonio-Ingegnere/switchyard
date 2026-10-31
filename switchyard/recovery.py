@@ -674,7 +674,9 @@ def resume_v2_work(work_root,config_text,provider_runtime_config,reason=''):
 def recovery_status(work_root):
     store=_store(work_root);op=_read(store,'operation')
     if op['phase']=='provisioning':
-        raise RecoveryBlocked('RECOVERY_BLOCKED','adoption_incomplete: retry the same adopt' if op.get('adoption')
+        intent=(op.get('adoption') or {}).get('intent','adopt')
+        raise RecoveryBlocked('RECOVERY_BLOCKED',('transplant_incomplete: retry the same transplant' if intent=='transplant' else
+                                                  'adoption_incomplete: retry the same adopt') if op.get('adoption')
                               else 'delivery_provisioning_incomplete: retry the same delivery start')
     base=_read(store,'baseline')
     phase=op['phase']
@@ -792,7 +794,9 @@ def _adoption_status(base):
     """Compact continuity view (#5): where reused product came from; never W1's history."""
     adoption=base.get('adoption')
     if adoption is None:return {}
-    return dict(adopted=True,adopted_from_work_id=adoption['from_work_id'],adopted_from_base_sha=adoption['from_base_sha'],
+    # `derivation`: the recorded intent (`adopt`, or explicit `transplant` #8); works adopted before #8 record none.
+    return dict(derived=True,derivation=adoption.get('intent','adopt'),derived_from_work_id=adoption['from_work_id'],
+                adopted=True,adopted_from_work_id=adoption['from_work_id'],adopted_from_base_sha=adoption['from_base_sha'],
                 adopted_implementation_source=adoption['implementation_source'],adoption_entry_state=adoption['entry_state'],
                 reused_request=True,reused_specification=adoption['reused_specification'],reused_implementation=True,
                 reused_artifacts=sorted(adoption['reused_artifacts']),reused_sources=adoption['reused_sources'],
@@ -801,7 +805,9 @@ def _adoption_status(base):
                     'target_runtime_version':adoption['target']['runtime_version'],'target_work_schema_version':adoption['target']['work_schema_version']}
                    if 'source' in adoption else {}),
                 **({'transplant_from_base_sha':adoption['transplant']['from_base'],
-                    'transplant_to_base_sha':adoption['transplant']['to_base']} if 'transplant' in adoption else {}),
+                    'transplant_to_base_sha':adoption['transplant']['to_base'],
+                    'transplant_strategy':adoption['transplant']['strategy'],
+                    'transplant_result_digest':adoption['transplant']['result_digest']} if 'transplant' in adoption else {}),
                 **({'continuity':{action.lower():[d['stage'] for d in adoption['continuity']['decisions'] if d['action']==action]
                                   for action in ('REUSED','RERUN','INVALIDATED')}} if 'continuity' in adoption else {}))
 

@@ -27,11 +27,13 @@ def _parser():
     commands = parser.add_subparsers(dest='command', required=True)
     work = commands.add_parser('work', allow_abbrev=False)
     actions = work.add_subparsers(dest='action', required=True)
-    adopt = actions.add_parser('adopt', allow_abbrev=False)
-    adopt.add_argument('old_work_root'); adopt.add_argument('work_root')
-    adopt.add_argument('--source', help='clean source checkout for the new work (default: the old work\'s source checkout)')
-    for flag in ('--config', '--claude-executable', '--codex-executable'):
-        adopt.add_argument(flag)
+    for action, source in (('adopt', 'clean source checkout for the new work'),
+                           ('transplant', 'clean source checkout whose HEAD is the new base')):
+        derive = actions.add_parser(action, allow_abbrev=False)
+        derive.add_argument('old_work_root'); derive.add_argument('work_root')
+        derive.add_argument('--source', help=source+' (default: the old work\'s source checkout)')
+        for flag in ('--config', '--claude-executable', '--codex-executable'):
+            derive.add_argument(flag)
     for action in ('status', 'answer', 'resume', 'rollback', 'qa-fix', 'accept', 'suspend'):
         operation = actions.add_parser(action, allow_abbrev=False)
         operation.add_argument('work_root')
@@ -143,16 +145,15 @@ def _work_command(args):
                            qa_fix_v2_work, accept_v2_candidate)
     from .provider_stages import ProviderRuntimeConfig
     try:
-        if args.action == 'adopt':
-            from .continuity import adopt_v2_work
-            if args.source:
-                source = args.source
-            else:  # The old work's source checkout; for in-place (schema 2) work that is its recorded target.
-                old_status = recovery_status(args.old_work_root)
-                source = old_status.get('source_worktree') or old_status['target']
+        if args.action in ('adopt', 'transplant'):
+            from .continuity import adopt_v2_work, transplant_v2_work, default_source, B, TRANSPLANT_BLOCKED
+            # Default: the old work's recorded source checkout, read from its frozen baseline only (never its
+            # live status, which may reconcile and write into the old work).
+            source = args.source or default_source(args.old_work_root, TRANSPLANT_BLOCKED if args.action == 'transplant' else B)
             config_text = (Path(args.config) if args.config else Path(source)/'.switchyard/config.yaml').read_text(encoding='utf-8')
-            adopt_v2_work(args.old_work_root, args.work_root, config_text,
-                          ProviderRuntimeConfig(source, args.claude_executable, args.codex_executable))
+            derive = transplant_v2_work if args.action == 'transplant' else adopt_v2_work
+            derive(args.old_work_root, args.work_root, config_text,
+                   ProviderRuntimeConfig(source, args.claude_executable, args.codex_executable))
             print(json.dumps(recovery_status(args.work_root), ensure_ascii=True, indent=2))
             return 0
         status = recovery_status(args.work_root)
