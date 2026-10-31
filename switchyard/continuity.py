@@ -27,6 +27,9 @@ import subprocess
 from tempfile import TemporaryDirectory
 import uuid
 
+from contextlib import contextmanager
+import fcntl
+
 from .recovery import (RecoveryBlocked, CATALOG, QA_READY, _lock, _store, _read, _operation, _Repo, _blob, _bytes,
                        _sha, _source_isolation, _provision_preflight, _provision, _baseline, _drift, _drive,
                        _open_round, _Projection)
@@ -34,11 +37,30 @@ from .qa_lifecycle import revalidate_candidate, LifecycleError, _load as _load_c
 from .simple_config import simple_config_from_text
 from .source_resolution import SOURCE_CATALOG
 from .suspend import verify_shelf
+from .versioning import CURRENT_WORK_SCHEMA, SchemaError, runtime_version, work_schema
 from .work_contract import WorkWorkspace
 from .workflow_compiler import compile_workflow
 
 ADOPTION_SCHEMA = 1
 B = 'ADOPTION_BLOCKED'
+
+
+@contextmanager
+def _source_lock(old):
+    """Exclude W1's own controllers while it is read, without creating anything in W1: a controller always
+    creates `.recovery.lock` before it writes, so a work without one has no active controller."""
+    path = Path(old)/'.recovery.lock'
+    if not path.is_file():
+        yield; return
+    with path.open('rb') as stream:
+        try:
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise RecoveryBlocked(B, 'source_work_active') from None
+        try:
+            yield
+        finally:
+            fcntl.flock(stream, fcntl.LOCK_UN)
 
 
 def _git_blob(repo, oid, name):
@@ -126,8 +148,38 @@ def _from_candidate(root, store, iso):
     return changes, data, candidate.get('sequence', 1), identity
 
 
-def _implementation(old, store, base, op):
-    """(source label, source identity, changes, bytes) by the precedence in the module docstring."""
+# --- Historical readers (#5 slice 4): one per supported work schema --------------------------------------
+# Each turns a W1 of that schema into the canonical inputs everything below consumes: repository and base
+# provenance plus one implementation (label, identity, change set, bytes). Planning, transplant and W2
+# provisioning never look at a schema version. W1 is only read; nothing is migrated in place.
+
+def _isolated_provenance(base):
+    return base['isolation']['repository'], base['isolation']['base_sha']
+
+
+def _in_place_provenance(base):
+    """Schema 2 (release 2.3.0 / `isolation=False`): the caller's checkout was the workspace."""
+    identity = base['snapshot']['identity']
+    return _Repo(identity['git_dir']).common_dir(), identity['head']
+
+
+def _in_place_implementation(old, store, base, op, repository, base_sha):
+    """Only an accepted commit is durable product here: a candidate's bytes live in the caller's own
+    (mutable) checkout, which this runtime will not treat as authoritative."""
+    qa = WorkWorkspace.open(_read(store, 'qa_reference')['workspace']) if store.versions('qa_reference') else None
+    decision = _read(qa, 'qa_decision') if qa is not None and qa.versions('qa_decision') else None
+    if decision and decision['terminal'] == 'ACCEPTED' and decision.get('committed_head'):
+        changes, data = _from_commit(_Repo(repository), base_sha, decision['committed_head'])
+        return 'accepted_commit:'+decision['committed_head'], decision['committed_head'], changes, data
+    if qa is not None and decision is None:
+        raise RecoveryBlocked(B, 'implementation_uncertain: work schema 2 candidate bytes live only in the caller checkout')
+    if op['phase'] in ('interrupted', 'reopened', 'running', 'waiting_for_human'):
+        raise RecoveryBlocked(B, 'implementation_uncertain: '+op['phase'])
+    raise RecoveryBlocked(B, 'no_reusable_implementation')
+
+
+def _implementation(old, store, base, op, repository=None, base_sha=None):
+    """Schema 3 (isolated): (label, identity, changes, bytes) by the precedence in the module docstring."""
     iso = base['isolation']; repo = _Repo(iso['repository']); phase = op['phase']
     qa = None
     if store.versions('qa_reference'):
@@ -147,6 +199,11 @@ def _implementation(old, store, base, op):
             (qa is not None and qa.versions('qa_intent') and decision is None):
         raise RecoveryBlocked(B, 'implementation_uncertain: '+phase)
     raise RecoveryBlocked(B, 'no_reusable_implementation')
+
+
+# Supported historical schemas: work schema -> (reader identity, provenance, implementation source).
+READERS = {2: ('work-schema-2-in-place', _in_place_provenance, _in_place_implementation),
+           3: ('work-schema-3-isolated', _isolated_provenance, _implementation)}
 
 
 def _entry_state(project, flow):
@@ -250,12 +307,16 @@ def _plan(old, project, flow):
         store = _store(old); base = _read(store, 'baseline'); op = _read(store, 'operation')
     except (RecoveryBlocked, ValueError, OSError):
         raise RecoveryBlocked(B, 'unsupported_source_schema: no recovery baseline') from None
-    if base.get('lifecycle_contract_version') != 2:
-        raise RecoveryBlocked(B, 'unsupported_source_schema: lifecycle contract %r' % base.get('lifecycle_contract_version'))
-    if 'isolation' not in base:
-        raise RecoveryBlocked(B, 'unsupported_source_schema: legacy in-place work')
+    try:
+        schema = work_schema(base)
+    except SchemaError as exc:
+        raise RecoveryBlocked(B, exc.reason) from None
+    if schema not in READERS:
+        raise RecoveryBlocked(B, 'unsupported_source_schema: work schema %d (lifecycle contract 1 artifacts/configuration)' % schema)
+    reader, provenance, implementation_reader = READERS[schema]
+    repository, source_base = provenance(base)
     flow = flow or base['flow']
-    source, identity, changes, data = _implementation(old, store, base, op)
+    source, identity, changes, data = implementation_reader(old, store, base, op, repository, source_base)
     work = WorkWorkspace.open(old)
     spec = project.bundle.flow(flow); entry = _entry_state(project, flow)
     sources = None
@@ -267,7 +328,7 @@ def _plan(old, project, flow):
     implementation = dict(source=source, identity=identity, digest=implementation_digest(changes), paths=len(changes))
     decisions, invalid = _decisions(work, project, spec, entry, sources, implementation)
     continuity = dict(schema=CONTINUITY_SCHEMA, source_work_id=old.name, source_baseline_sha256=store.latest_artifact('baseline').sha256,
-                      base_sha=base['isolation']['base_sha'], flow=flow, decisions=decisions)
+                      base_sha=source_base, flow=flow, decisions=decisions)
     if invalid is not None:
         # The current workflow cannot regenerate an implementation without rerunning the stages adoption
         # exists to avoid, so this slice blocks, and the plan explains exactly what was invalidated.
@@ -277,7 +338,15 @@ def _plan(old, project, flow):
         raise error
     artifacts = {name: (work.latest_artifact(name), work.read_artifact(name)) for d in decisions
                  if d['stage'] not in ('REQUEST', 'SOURCE_RESOLUTION') and d['action'] == REUSED for name in (a['artifact'] for a in d['artifacts'])}
+    product = dict(work_schema_version=schema, reader=reader, baseline_sha256=continuity['source_baseline_sha256'],
+                   repository_base=source_base, artifacts=[{k: a[k] for k in ('artifact', 'version', 'sha256')}
+                                                            for d in decisions for a in d['artifacts']],
+                   implementation=implementation)
+    origin = dict(work_id=old.name, work_schema_version=schema, runtime_version=base.get('runtime_version'), reader=reader,
+                  baseline_sha256=continuity['source_baseline_sha256'],
+                  product_digest=_sha(json.dumps(product, sort_keys=True, separators=(',', ':')).encode('utf-8')))
     return dict(old=old, base=base, flow=flow, entry=entry, request=work.read_artifact('request'), source=source,
+                repository=repository, source_base=source_base, origin=origin,
                 identity=identity, changes=changes, data=data, artifacts=artifacts, sources=sources is not None,
                 baseline_sha256=continuity['source_baseline_sha256'], continuity=continuity)
 
@@ -289,11 +358,11 @@ def _record(plan, store):
     artifacts = {}
     for name, (record, content) in plan['artifacts'].items():
         artifacts[name] = dict(version=record.version, sha256=record.sha256, blob=_blob(store, content.encode('utf-8')))
-    project_spec = plan['base']['isolation']
     return dict(schema=ADOPTION_SCHEMA, from_work_id=plan['old'].name, from_work_root=str(plan['old']),
-                from_baseline_sha256=plan['baseline_sha256'], from_base_sha=project_spec['base_sha'],
-                from_repository=project_spec['repository'], from_flow=plan['base']['flow'],
+                from_baseline_sha256=plan['baseline_sha256'], from_base_sha=plan['source_base'],
+                from_repository=plan['repository'], from_flow=plan['base']['flow'],
                 from_lifecycle_contract_version=plan['base']['lifecycle_contract_version'],
+                source=plan['origin'], target=dict(work_schema_version=CURRENT_WORK_SCHEMA, runtime_version=runtime_version()),
                 implementation_source=plan['source'], implementation_identity=plan['identity'], changes=plan['changes'],
                 reused_artifacts=artifacts, reused_sources=plan['sources'], entry_state=plan['entry'],
                 reused_specification=any(a.get('schema') == 'microspec' for d in plan['continuity']['decisions']
@@ -387,8 +456,8 @@ def _conflicts(out, target, implementation):
 
 def _transplant(plan, iso):
     """Same base: nothing to do. Target descends from the base: 3-way transplant or an explicit block."""
-    a, b = plan['base']['isolation']['base_sha'], iso['base_sha']
-    if iso['repository'] != plan['base']['isolation']['repository']:
+    a, b = plan['source_base'], iso['base_sha']
+    if iso['repository'] != plan['repository']:
         raise RecoveryBlocked(B, 'repository_mismatch')
     if a == b:
         return plan
@@ -504,15 +573,17 @@ def adopt_v2_work(old_work_root, new_work_root, config_text, provider_runtime_co
             iso, adoption = op['isolation'], op['adoption']
             if adoption['from_work_root'] != str(old):
                 raise RecoveryBlocked(B, 'adoption_in_progress_from_another_work')
-            with _lock(old):  # Same durable inputs (incl. the RECORDED target base) -> same decisions.
+            with _source_lock(old):  # Same durable inputs (incl. the RECORDED target base) -> same decisions.
                 expected = _transplant(_plan(old, project, flow), iso)
+            if expected['origin']['product_digest'] != adoption.get('source', {}).get('product_digest'):
+                raise RecoveryBlocked(B, 'source_product_changed')  # W1 no longer canonicalizes to the same product.
             if adoption.get('continuity') != expected['continuity'] or adoption['changes'] != expected['changes']:
                 raise RecoveryBlocked(B, 'continuity_plan_differs: retry with the original configuration')
             request = store.read_artifact('request')
         else:
             if (new/'manifest.jsonl').exists():
                 raise RecoveryBlocked('RECOVERY_BLOCKED', 'workspace_not_fresh')
-            with _lock(old):  # Excludes W1's own controllers while it is read; W1 is never written.
+            with _source_lock(old):  # Excludes W1's own controllers while it is read; W1 is never written.
                 plan = _plan(old, project, flow)
             iso = _source_isolation(provider_runtime_config.working_directory, new)
             plan = _transplant(plan, iso)  # After the continuity rules; refuses before any W2 write.

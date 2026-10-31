@@ -145,9 +145,11 @@ def _work_command(args):
     try:
         if args.action == 'adopt':
             from .continuity import adopt_v2_work
-            source = args.source or recovery_status(args.old_work_root).get('source_worktree')
-            if not source:
-                raise ValueError('ADOPTION_BLOCKED: unsupported_source_schema: legacy in-place work')
+            if args.source:
+                source = args.source
+            else:  # The old work's source checkout; for in-place (schema 2) work that is its recorded target.
+                old_status = recovery_status(args.old_work_root)
+                source = old_status.get('source_worktree') or old_status['target']
             config_text = (Path(args.config) if args.config else Path(source)/'.switchyard/config.yaml').read_text(encoding='utf-8')
             adopt_v2_work(args.old_work_root, args.work_root, config_text,
                           ProviderRuntimeConfig(source, args.claude_executable, args.codex_executable))

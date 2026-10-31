@@ -713,3 +713,32 @@ implementation deterministically instead of refusing.
   plan and transplant from W1 against the recorded B and refuses `continuity_plan_differs` if the plan or the
   result differ. Status: `transplanted`, `transplant_from_base_sha`, `transplant_to_base_sha` (and
   `transplanted: false` for same-base adoption).
+
+### Historical sources (#5, slice 4)
+
+Adoption reads older works through a read-only, per-schema reader (`switchyard/versioning.py` names the
+schemas; `continuity.READERS` maps each supported one to its provenance and implementation reader). The
+reader turns W1 into the canonical inputs planning, transplant and provisioning consume (repository and base,
+request, frozen sources, artifact records and contracts, one implementation change set). Nothing is migrated
+or written in W1, and W1's event history is never copied.
+
+| Work schema | Produced by | Identified by | Adoptable products |
+|---|---|---|---|
+| 1 | lifecycle contract 1 works | no `lifecycle_contract_version` (the runtime's own convention) | none: `unsupported_source_schema: work schema 1` |
+| 2 | release 2.3.0; `isolation=False` today | contract 2, no `isolation` | request, frozen sources, artifacts with their recorded contracts, and an **accepted commit** only (2.3.0 accepted in place: `C^` must be the baseline HEAD). A candidate's bytes live only in the caller's checkout: `implementation_uncertain` |
+| 3 | isolated delivery (current) | contract 2 with `isolation` | everything in slice 1: accepted commit, shelf, proven candidate |
+
+- New works record `work_schema_version` and `runtime_version` (the package version) in their baseline. Works
+  before this slice record neither: their schema comes from structure and their runtime version is reported
+  as unrecorded (`null`). An explicit version that contradicts the structure, a malformed field or missing
+  snapshot/flow/config is `ambiguous_source_schema`; a schema or lifecycle contract newer than this runtime is
+  `source_schema_too_new`. Unknown data is never treated as the latest schema.
+- A runtime version difference alone invalidates nothing: the same rules apply (contracts recorded in W1's
+  artifact catalog are compared with the current ones; a missing contract blocks), IMPLEMENT is REUSED and
+  VERIFY RERUN. Same-base reuse and changed-base transplant behave exactly as for a current source.
+- W2's adoption record keeps `source` (`work_id`, `work_schema_version`, `runtime_version`, `reader`,
+  `baseline_sha256`, `product_digest`: the SHA-256 of the canonical product) and `target`
+  (`work_schema_version`, `runtime_version`); status shows `source_runtime_version`,
+  `source_work_schema_version`, `target_runtime_version`, `target_work_schema_version`. A retry
+  re-canonicalizes W1 and refuses `source_product_changed` if the product digest differs.
+- Reading W1 takes its work lock only if the lock file already exists, so adoption creates nothing in W1.

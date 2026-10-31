@@ -169,7 +169,8 @@ class AdoptionTests(ContinuityBase):
             execute_recoverable_v2_work(self.text, 'feature', REQUEST, self.work, self.config, isolation=False)
         with self.assertRaises(RecoveryBlocked) as ctx:
             self.adopt()
-        self.assertEqual(ctx.exception.reason, 'unsupported_source_schema: legacy in-place work')
+        # Schema 2 (in-place) is read now; an interrupted one has no durable implementation.
+        self.assertEqual(ctx.exception.reason, 'implementation_uncertain: interrupted')
         with self.assertRaises(RecoveryBlocked) as ctx:
             adopt_v2_work(self.root/'nothing-here', self.w2, self.text, self.config)
         self.assertEqual(ctx.exception.reason, 'unsupported_source_schema: no recovery baseline')

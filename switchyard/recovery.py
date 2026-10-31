@@ -31,6 +31,7 @@ from .provider_stages import ProviderStageExecutorResolver
 from .provider_process import ProviderExecutionError
 from .context_transport import EvidenceDeliveryError
 from .git_safety import GitRepository
+from .versioning import runtime_stamp
 from .qa_lifecycle import (withdraw_qa_candidate, finish_reopen_v2_work, accept_v2_work, finish_accept_v2_work, create_qa_candidate,
                            QaDecision,
                            fix_records, write_fix_request, resolve_fix_request, qa_rounds,
@@ -285,7 +286,7 @@ def _baseline(repo,store,config,flow,isolation=None,extra=None):
     index=repo.index_path().read_bytes()
     if repo.snapshot()[0]!=snap:raise RecoveryBlocked('RECOVERY_BLOCKED','worktree_moved_during_baseline')
     _put(store,'baseline',dict(snapshot=snap,sources=sources,index_blob=_blob(store,index),config=config,flow=flow,lifecycle_contract_version=2,
-                                **({'isolation':isolation} if isolation else {}),**(extra or {})))
+                                **({'isolation':isolation} if isolation else {}),**runtime_stamp(isolation is not None),**(extra or {})))
     _put(store,'checkpoint',dict(snapshot=snap,manifest=None))
 
 
@@ -796,6 +797,9 @@ def _adoption_status(base):
                 reused_request=True,reused_specification=adoption['reused_specification'],reused_implementation=True,
                 reused_artifacts=sorted(adoption['reused_artifacts']),reused_sources=adoption['reused_sources'],
                 transplanted='transplant' in adoption,
+                **({'source_runtime_version':adoption['source']['runtime_version'],'source_work_schema_version':adoption['source']['work_schema_version'],
+                    'target_runtime_version':adoption['target']['runtime_version'],'target_work_schema_version':adoption['target']['work_schema_version']}
+                   if 'source' in adoption else {}),
                 **({'transplant_from_base_sha':adoption['transplant']['from_base'],
                     'transplant_to_base_sha':adoption['transplant']['to_base']} if 'transplant' in adoption else {}),
                 **({'continuity':{action.lower():[d['stage'] for d in adoption['continuity']['decisions'] if d['action']==action]
