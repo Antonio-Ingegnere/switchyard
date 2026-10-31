@@ -781,3 +781,50 @@ verification and retry. Only the intent differs:
 - **Status** (both intents): `derived`, `derivation`, `derived_from_work_id`, plus for a transplant
   `transplant_strategy` and `transplant_result_digest` next to `transplanted`, `transplant_from_base_sha`,
   `transplant_to_base_sha`. The `adopted*` fields are unchanged.
+
+## Integration readiness (#9, slice 1)
+
+`integration_readiness(work_root, target_ref=None)` / `switchyard work integration-status <work_root>
+[--target REF] [--json]` answers, without merging anything, whether an accepted delivery commit C integrates
+into a target. Acceptance is unchanged and never looks at the target; nothing here merges, rebases, updates a
+ref, fetches, pushes or opens a PR (later slices).
+
+- **Eligible:** an isolated work whose operation is `accepted`. Anything else (QA-ready, suspended,
+  interrupted, reopened, in-place work) is `INTEGRATION_BLOCKED: work_not_accepted: <state>`. The work's state
+  is read directly, never reconciled.
+- **C is re-proven** before any assessment: the acceptance record agrees with the isolation record, the QA
+  decision names C, C exists, has exactly one parent (the accepted candidate's base head, which descends from
+  A), carries this work's acceptance message, and changes exactly the candidate's paths to its bytes and modes.
+  Otherwise `INTEGRATION_BLOCKED: accepted_commit_invalid: <detail>`; nothing is repaired. The delivery
+  branch is only observed (`delivery_branch_state`: `at_accepted`, `advanced`, `behind`, `diverged`,
+  `missing`); C, not the branch head, is the product.
+- **Target:** a local branch, ref or commit (default: the source branch frozen in the isolation record at
+  delivery start, e.g. `refs/heads/main`), resolved once to T (`target_ref`, `target_sha`). Unknown or
+  option-like names: `INTEGRATION_BLOCKED: target_not_found`. No remote is fetched.
+- **Classification** (A = delivery base, the work's own `base_sha` -- a transplanted or adopted work uses its
+  actual base, never its provenance):
+
+  | Relationship | `readiness` | `drift` | `strategy` |
+  |---|---|---|---|
+  | T == A | `READY` | `none` | `fast_forward` (result tree = C's tree) |
+  | C ancestor of T | `ALREADY_INTEGRATED` | `integrated` | -- |
+  | A ancestor of T, clean 3-way | `READY_WITH_DRIFT` | `clean` | `three_way` (result tree) |
+  | A ancestor of T, conflicts | `BLOCKED_CONFLICT` | `conflicting` | `three_way` (`conflicts`) |
+  | otherwise | `BLOCKED_LINEAGE` | `unsupported_lineage` | -- |
+
+  The 3-way check is the transplant engine itself (`continuity.three_way`: BASE A, OURS T, THEIRS C, `git
+  merge-tree --write-tree`), with the same `{path, kind}` normalization, so transplant and integration report
+  identical conflicts for the same change. No worktree, index, ref, conflict marker, provider or model; the
+  only Git side effect is unreferenced objects in the object store.
+- **Repository-level:** the source checkout's branch, dirt or position are irrelevant; the delivery-start
+  dirty-source preflight is not applied.
+- **Durable, immutable assessments:** each distinct result is a new version of `integration_assessment` in the
+  work's own `integration/` store (never the recovery store or operation history). Its `assessment_id` is the
+  SHA-256 of the canonical inputs and outcome (work, C, A, target ref, T, readiness, drift, strategy, result
+  tree, conflicts); no timestamps. An unchanged re-assessment reproduces the latest id and writes nothing.
+- **Freshness:** `integration_status(work_root)` (and `recovery_status()['integration']` for accepted work:
+  `target_ref`, `target_sha`, `readiness`, `drift`, `conflicts` count, `current_target_sha`, `stale`,
+  `assessment_id`) re-resolves the target ref; `stale: true` when it no longer names the assessed T. Every
+  explicit `integration-status` call re-assesses against the current T.
+- **CLI:** human summary by default (`--json` for the structured assessment); exit 0 for `READY` /
+  `READY_WITH_DRIFT`, 1 for any other readiness, 2 for `INTEGRATION_BLOCKED`.

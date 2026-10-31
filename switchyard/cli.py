@@ -34,6 +34,11 @@ def _parser():
         derive.add_argument('--source', help=source+' (default: the old work\'s source checkout)')
         for flag in ('--config', '--claude-executable', '--codex-executable'):
             derive.add_argument(flag)
+    integration = actions.add_parser('integration-status', allow_abbrev=False)
+    integration.add_argument('work_root')
+    integration.add_argument('--target', help='local branch, ref or commit to assess against '
+                             '(default: the source branch recorded when the delivery started)')
+    integration.add_argument('--json', action='store_true', help='print the structured assessment')
     for action in ('status', 'answer', 'resume', 'rollback', 'qa-fix', 'accept', 'suspend'):
         operation = actions.add_parser(action, allow_abbrev=False)
         operation.add_argument('work_root')
@@ -140,6 +145,22 @@ def main(argv=None) -> int:
     return 0 if matches else 1
 
 
+def _integration_text(a):
+    short = lambda sha: sha[:12] if sha else '-'
+    lines = ['Integration '+a['readiness'], 'Target: %s @ %s' % (_safe_display(a['target_ref'], 256), a['target_sha']),
+             'Accepted: '+a['accepted_commit_sha'], 'Base: '+a['delivery_base_sha'], 'Drift: '+a['drift'],
+             'Strategy: '+(a['strategy'] or '-').replace('_', '-')]
+    if a['conflicts']:
+        lines.append('Conflicts:')
+        lines += ['  %s - %s' % (_safe_display(c['path'], 512), c['kind']) for c in a['conflicts']]
+    else:
+        lines.append('Conflicts: none')
+    if a['delivery_branch_state'] != 'at_accepted':
+        lines.append('Delivery branch: %s (%s @ %s)' % (a['delivery_branch_state'], a['delivery_branch'], short(a['delivery_branch_sha'])))
+    lines.append('Assessment: %s (v%d)' % (a['assessment_id'], a['assessment_version']))
+    return '\n'.join(lines)
+
+
 def _work_command(args):
     from .recovery import (recovery_status, answer_v2_work, resume_v2_work, rollback_v2_work,
                            qa_fix_v2_work, accept_v2_candidate)
@@ -156,6 +177,11 @@ def _work_command(args):
                    ProviderRuntimeConfig(source, args.claude_executable, args.codex_executable))
             print(json.dumps(recovery_status(args.work_root), ensure_ascii=True, indent=2))
             return 0
+        if args.action == 'integration-status':
+            from .integration import integration_readiness, INTEGRABLE
+            assessment = integration_readiness(args.work_root, args.target)
+            print(json.dumps(assessment, ensure_ascii=True, indent=2) if args.json else _integration_text(assessment))
+            return 0 if assessment['readiness'] in INTEGRABLE else 1
         status = recovery_status(args.work_root)
         if args.action == 'rollback':
             status = rollback_v2_work(args.work_root)

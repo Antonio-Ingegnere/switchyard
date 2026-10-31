@@ -416,12 +416,12 @@ _FIXED = {'GIT_AUTHOR_NAME': 'Switchyard', 'GIT_AUTHOR_EMAIL': 'switchyard@inval
 _KIND_ORDER = ('binary', 'modify/delete', 'delete/modify', 'add/add', 'file/directory', 'distinct types', 'content')
 
 
-def _plumb(repo, *args, input=None, env=None):
+def _plumb(repo, *args, input=None, env=None, terminal=B, failure='transplant_failed'):
     try:
         result = subprocess.run([repo.git_executable, '-c', 'core.filemode=true', '--literal-pathspecs', *args],
                                 cwd=repo.workspace, env={**repo.env, **(env or {})}, input=input, capture_output=True, timeout=60)
     except (OSError, subprocess.SubprocessError):
-        raise RecoveryBlocked(B, 'transplant_failed: git unavailable') from None
+        raise RecoveryBlocked(terminal, failure+': git unavailable') from None
     return result.returncode, result.stdout
 
 
@@ -481,6 +481,19 @@ def _conflicts(out, target, implementation):
     return [dict(path=path, kind=min(found, key=lambda k: (rank(k), k))) for path, found in sorted(kinds.items())]
 
 
+def three_way(repo, base, ours, theirs, *, terminal=B, failure='transplant_failed'):
+    """The one merge engine: Git's own 3-way merge (`merge-tree --write-tree`, ort) of base -> theirs onto ours
+    from the three commits alone -- no worktree, index or ref. (result_tree, []) when clean, else
+    (None, normalized [{path, kind}]). Transplant (#5/#8) and integration readiness (#9) both use it."""
+    code, out = _plumb(repo, 'merge-tree', '--write-tree', '-z', '--name-only', '--merge-base='+base, ours, theirs,
+                       terminal=terminal, failure=failure)
+    if code not in (0, 1):
+        raise RecoveryBlocked(terminal, failure+': merge-tree')
+    if code == 1:
+        return None, _conflicts(out, ours, theirs)
+    return out.split(b'\0')[0].decode(), []
+
+
 def _transplant(plan, iso):
     """Same base: nothing to do. Target descends from the base: 3-way transplant or an explicit block."""
     a, b = plan['source_base'], iso['base_sha']
@@ -492,22 +505,19 @@ def _transplant(plan, iso):
     if repo.probe('merge-base', '--is-ancestor', a, b)[0] != 0:
         raise RecoveryBlocked(B, 'incompatible_base_lineage', [a, b])
     source_tree, commit = _implementation_commit(repo, a, plan['changes'], plan['data'])
-    code, out = _plumb(repo, 'merge-tree', '--write-tree', '-z', '--name-only', '--merge-base='+a, b, commit)
-    if code not in (0, 1):
-        raise RecoveryBlocked(B, 'transplant_failed: merge-tree')
+    result_tree, conflicts = three_way(repo, a, b, commit)
     implement = next(d for d in plan['continuity']['decisions'] if d.get('product') == 'implementation')
     transplant = dict(strategy=TRANSPLANT_STRATEGY, from_base=a, to_base=b, source_tree=source_tree)
     continuity = json.loads(json.dumps(plan['continuity'])); continuity['target_base_sha'] = b
     decision = next(d for d in continuity['decisions'] if d.get('product') == 'implementation')
-    if code == 1:
-        transplant['conflicts'] = _conflicts(out, b, commit)
+    if conflicts:
+        transplant['conflicts'] = conflicts
         decision.update(action=INVALIDATED, reason='transplant_conflict', transplant=transplant)
         error = RecoveryBlocked(B, 'transplant_conflict', [c['path'] for c in transplant['conflicts']])
         # Read-only structured conflict result (source work, bases, implementation identity, conflicts).
         error.transplant = dict(transplant, source_work_id=plan['old'].name, implementation=implement['implementation'])
         error.continuity_plan = continuity
         raise error  # Before anything of W2 exists: no partial or conflicted W2.
-    result_tree = out.split(b'\0')[0].decode()
     changes, data = _diff_trees(repo, b, result_tree)
     transplant.update(result_tree=result_tree, result_digest=implementation_digest(changes), result_paths=len(changes))
     decision.update(reason='deterministic_three_way_transplant', transplant=transplant)

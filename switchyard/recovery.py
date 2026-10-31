@@ -767,7 +767,17 @@ def recovery_status(work_root):
                 recovery_source=recovery_source,**lifecycle,**_isolation_status(base,op),**_suspend_status(op),**_adoption_status(base),
                 **accounting,**human_history,**qa_status,**({'resume_blocked':blocked} if blocked else {}),
                 **({'provider_failure':op['provider_failure']} if phase=='interrupted' and 'provider_failure' in op else {}),
+                **_integration_status(work_root,phase),
                 rollback_allowed=phase in ('interrupted','delivery_done','rollback_running','reopened') and not op.get('checkpoint_uncertain',False) and terminal!='ACCEPTED')
+
+
+def _integration_status(work_root,phase):
+    """Compact latest integration assessment (#9) of an accepted work, with its freshness; nothing if never assessed."""
+    if phase!='accepted':return {}
+    from .integration import integration_summary
+    try:summary=integration_summary(work_root)
+    except ValueError:return {}
+    return {'integration':summary} if summary else {}
 
 
 def _isolation_status(base,op=None):
