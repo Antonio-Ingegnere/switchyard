@@ -21,7 +21,10 @@ from dataclasses import replace
 import json
 import os
 from pathlib import Path
+import re
 import shutil
+import subprocess
+from tempfile import TemporaryDirectory
 import uuid
 
 from .recovery import (RecoveryBlocked, CATALOG, QA_READY, _lock, _store, _read, _operation, _Repo, _blob, _bytes,
@@ -60,7 +63,12 @@ def _tree(repo, commit):
 def _from_commit(repo, base, commit):
     if repo.probe('rev-list', '--parents', '-n', '1', commit)[1].decode().split() != [commit, base]:
         raise RecoveryBlocked(B, 'implementation_uncertain: accepted commit is not a single commit on the base')
-    before, after = _tree(repo, base), _tree(repo, commit)
+    return _diff_trees(repo, base, commit)
+
+
+def _diff_trees(repo, before_tree, after_tree):
+    """Canonical change set (kind, mode, sha256 + bytes) turning one tree into another."""
+    before, after = _tree(repo, before_tree), _tree(repo, after_tree)
     changes, data = {}, {}
     for name in sorted(set(before) | set(after)):
         if before.get(name) == after.get(name):
@@ -290,7 +298,8 @@ def _record(plan, store):
                 reused_artifacts=artifacts, reused_sources=plan['sources'], entry_state=plan['entry'],
                 reused_specification=any(a.get('schema') == 'microspec' for d in plan['continuity']['decisions']
                                          if d['action'] == REUSED for a in (x.get('contract') or {} for x in d['artifacts'])),
-                lifecycle_contract_version=2, continuity=plan['continuity'])
+                lifecycle_contract_version=2, continuity=plan['continuity'],
+                **({'transplant': plan['transplant']} if plan.get('transplant') else {}))
 
 
 def continuity_plan(work_root):
@@ -298,6 +307,114 @@ def continuity_plan(work_root):
     store = _store(Path(work_root).resolve())
     record = _read(store, 'baseline').get('adoption') if store.versions('baseline') else _read(store, 'operation').get('adoption')
     return None if record is None else record.get('continuity')
+
+
+# --- Changed-base transplant (#5 slice 3) --------------------------------------------------------------
+# W1's implementation is a change set relative to its base A. To adopt it onto a target base B that
+# descends from A, Git's own 3-way merge (`merge-tree --write-tree`, ort) computes B + (A -> I) from the three
+# trees alone: base A, ours B, theirs I (a commit of A + the change set with a fixed identity). No worktree,
+# no model, no heuristics; any conflict blocks. The clean result becomes a change set relative to B.
+TRANSPLANT_STRATEGY = 'git_merge_tree_three_way'
+_FIXED = {'GIT_AUTHOR_NAME': 'Switchyard', 'GIT_AUTHOR_EMAIL': 'switchyard@invalid', 'GIT_AUTHOR_DATE': '1970-01-01T00:00:00Z',
+          'GIT_COMMITTER_NAME': 'Switchyard', 'GIT_COMMITTER_EMAIL': 'switchyard@invalid', 'GIT_COMMITTER_DATE': '1970-01-01T00:00:00Z'}
+_KIND_ORDER = ('binary', 'modify/delete', 'delete/modify', 'add/add', 'file/directory', 'distinct types', 'content')
+
+
+def _plumb(repo, *args, input=None, env=None):
+    try:
+        result = subprocess.run([repo.git_executable, '-c', 'core.filemode=true', '--literal-pathspecs', *args],
+                                cwd=repo.workspace, env={**repo.env, **(env or {})}, input=input, capture_output=True, timeout=60)
+    except (OSError, subprocess.SubprocessError):
+        raise RecoveryBlocked(B, 'transplant_failed: git unavailable') from None
+    return result.returncode, result.stdout
+
+
+def _checked(repo, *args, **kwargs):
+    code, out = _plumb(repo, *args, **kwargs)
+    if code:
+        raise RecoveryBlocked(B, 'transplant_failed: '+args[0])
+    return out.decode().strip()
+
+
+def _implementation_commit(repo, base, changes, data):
+    """(tree, commit) of A + the change set; deterministic: same bytes -> same objects."""
+    with TemporaryDirectory(prefix='switchyard-transplant-') as tmp:
+        env = {'GIT_INDEX_FILE': str(Path(tmp)/'index')}
+        _checked(repo, 'read-tree', base, env=env)
+        lines = []
+        for name, change in sorted(changes.items()):
+            if change['kind'] == 'deleted':
+                lines.append('0 %s\t%s\0' % ('0'*len(base), name))
+            else:
+                oid = _checked(repo, 'hash-object', '-w', '--no-filters', '--stdin', input=data[name])
+                lines.append('%s %s\t%s\0' % (change['mode'], oid, name))
+        _checked(repo, 'update-index', '-z', '--index-info', input=''.join(lines).encode('utf-8', 'surrogateescape'), env=env)
+        tree = _checked(repo, 'write-tree', env=env)
+    commit = _checked(repo, 'commit-tree', tree, '-p', base, '-m', 'switchyard: adopted implementation', env=_FIXED)
+    return tree, commit
+
+
+def _conflict_kind(token, message, target, implementation):
+    kind = token.lower()
+    if kind == 'contents':
+        kind = 'add/add' if message.startswith('CONFLICT (add/add)') else 'content'
+    if kind == 'modify/delete':  # Named from the implementation's side: it modified, the target deleted.
+        deleted = re.search(r' deleted in ([0-9a-f]+) ', message)
+        kind = 'modify/delete' if deleted and deleted.group(1) == target else 'delete/modify'
+    return kind
+
+
+def _conflicts(out, target, implementation):
+    """Normalized [{path, kind}] from `merge-tree -z --name-only` informational messages."""
+    parts = out.split(b'\0'); i = 1
+    names = []
+    while i < len(parts) and parts[i]:
+        names.append(os.fsdecode(parts[i])); i += 1
+    i += 1
+    kinds = {}
+    while i < len(parts) and parts[i]:
+        count = int(parts[i]); paths = [os.fsdecode(p) for p in parts[i+1:i+1+count]]
+        token, message = parts[i+1+count].decode(), parts[i+2+count].decode(errors='replace'); i += 3+count
+        match = re.fullmatch(r'CONFLICT \(([^)]+)\)', token)
+        if match:
+            for path in paths:
+                kinds.setdefault(path, set()).add(_conflict_kind(match.group(1), message, target, implementation))
+    for name in names:
+        kinds.setdefault(name, {'content'})
+    rank = lambda k: _KIND_ORDER.index(k) if k in _KIND_ORDER else len(_KIND_ORDER)
+    return [dict(path=path, kind=min(found, key=lambda k: (rank(k), k))) for path, found in sorted(kinds.items())]
+
+
+def _transplant(plan, iso):
+    """Same base: nothing to do. Target descends from the base: 3-way transplant or an explicit block."""
+    a, b = plan['base']['isolation']['base_sha'], iso['base_sha']
+    if iso['repository'] != plan['base']['isolation']['repository']:
+        raise RecoveryBlocked(B, 'repository_mismatch')
+    if a == b:
+        return plan
+    repo = _Repo(iso['repository'])
+    if repo.probe('merge-base', '--is-ancestor', a, b)[0] != 0:
+        raise RecoveryBlocked(B, 'incompatible_base_lineage', [a, b])
+    source_tree, commit = _implementation_commit(repo, a, plan['changes'], plan['data'])
+    code, out = _plumb(repo, 'merge-tree', '--write-tree', '-z', '--name-only', '--merge-base='+a, b, commit)
+    if code not in (0, 1):
+        raise RecoveryBlocked(B, 'transplant_failed: merge-tree')
+    implement = next(d for d in plan['continuity']['decisions'] if d.get('product') == 'implementation')
+    transplant = dict(strategy=TRANSPLANT_STRATEGY, from_base=a, to_base=b, source_tree=source_tree)
+    continuity = json.loads(json.dumps(plan['continuity'])); continuity['target_base_sha'] = b
+    decision = next(d for d in continuity['decisions'] if d.get('product') == 'implementation')
+    if code == 1:
+        transplant['conflicts'] = _conflicts(out, b, commit)
+        decision.update(action=INVALIDATED, reason='transplant_conflict', transplant=transplant)
+        error = RecoveryBlocked(B, 'transplant_conflict', [c['path'] for c in transplant['conflicts']])
+        error.transplant = dict(transplant, implementation=implement['implementation'])
+        error.continuity_plan = continuity
+        raise error  # Before anything of W2 exists: no partial or conflicted W2.
+    result_tree = out.split(b'\0')[0].decode()
+    changes, data = _diff_trees(repo, b, result_tree)
+    transplant.update(result_tree=result_tree, result_digest=implementation_digest(changes), result_paths=len(changes))
+    decision.update(reason='deterministic_three_way_transplant', transplant=transplant)
+    return dict(plan, changes=changes, data=data, continuity=continuity, transplant=transplant)
 
 
 def _expected(repo, base, changes):
@@ -369,8 +486,9 @@ def _copy_sources(old, new):
 
 
 def adopt_v2_work(old_work_root, new_work_root, config_text, provider_runtime_config, *, flow=None):
-    """New isolated work W2 reusing W1's request, specification chain and implementation on the same base.
-    `provider_runtime_config.working_directory` is the clean source checkout W2 is based on."""
+    """New isolated work W2 reusing W1's request, specification chain and implementation. W2's base is the
+    clean source checkout's HEAD (`provider_runtime_config.working_directory`): W1's base, or a descendant
+    of it onto which the implementation is transplanted deterministically."""
     new = Path(new_work_root).resolve(); old = Path(old_work_root).resolve()
     if new == old or new.is_relative_to(old) or old.is_relative_to(new):
         raise RecoveryBlocked(B, 'new_work_root_overlaps_old_work')
@@ -386,9 +504,9 @@ def adopt_v2_work(old_work_root, new_work_root, config_text, provider_runtime_co
             iso, adoption = op['isolation'], op['adoption']
             if adoption['from_work_root'] != str(old):
                 raise RecoveryBlocked(B, 'adoption_in_progress_from_another_work')
-            with _lock(old):  # Same durable inputs must give the same decisions; never overwrite a plan.
-                expected = _plan(old, project, flow)['continuity']
-            if adoption.get('continuity') != expected:
+            with _lock(old):  # Same durable inputs (incl. the RECORDED target base) -> same decisions.
+                expected = _transplant(_plan(old, project, flow), iso)
+            if adoption.get('continuity') != expected['continuity'] or adoption['changes'] != expected['changes']:
                 raise RecoveryBlocked(B, 'continuity_plan_differs: retry with the original configuration')
             request = store.read_artifact('request')
         else:
@@ -397,10 +515,7 @@ def adopt_v2_work(old_work_root, new_work_root, config_text, provider_runtime_co
             with _lock(old):  # Excludes W1's own controllers while it is read; W1 is never written.
                 plan = _plan(old, project, flow)
             iso = _source_isolation(provider_runtime_config.working_directory, new)
-            if iso['base_sha'] != plan['base']['isolation']['base_sha']:
-                raise RecoveryBlocked(B, 'base_mismatch', [plan['base']['isolation']['base_sha'], iso['base_sha']])
-            if iso['repository'] != plan['base']['isolation']['repository']:
-                raise RecoveryBlocked(B, 'repository_mismatch')
+            plan = _transplant(plan, iso)  # After the continuity rules; refuses before any W2 write.
             _provision_preflight(iso)
             store = WorkWorkspace.open(new/'recovery', CATALOG)
             request = plan['request']; store.initialize_request(request)

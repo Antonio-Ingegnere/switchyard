@@ -625,9 +625,10 @@ same work (same work id, branch, HEAD, worktree path and Git admin directory) be
 work W2 (own work id, `switchyard/<new-work-id>` branch, worktree, budgets and history under the current
 configuration) that reuses the durable product of an old work W1. W1 is only read, under its work lock.
 
-- **Same base only:** the source checkout (default: W1's) must pass the normal isolation preflight and be at
-  W1's `base_sha` in the same repository (`ADOPTION_BLOCKED: base_mismatch` / `repository_mismatch`). No
-  rebase, cherry-pick, merge or model call.
+- **Target base:** the source checkout (default: W1's) must pass the normal isolation preflight; its HEAD is
+  W2's base. It must be W1's `base_sha` (exact reuse) or a descendant of it in the same repository
+  (deterministic transplant, below); otherwise `repository_mismatch` / `incompatible_base_lineage`. No
+  rebase, cherry-pick or model call.
 - **Implementation source** (by W1's durable state): ACCEPTED -> `accepted_commit:<sha>` (tree diff
   base..C from Git); SUSPENDED -> `shelf:<n>` (verified shelf; staging is not carried over); READY_FOR_MANUAL_QA
   with an undecided current candidate and no open round -> `candidate:<n>` (W1's worktree, proven equal to
@@ -675,8 +676,40 @@ of the canonical change set). Paths are never identities.
   rerunning the expensive stages adoption exists to avoid, so any invalidation refuses with
   `ADOPTION_BLOCKED: continuity_invalidated: <stage>` and nothing of W2 is written; the error carries the
   full plan (`continuity_plan`, printed by the CLI). Missing products keep their own refusals
-  (`no_reusable_implementation`, `base_mismatch`) and produce no plan.
+  (`no_reusable_implementation`, `incompatible_base_lineage`) and produce no plan.
 - **Determinism and retry:** decisions depend only on durable identities and contracts. A retry recomputes the
   plan from W1 and refuses `continuity_plan_differs` rather than overwriting; execution never edits it.
 - **Read:** `continuity_plan(work_root)` returns the full plan (None for ordinary work); `recovery_status` adds
   `continuity: {reused, rerun, invalidated}` with stage names.
+
+### Changed-base transplant (#5, slice 3)
+
+When the target base B (the clean source checkout's HEAD) is not W1's base A, adoption transplants W1's
+implementation deterministically instead of refusing.
+
+- **Preconditions:** same repository (`repository_mismatch`), A an ancestor of B (`incompatible_base_lineage`;
+  nothing is fetched), the continuity plan valid (contract invalidation blocks first), the target clean.
+- **Algorithm:** the implementation's canonical change set relative to A (the same change set and digest as
+  same-base adoption, from the accepted commit, shelf or proven candidate) is committed on A with a fixed
+  identity (deterministic objects, no ref), then Git's own 3-way merge runs without a worktree:
+  `git merge-tree --write-tree --merge-base=A B I`. The result depends only on A, B and I. No model, no
+  `ours`/`theirs` choice, no conflict markers kept anywhere.
+- **Clean:** the merged tree becomes a change set relative to B, stored in W2's blobs before any Git step. W2's
+  branch starts at B, its baseline records `base_sha = B`, and its acceptance is `B -> C`. The plan's
+  IMPLEMENT decision stays `REUSED` (the implementation was not regenerated) with reason
+  `deterministic_three_way_transplant` and a `transplant` record: `strategy`, `from_base`, `to_base`,
+  `source_tree`, `result_tree`, `result_digest`, `result_paths`, next to the unchanged source
+  `implementation` identity and digest. The result is not claimed byte-identical to W1: B's unrelated changes
+  are part of it. The plan adds `target_base_sha`; VERIFY is RERUN, because a clean merge proves only the
+  absence of textual and structural conflicts. A verifier failure is ordinary W2 workflow.
+- **Conflict:** `ADOPTION_BLOCKED: transplant_conflict` listing the paths; nothing of W2 is written. The error
+  carries `transplant` (bases, implementation identity, `conflicts: [{path, kind}]`) and the plan with
+  IMPLEMENT `INVALIDATED: transplant_conflict`; the CLI prints both. Kinds are Git's, normalized:
+  `content`, `binary`, `add/add`, `modify/delete` (implementation modified, target deleted),
+  `delete/modify` (implementation deleted, target modified), `file/directory`, `distinct types`, and any other
+  `CONFLICT (...)` Git reports. Binaries changed on both sides always conflict; non-conflicting binary
+  additions/deletions, mode-only changes and symlinks (as links) transplant exactly.
+- **Retry:** the pending adoption keeps its recorded target B even if main moves on; the retry recomputes the
+  plan and transplant from W1 against the recorded B and refuses `continuity_plan_differs` if the plan or the
+  result differ. Status: `transplanted`, `transplant_from_base_sha`, `transplant_to_base_sha` (and
+  `transplanted: false` for same-base adoption).

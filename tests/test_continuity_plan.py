@@ -162,10 +162,11 @@ class ContinuityPlanTests(PlanBase):
         create_qa_candidate(self.delivery, WorkWorkspace.open(self.work), recovery.RunResult('READY_FOR_MANUAL_QA', tuple(read_events(self.work/'events.jsonl'))),
                             'feature', self.root/'qa1')
         attach_qa_candidate(self.work, self.root/'qa1')
-        (self.target/'keep.txt').write_text('B'); self.git('commit', '-qam', 'B')
+        self.git('checkout', '-q', '--orphan', 'unrelated'); self.git('commit', '-qm', 'unrelated root')
         with self.assertRaises(RecoveryBlocked) as ctx:
             self.adopt()
-        self.assertEqual(ctx.exception.reason, 'base_mismatch')
+        self.assertEqual(ctx.exception.reason, 'incompatible_base_lineage')
+        self.assertIsNone(getattr(ctx.exception, 'continuity_plan', None))
         self.assertFalse((self.w2/'recovery').exists())
 
     # 20

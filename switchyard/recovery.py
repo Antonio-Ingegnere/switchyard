@@ -795,6 +795,9 @@ def _adoption_status(base):
                 adopted_implementation_source=adoption['implementation_source'],adoption_entry_state=adoption['entry_state'],
                 reused_request=True,reused_specification=adoption['reused_specification'],reused_implementation=True,
                 reused_artifacts=sorted(adoption['reused_artifacts']),reused_sources=adoption['reused_sources'],
+                transplanted='transplant' in adoption,
+                **({'transplant_from_base_sha':adoption['transplant']['from_base'],
+                    'transplant_to_base_sha':adoption['transplant']['to_base']} if 'transplant' in adoption else {}),
                 **({'continuity':{action.lower():[d['stage'] for d in adoption['continuity']['decisions'] if d['action']==action]
                                   for action in ('REUSED','RERUN','INVALIDATED')}} if 'continuity' in adoption else {}))
 

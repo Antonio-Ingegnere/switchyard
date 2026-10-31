@@ -179,6 +179,8 @@ def _work_command(args):
             status = recovery_status(args.work_root)
     except (ValueError, OSError, ExecutionError) as exc:
         print('switchyard: '+_safe_display(str(exc), 2048), file=sys.stderr)
+        if getattr(exc, 'transplant', None):
+            print(json.dumps(exc.transplant, ensure_ascii=True, sort_keys=True), file=sys.stderr)
         if getattr(exc, 'continuity_plan', None):
             print(json.dumps(exc.continuity_plan, ensure_ascii=True, sort_keys=True), file=sys.stderr)
         if getattr(exc, 'human_input_request', None):

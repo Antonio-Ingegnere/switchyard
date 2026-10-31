@@ -154,12 +154,12 @@ class AdoptionTests(ContinuityBase):
         self.assertEqual(ctx.exception.reason, 'no_reusable_implementation')
         self.assertFalse((self.w2/'recovery').exists()); self.assertEqual(self.model_calls(), calls)
 
-    def test_changed_base_is_refused_with_base_mismatch(self):
+    def test_changed_base_conflicting_with_the_implementation_is_refused(self):
         self.w1_ready(); w1 = self.w1_bytes(); calls = self.model_calls()
-        (self.target/'source.py').write_text('B'); self.git('commit', '-qam', 'B'); b = self.git('rev-parse', 'HEAD')
+        (self.target/'source.py').write_text('B'); self.git('commit', '-qam', 'B')  # W1 also changed source.py.
         with self.assertRaises(RecoveryBlocked) as ctx:
             self.adopt()
-        self.assertEqual((ctx.exception.terminal, ctx.exception.reason, ctx.exception.paths), ('ADOPTION_BLOCKED', 'base_mismatch', tuple(sorted((self.base, b)))))
+        self.assertEqual((ctx.exception.terminal, ctx.exception.reason, ctx.exception.paths), ('ADOPTION_BLOCKED', 'transplant_conflict', ('source.py',)))
         self.assertFalse((self.w2/'recovery').exists()); self.assertEqual(self.branches(), ['refs/heads/switchyard/work'])
         self.assertEqual((self.w1_bytes(), self.model_calls()), (w1, calls))
 
