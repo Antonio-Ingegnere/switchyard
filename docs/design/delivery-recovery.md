@@ -944,3 +944,72 @@ the remote branch has the same name as the local target.
 - **Status** is local only and never contacts a remote: `recovery_status()['remote_integration']` /
   `remote_push_status()` -> `state: PUSHED | PUSH_PENDING | NOT_PUSHED`, `remote`, `remote_identity`, `ref`,
   `pushed_commit_sha`, `remote_before_sha`, `pushed_by`, and `last_attempt` after a failed one.
+
+## Pull request: review path for an accepted delivery (#9, slice 5)
+
+`pr_create_v2_work(work_root, remote, target_ref=None, title=None, provider=None)` / `switchyard work pr-create
+<work_root> --remote NAME [--target BRANCH] [--title T] [--gh-executable PATH] [--json]` and
+`pr_status_v2_work(work_root, provider=None)` / `switchyard work pr-status <work_root> [--json]`. This is the
+alternative to the direct path (integrate -> push): it needs neither, never calls them, and never publishes N.
+The pull request head is the accepted commit C itself. There is no merge command: a merge done on the provider
+is observed.
+
+- **Provider boundary:** `PullRequestProvider` (`repository(push_url)`, `find`, `create`, `get`), all returning
+  one normalized dict: `provider, repository, number, provider_id, url, state, draft, mergeability, head_ref,
+  head_sha, head_repository, base_ref, base_sha, merged_commit_sha, merged_at, closed_at, merged_by`.
+  `GitHubPullRequestProvider` is a thin `gh api` adapter (REST pulls API, github.com only). The existing source
+  resolver is GET-only `urllib` with a token header, so it was not reused for writes. `gh` owns
+  authentication; Switchyard passes no token. The adapter sets `GH_PROMPT_DISABLED=1`, closes stdin, applies a
+  60 s timeout and a 1 MiB output bound, and redacts `GH_TOKEN`/`GITHUB_TOKEN` and URL userinfo from 1024-char
+  diagnostics. Failures map to `authentication_required | provider_rejected | provider_unavailable |
+  malformed_response`.
+- **Repository:** derived from the push URL that publication resolves (`get-url --push`, exactly one), so the
+  repository receiving the head is the PR repository. Only same-repository heads are supported. A URL that is not
+  `github.com/<owner>/<repo>` (https, ssh, scp-like) is `unsupported_pr_provider`; repository names are never
+  guessed.
+- **Gate** (all before any record or remote change):
+  - C is re-proven.
+  - Durable direct-push provenance whose N is still on that remote is `already_integrated`.
+  - The latest assessment must be valid, this product's, READY or READY_WITH_DRIFT (`assessment_missing`,
+    `assessment_not_ready: ...`; ALREADY_INTEGRATED is `already_integrated`), and fresh: the local target branch
+    still names T (`assessment_stale`).
+  - The remote target branch (`ls-remote` of the push URL) must be exactly T. If it is not, the refusal is
+    `target_moved` with `expected_target_sha`/`actual_target_sha`; nothing is fetched or reassessed. A remote
+    target that already contains C is `already_integrated`.
+- **Head:** `refs/heads/switchyard/<work-id>`, the durable delivery branch name, set to C. The local delivery
+  branch's current head is never pushed.
+  - Missing: `git push --force-with-lease=<head>: <remote> C:<head>`. The empty lease means the ref must still
+    not exist.
+  - Already C: reused (`head_published_by: already_present`).
+  - Anything else: `pr_head_moved` (`expected`, `actual`). The ref is never overwritten.
+- **Records** (`<work>/pull_request/`, versioned `pull_request_record`):
+  - `intent`: work, provider and provider schema, repository, remote and sanitized identity, C, A, assessment
+    id/version, readiness, `target_ref`, T, `head_ref`, `head_sha` = C, title, frozen body and its SHA-256.
+  - `head_published`.
+  - `created`: intent fields + `created_by: switchyard | reconciled`, the PR identity, and the first observation.
+  - `observed`.
+  - The title defaults to `Switchyard delivery <work-id>`; `--title` is one line of 1-256 characters. The body
+    is provenance trailers only (`Switchyard-Work`, `-Accepted-Commit`, `-Base`, `-Assessment`, `-Target`).
+    Edits on the provider do not affect identity.
+- **Retry** with a pending intent completes that frozen intent and is not re-gated.
+  - Head C: reused. Head missing: published.
+  - Every create is preceded by a provider search for PRs on the same repository, head and base. Exactly one
+    with head C is adopted (`reconciled`). None: create. Several, or one with another head:
+    `pr_reconciliation_ambiguous`.
+  - A failed or lost create response keeps the intent, so the next retry searches before it creates.
+  - After `created`, pr-create returns the same record with no remote or provider call. A different remote or
+    target is `pull_request_exists`.
+- **Observation:** pr-status reads the PR from the provider and the head ref with `ls-remote`. It never merges,
+  closes, reopens, edits or pushes.
+  - `state` is OPEN | CLOSED | MERGED. `draft` and `mergeability` (CLEAN | CONFLICTING | UNKNOWN) are separate
+    attributes; mergeability is never part of identity or a reason to record.
+  - Head drift: `head_drift` is set when the provider head or the remote branch is not C. A head deleted after
+    MERGED is normal clean-up. Drift is reported, never repaired.
+  - Base movement: `base_sha`/`base_moved` against the creation T is normal.
+  - MERGED records the provider's `merged_commit_sha` P, plus `merged_at`/`merged_by`. P may be a merge, squash
+    or rebase result and is not assumed to equal or contain C. That gives work -> C -> PR #n -> P without
+    rewriting acceptance or integration records.
+  - A new `observed` record is written only when a material field changes.
+- **Status:** `recovery_status()['pull_request']` / `pull_request_summary()` is local only. It returns `state`
+  (OPEN | CLOSED | MERGED | PR_PENDING), provider, repository, number, url, head ref/sha, C, target ref/T,
+  `head_drift`, `merged_commit_sha`. Delivery stays ACCEPTED.

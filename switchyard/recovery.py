@@ -778,9 +778,13 @@ def _integration_status(work_root,phase):
     from .publication import remote_push_status
     try:summary=integration_summary(work_root)
     except ValueError:summary=None
+    from .pull_request import pull_request_summary
     try:pushed=remote_push_status(work_root)  # Local records only: status never contacts a remote.
     except ValueError:pushed=None
-    return {**({'integration':summary} if summary else {}),**({'remote_integration':pushed} if pushed else {})}
+    try:pull=pull_request_summary(work_root)  # Local records only: status never contacts the PR provider.
+    except ValueError:pull=None
+    return {**({'integration':summary} if summary else {}),**({'remote_integration':pushed} if pushed else {}),
+            **({'pull_request':pull} if pull else {})}
 
 
 def _isolation_status(base,op=None):

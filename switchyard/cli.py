@@ -50,6 +50,18 @@ def _parser():
     push.add_argument('--target', help='integrated local branch to publish to the same branch on the remote '
                       '(default: the source branch recorded when the delivery started)')
     push.add_argument('--json', action='store_true', help='print the structured push record')
+    pr_create = actions.add_parser('pr-create', allow_abbrev=False)
+    pr_create.add_argument('work_root')
+    pr_create.add_argument('--remote', required=True, help='configured Git remote receiving the review branch; '
+                           'its repository is the pull request repository')
+    pr_create.add_argument('--target', help='base branch; must match the latest fresh integration-status assessment')
+    pr_create.add_argument('--title', help='pull request title (default: "Switchyard delivery <work-id>")')
+    pr_create.add_argument('--gh-executable', help='GitHub CLI used for the provider API (default: gh)')
+    pr_create.add_argument('--json', action='store_true', help='print the structured pull request record')
+    pr_status = actions.add_parser('pr-status', allow_abbrev=False)
+    pr_status.add_argument('work_root')
+    pr_status.add_argument('--gh-executable', help='GitHub CLI used for the provider API (default: gh)')
+    pr_status.add_argument('--json', action='store_true', help='print the structured observation')
     for action in ('status', 'answer', 'resume', 'rollback', 'qa-fix', 'accept', 'suspend'):
         operation = actions.add_parser(action, allow_abbrev=False)
         operation.add_argument('work_root')
@@ -181,6 +193,19 @@ def _integrated_text(r):
                       'Assessment: '+r['consumed_assessment_id']])
 
 
+def _pr_text(o, created_by=None):
+    lines = ['Pull request %s #%d%s%s' % (o['state'], o['number'], ' (draft)' if o['draft'] else '',
+                                         ' (%s)' % created_by if created_by else ''),
+             'URL: '+_safe_display(o['url'], 512),
+             'Head: %s expected %s, remote %s%s' % (o['head_ref'], o['head_expected_sha'], o['remote_head_sha'] or 'missing',
+                                                   ' (DRIFT)' if o['head_drift'] else ''),
+             'Base: %s at %s' % (o['base_ref'], o['base_sha'] or '-'),
+             'Mergeability: '+o['mergeability']]
+    if o['merged_commit_sha']:
+        lines.append('Merged commit: '+o['merged_commit_sha'])
+    return '\n'.join(lines)
+
+
 def _work_command(args):
     from .recovery import (recovery_status, answer_v2_work, resume_v2_work, rollback_v2_work,
                            qa_fix_v2_work, accept_v2_candidate)
@@ -210,6 +235,17 @@ def _work_command(args):
                 'Remote: %s (%s)' % (record['remote'], _safe_display(record['remote_identity'], 512)),
                 'Ref: %s %s -> %s' % (record['remote_ref'], record['remote_before_sha'], record['remote_after_sha']),
                 'Integrated commit: '+record['local_integrated_commit_sha']]))
+            return 0
+        if args.action in ('pr-create', 'pr-status'):
+            from . import pull_request
+            provider = pull_request.default_provider(args.gh_executable)
+            if args.action == 'pr-create':
+                record = pull_request.pr_create_v2_work(args.work_root, args.remote, args.target, args.title, provider)
+                print(json.dumps(record, ensure_ascii=True, indent=2) if args.json else _pr_text(dict(
+                    record['observed'], url=record['pull_request']['url'], target_ref=record['target_ref']), record['created_by']))
+            else:
+                observed = pull_request.pr_status_v2_work(args.work_root, provider)
+                print(json.dumps(observed, ensure_ascii=True, indent=2) if args.json else _pr_text(observed))
             return 0
         if args.action == 'integrate':
             from .integration import integrate_v2_work
@@ -244,6 +280,8 @@ def _work_command(args):
         print('switchyard: '+_safe_display(str(exc), 2048), file=sys.stderr)
         if getattr(exc, 'transplant', None):
             print(json.dumps(exc.transplant, ensure_ascii=True, sort_keys=True), file=sys.stderr)
+        if getattr(exc, 'pull_request', None):
+            print(json.dumps(exc.pull_request, ensure_ascii=True, sort_keys=True), file=sys.stderr)
         if getattr(exc, 'push', None):
             print(json.dumps(exc.push, ensure_ascii=True, sort_keys=True), file=sys.stderr)
         if getattr(exc, 'integration', None):
