@@ -22,6 +22,13 @@ def _safe_display(value: str, limit: int | None = None) -> str:
     return rendered
 
 
+def _count(value):
+    number = int(value)
+    if number < 0:
+        raise argparse.ArgumentTypeError('must be a non-negative integer')
+    return number
+
+
 def _parser():
     parser = argparse.ArgumentParser(prog='switchyard', allow_abbrev=False)
     commands = parser.add_subparsers(dest='command', required=True)
@@ -69,6 +76,18 @@ def _parser():
     diagnostics.add_argument('work_root')
     diagnostics.add_argument('--invocation', help='show one invocation in detail (full id, or I<n>)')
     diagnostics.add_argument('--json', action='store_true', help='print the diagnostic records as a JSON array')
+    logs = actions.add_parser('logs', allow_abbrev=False)
+    logs.add_argument('work_root')
+    logs.add_argument('--run', help='only this run id')
+    logs.add_argument('--state', help='only this (logical or runtime) state')
+    logs.add_argument('--invocation', help='only this invocation (full id, or I<n>), followed by its diagnostic')
+    logs.add_argument('--last', type=_count, help='only the last N matching events')
+    logs.add_argument('--json', action='store_true', help='print the timeline entries as a JSON array')
+    watch = actions.add_parser('watch', allow_abbrev=False)
+    watch.add_argument('work_root')
+    watch.add_argument('--interval', type=float, default=1.0, help='poll interval in seconds (0.2 to 60; default 1)')
+    watch.add_argument('--last', type=_count, default=10, help='recent events to show first (default 10)')
+    watch.add_argument('--json', action='store_true', help='newline-delimited JSON, one self-contained object per line')
     pr_status = actions.add_parser('pr-status', allow_abbrev=False)
     pr_status.add_argument('work_root')
     pr_status.add_argument('--gh-executable', help='GitHub CLI used for the provider API (default: gh)')
@@ -413,6 +432,27 @@ def _work_command(args):
             events = trace_events(args.work_root, args.run, args.state, args.invocation, args.event_type)
             print(json.dumps(events, ensure_ascii=True, indent=2, sort_keys=True) if args.json else _trace_text(events))
             return 0
+        if args.action == 'logs':
+            from . import logs
+            events, held = logs.log_events(args.work_root, args.run, args.state, args.invocation, args.last)
+            if args.json:
+                print(json.dumps([logs.entry(Path(args.work_root), e) for e in events], ensure_ascii=True, indent=2, sort_keys=True))
+                if held is not None:
+                    print('switchyard: warning: '+logs.gap_warning(held), file=sys.stderr)
+                return 0
+            print(logs.render_logs(Path(args.work_root), events, held))
+            if args.invocation is not None:
+                from .diagnostics import read_diagnostics
+                records = [r for r in read_diagnostics(args.work_root, args.invocation) if r.get('recorded')]
+                print('\n' + ('\n\n'.join(_diagnostic_detail(r) for r in records) if records else 'Diagnostic unavailable'))
+            return 0
+        if args.action == 'watch':
+            from . import logs
+            try:
+                return logs.watch(args.work_root, sys.stdout, args.interval, args.last, args.json)
+            except KeyboardInterrupt:
+                print('switchyard: watch stopped; the work was not affected', file=sys.stderr, flush=True)
+                return 130
         if args.action == 'diagnostics':
             from .diagnostics import read_diagnostics
             records = read_diagnostics(args.work_root, args.invocation)

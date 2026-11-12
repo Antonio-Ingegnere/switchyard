@@ -60,3 +60,10 @@ Work in small, independently verifiable changes.
 A good task should normally fit into one MicroSpec and one bounded execution cycle.
 
 Do not implement the entire architecture at once. Prefer a vertical slice that proves a runtime invariant end-to-end.
+
+## Versioning
+
+Every completed implementation slice must increment the package version in `pyproject.toml` and add a
+`CHANGELOG.md` entry. Bump PATCH at minimum, MINOR for additive public functionality, and MAJOR for breaking changes.
+Schema versions (work schema, record schemas) are independent of the package version. See the policy in
+`CHANGELOG.md`.
