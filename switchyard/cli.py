@@ -65,6 +65,10 @@ def _parser():
     trace.add_argument('--invocation', help='only this invocation id')
     trace.add_argument('--type', dest='event_type', help='only this event type')
     trace.add_argument('--json', action='store_true', help='print the trace events as a JSON array')
+    diagnostics = actions.add_parser('diagnostics', allow_abbrev=False)
+    diagnostics.add_argument('work_root')
+    diagnostics.add_argument('--invocation', help='show one invocation in detail (full id, or I<n>)')
+    diagnostics.add_argument('--json', action='store_true', help='print the diagnostic records as a JSON array')
     pr_status = actions.add_parser('pr-status', allow_abbrev=False)
     pr_status.add_argument('work_root')
     pr_status.add_argument('--gh-executable', help='GitHub CLI used for the provider API (default: gh)')
@@ -252,6 +256,115 @@ def _trace_text(events):
     return '\n'.join(line.rstrip() for line in lines)
 
 
+def _short(invocation_id):
+    return 'I'+invocation_id.rsplit(':', 1)[-1]
+
+
+def _result_label(r):
+    result = r.get('result')
+    if result is None:
+        return 'unknown'
+    if result.get('produced_stage_result') and not result.get('reason'):
+        return result.get('outcome') or 'unknown'
+    return result.get('classification') or result.get('reason') or result.get('outcome_category') or 'unknown'
+
+
+def _seconds(ms):
+    return '-' if ms is None else '%dms' % ms if ms < 1000 else '%.1fs' % (ms/1000)
+
+
+def _diagnostics_text(records):
+    """Failed invocations first (each group in invocation order); details via --invocation."""
+    from .diagnostics import failed
+    if not records:
+        return 'no diagnostics available'
+    runs = {r['run_id'] for r in records}
+    rows = [('INVOCATION', 'STATE', 'AGENT', 'PROVIDER', 'RESULT', 'DURATION', 'DIAGNOSTIC')]
+    bad = [r for r in records if failed(r)]
+    for r in bad + [r for r in records if not failed(r)]:
+        label = _short(r['invocation_id']) if len(runs) == 1 else r['invocation_id']
+        rows.append((label, _cell(r.get('state') or '-', 32), _cell(r.get('agent') or '-', 32), _cell(r.get('provider') or '-', 16),
+                     _cell(_result_label(r), 40), _seconds(r.get('duration_ms')), r.get('completeness')))
+    widths = [max(len(row[i]) for row in rows) for i in range(6)]
+    lines = ['%d invocation(s), %d failed' % (len(records), len(bad))]
+    lines += ['  '.join(row[i].ljust(widths[i]) for i in range(6)) + '  ' + row[6] for row in rows]
+    return '\n'.join(line.rstrip() for line in lines)
+
+
+def _diagnostic_detail(r):
+    result = r.get('result') or {}
+    p = r.get('process') or {}
+    lines = ['Work: %s' % (r.get('work_id') or '-'), 'Run: %s' % r['run_id'],
+             'Invocation: %s (%s)' % (r['invocation_id'], _short(r['invocation_id'])),
+             'State: %s (rung %s, visit %s)' % (r.get('state'), r.get('rung'), r.get('state_visit_id')),
+             'Agent: %s' % (r.get('agent') or '-'), 'Provider: %s' % (r.get('provider') or '-'), 'Model: %s' % (r.get('model') or '-'), '']
+    if r.get('completeness') == 'unavailable':
+        return '\n'.join(lines + ['Diagnostic: unavailable', '  '+_cell(r.get('summary') or '', 512)])
+    produced = result.get('produced_stage_result')
+    kind = ('semantic outcome (stage result produced)' if produced and not result.get('reason') else
+            'stage result produced, then the runtime stopped' if produced else
+            'no stage result' if produced is False else 'unknown')
+    lines += ['Outcome: %s (%s)' % (_result_label(r), kind)]
+    if result.get('classification') and result.get('reason'):
+        lines.append('Failure: %s, classification %s' % (result['reason'], result['classification']))
+    charged = result.get('semantic_invocation')
+    lines.append('Charged as attempt: %s' % ('yes' if charged else 'no (infrastructure failure: not a semantic attempt)'
+                                             if charged is False else 'unknown'))
+    lines.append('Exit code: %s' % ('-' if p.get('exit_code') is None else p['exit_code']))
+    if p.get('termination_signal'):
+        lines.append('Termination: %s (%s)' % (p['termination_signal'], (p.get('terminated_by') or 'unknown').replace('_', ' ')))
+    if p.get('launched') is False:
+        lines.append('Launch: the process could not be started')
+    lines += ['Duration: %s%s' % (_seconds(r.get('duration_ms')), ' (%s)' % r['duration_source'].replace('_', ' ') if r.get('duration_source') else ''),
+              'Timeout configured: %s' % ('-' if r.get('timeout_seconds') is None else '%gs' % r['timeout_seconds']), '',
+              'Diagnostic:', '  '+_cell(r.get('summary') or '-', 2048)]
+    if result.get('error'):
+        lines.append('  Error: '+_cell(result['error'], 2048))
+    channel = r.get('provider_channel')
+    if channel:
+        facts = ', '.join('%s=%s' % (k, channel[k]) for k in ('subtype', 'terminal_reason', 'is_error', 'api_error_status', 'api_error_code', 'num_turns') if k in channel)
+        lines += ['', 'Provider result channel:', '  '+(facts or 'no documented result envelope')]
+        lines += ['  error: '+_cell(m, 512) for m in channel.get('errors', ())]
+        if channel.get('errors_omitted'):
+            lines.append('  %d error message(s) omitted (%s)' % (channel['errors_omitted']['count'], channel['errors_omitted']['reason']))
+        if channel.get('permission_denials'):
+            lines.append('  permission denials: '+', '.join(channel['permission_denials']))
+    s = r.get('structured_output')
+    lines += ['', 'Structured output:']
+    if s is None:
+        lines.append('  not applicable' if r.get('provider') == 'command' else '  unknown')
+    else:
+        repair = s.get('repair') or {}
+        lines.append('  Schema: %s (%s) sha256 %s' % (s['schema']['name'], s['schema']['transport'], s['schema']['sha256'][:12]))
+        lines.append('  Valid: %s' % {True: 'yes', False: 'no', None: 'not evaluated (no result was returned)'}[s.get('valid')])
+        for e in s.get('errors') or ():
+            lines.append('  Validation failure: %s: %s' % (e.get('path'), e.get('error')))
+        if s.get('errors_truncated'):
+            lines.append('  (further validation errors truncated)')
+        lines.append('  Repair: %s' % ('none (single structured result)' if repair.get('mechanism') == 'none' else
+                                       '%s, up to %s attempts in this invocation; attempted %s, succeeded %s' % (
+                                           repair.get('mechanism'), repair.get('max_attempts'),
+                                           {True: 'yes', False: 'no', None: 'unknown'}[repair.get('attempted')],
+                                           {True: 'yes', False: 'no', None: 'unknown'}[repair.get('succeeded')])))
+    x = r.get('stderr_excerpt') or {}
+    lines += ['', 'stderr: not retained (%s%s)' % (x.get('reason'), ', %d bytes seen' % x['bytes_seen'] if x.get('bytes_seen') is not None else '')]
+    v = r.get('verification')
+    lines += ['', 'Verification:']
+    if v is not None:
+        lines.append('  Verifier %s (%s, argv sha256 %s): exit %s%s -> %s (%s)' % (
+            v['verifier'], v['executable'], v['argv_sha256'][:12], v['exit_code'], ', timed out' if v.get('timed_out') else '',
+            v.get('outcome'), (v.get('outcome_rule') or 'unknown').replace('_', ' ')))
+        for ref in v.get('evidence_refs') or ():
+            lines.append('  Evidence: %s v%s %s sha256 %s (%d bytes)' % (ref['name'], ref['version'], ref['path'], ref['sha256'][:12], ref['byte_size']))
+    elif r.get('followed_by_verification'):
+        f = r['followed_by_verification']
+        lines.append('  Next: %s %s -> %s (exit %s)' % (_short(f['invocation_id']), f['verifier'], f['outcome'], f['exit_code']))
+    else:
+        lines.append('  Not executed')
+    lines += ['', 'Completeness: %s (%s)%s' % (r['completeness'], r['observed_by'].replace('_', ' '), ', truncated' if r.get('truncated') else '')]
+    return '\n'.join(lines)
+
+
 def _pr_text(o, created_by=None):
     lines = ['Pull request %s #%d%s%s' % (o['state'], o['number'], ' (draft)' if o['draft'] else '',
                                          ' (%s)' % created_by if created_by else ''),
@@ -300,6 +413,16 @@ def _work_command(args):
             events = trace_events(args.work_root, args.run, args.state, args.invocation, args.event_type)
             print(json.dumps(events, ensure_ascii=True, indent=2, sort_keys=True) if args.json else _trace_text(events))
             return 0
+        if args.action == 'diagnostics':
+            from .diagnostics import read_diagnostics
+            records = read_diagnostics(args.work_root, args.invocation)
+            if args.json:
+                print(json.dumps(records, ensure_ascii=True, indent=2, sort_keys=True))
+            elif args.invocation is not None:
+                print('\n\n'.join(_diagnostic_detail(r) for r in records) or 'no such invocation')
+            else:
+                print(_diagnostics_text(records))
+            return 0 if records or args.invocation is None else 1
         if args.action in ('pr-create', 'pr-status'):
             from . import pull_request
             provider = pull_request.default_provider(args.gh_executable)

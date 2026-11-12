@@ -223,7 +223,7 @@ class Tracer:
         from .versioning import runtime_version
         self.root, self.store, self.dir = Path(root), store, _store_dir(root)/'events'
         iso = baseline.get('isolation') or {}
-        self.work_id = iso['delivery_branch'][len('refs/heads/switchyard/'):] if iso.get('delivery_branch') else 'baseline-'+baseline_digest[:16]
+        self.work_id = work_identity(baseline, baseline_digest)
         config = baseline.get('config') or ''
         self.runtime = dict(switchyard_version=runtime_version(), config_sha256=hashlib.sha256(config.encode('utf-8')).hexdigest(),
                             flow=baseline.get('flow'))
@@ -254,6 +254,11 @@ class Tracer:
         seq, event_id = record['sequence'], record['event_id']
         if seq in self.written:
             return  # Already durable (same logical event), or a different projection: never overwritten.
+        if record['event_type'] in ('invocation_finished', 'run_interrupted') and record['invocation_id']:
+            # Deterministic link to an already published diagnostic (#1 slice 3A); otherwise joined on read.
+            from .diagnostics import diagnostic_id, diagnostic_path
+            record['payload']['diagnostic_id'] = (diagnostic_id(self.work_id, record['invocation_id'])
+                                                  if diagnostic_path(self.root, record['invocation_id']).is_file() else None)
         self.dir.mkdir(parents=True, exist_ok=True)
         schema = self.dir.parent/'schema.json'
         if not schema.exists():
@@ -338,17 +343,9 @@ class Tracer:
     def _artifact_refs(self):
         if self.manifest_lines is None:
             return None
-        lines = (self.root/'manifest.jsonl').read_bytes().decode('utf-8').splitlines()[self.manifest_lines:]
-        refs = []
-        for line in lines:
-            record = json.loads(line)
-            if record.get('kind') == 'artifact':
-                refs.append(dict(kind='artifact', name=record['name'], version=record['version'], path=record['path'],
-                                 sha256=record['sha256'], byte_size=record['byte_size']))
-            elif record.get('kind') == 'handoff':
-                refs.append(dict(kind='handoff', sequence=record['sequence'], path=record['path'], sha256=record['sha256']))
+        refs = manifest_refs(self.root, self.manifest_lines)
         self.manifest_lines = None
-        return refs[:MAX_REFS] + ([dict(kind='truncated', omitted=len(refs)-MAX_REFS)] if len(refs) > MAX_REFS else [])
+        return refs
 
     def _resume_context(self):
         op = json.loads(self.store.read_artifact('operation'))
@@ -360,6 +357,26 @@ class Tracer:
         if op.get('inferred_interruption'):
             out['inferred_interruption'] = {k: op['inferred_interruption'].get(k) for k in ('invocation_id', 'semantic_invocation')}
         return dict(context=out)
+
+
+def work_identity(baseline, baseline_digest):
+    """Durable work identity: the delivery branch suffix; non-isolated works: the baseline record digest."""
+    iso = baseline.get('isolation') or {}
+    return iso['delivery_branch'][len('refs/heads/switchyard/'):] if iso.get('delivery_branch') else 'baseline-'+baseline_digest[:16]
+
+
+def manifest_refs(root, start):
+    """References (never copies) to the artifact manifest records appended after line `start`."""
+    lines = (Path(root)/'manifest.jsonl').read_bytes().decode('utf-8').splitlines()[start:]
+    refs = []
+    for line in lines:
+        record = json.loads(line)
+        if record.get('kind') == 'artifact':
+            refs.append(dict(kind='artifact', name=record['name'], version=record['version'], path=record['path'],
+                             sha256=record['sha256'], byte_size=record['byte_size']))
+        elif record.get('kind') == 'handoff':
+            refs.append(dict(kind='handoff', sequence=record['sequence'], path=record['path'], sha256=record['sha256']))
+    return refs[:MAX_REFS] + ([dict(kind='truncated', omitted=len(refs)-MAX_REFS)] if len(refs) > MAX_REFS else [])
 
 
 def _publish(path, value):

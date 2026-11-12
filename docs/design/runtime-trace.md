@@ -54,13 +54,13 @@ Each trace event projects exactly one canonical event:
 | `run_started` | `run_started`; payload carries `provenance.runtime` and `provenance.git` |
 | `state_entered` | `state_entered` (visit number, visit limit) |
 | `invocation_started` | `routing_decided` + `invocation_started` (ordinals, budget view, worktree/head) |
-| `invocation_finished` | `invocation_finished` (outcome, `outcome_category: semantic_outcome`, times, `duration_ms`, configured timeout, `artifact_refs`) |
+| `invocation_finished` | `invocation_finished` (outcome, `outcome_category: semantic_outcome`, times, `duration_ms`, configured timeout, `artifact_refs`, `diagnostic_id`; see `provider-diagnostics.md`) |
 | `budget_exceeded` | `budget_exceeded` (metric, limit, observed, route) |
 | `transition_selected` | `transition_decided` (source state and visit, target state and rung, trigger, outcome) |
 | `state_exited` | `state_exited` |
 | `human_input_requested` / `_received` | same name (request id = visit id) |
 | `run_resumed` / `human_input_resumed` | `run_resumed` (`resume_kind: interrupted_visit / recover_to / human_input`; live context: from_terminal, resume_to, qa_fix_round, candidate identity) |
-| `run_error` | `run_interrupted`: the durable `interrupted` operation record's facts |
+| `run_error` | `run_interrupted`: the durable `interrupted` operation record's facts, plus `diagnostic_id` |
 | `run_finished` | `run_finished` (terminal) |
 
 `run_interrupted` carries the interruption facts using the existing taxonomy:

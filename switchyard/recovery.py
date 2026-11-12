@@ -28,7 +28,7 @@ from .workflow_execution import WorkflowExecution
 from .context_transport import workspace_resolver
 from .human_input import HumanInputRecorder, active_request, write_answer, validate_answer, request_targets, select_target, answer_target
 from .provider_stages import ProviderStageExecutorResolver
-from .provider_process import ProviderExecutionError
+from .provider_process import ProviderExecutionError, observe_invocation
 from .context_transport import EvidenceDeliveryError
 from .git_safety import GitRepository
 from .versioning import runtime_stamp
@@ -327,8 +327,9 @@ def _semantic(text):
 
 
 class _Recorder(JsonlRecorder):
-    def __init__(self,path,store,compiled,root,tracer=None):
+    def __init__(self,path,store,compiled,root,tracer=None,diagnostics=None):
         super().__init__(path);self.store=store;self.compiled=compiled;self.root=root;self.path=path;self.tracer=tracer
+        self.diagnostics=diagnostics
     def record(self,event):
         super().record(event)
         with Path(self.path).open('ab') as f:os.fsync(f.fileno())
@@ -336,30 +337,44 @@ class _Recorder(JsonlRecorder):
             binding=self.compiled.plan[event.state].binding
             _operation(self.store,'running',state=binding.logical_state,rung=binding.rung_index,
                        manifest_before=_manifest(self.root))
+        # After the authoritative writes; failure-isolated (#1). Diagnostics first: the trace links them.
+        if self.diagnostics is not None:
+            self.diagnostics.record(event)
         if self.tracer is not None:
-            self.tracer.record(event)  # After the authoritative writes; failure-isolated (#1 trace).
+            self.tracer.record(event)
 
 
 class _CheckpointExecutor:
-    def __init__(self,stage,store,repo,root):self.stage,self.store,self.repo,self.root=stage,store,repo,root
+    def __init__(self,stage,store,repo,root,observed=None):
+        self.stage,self.store,self.repo,self.root,self.observed=stage,store,repo,root,observed
     def run(self,invocation):
-        try:return self.stage.run(invocation)
-        except ProviderExecutionError as exc:
-            # Semantic boundary: the adapter returned no StageResult. Anything raised after
-            # it returns (contract checks, artifact writes, transitions) stays charged.
-            exc.before_stage_result=True
-            raise
-        finally:
-            # Adapter transport waits for provider termination before returning/raising.
-            op=_read(self.store,'operation')
-            if op.get('provider_pid') is None:
-                _checkpoint(self.store,self.repo,self.root)
+        with observe_invocation() as facts:  # Observation only (#1 diagnostics); never read by execution.
+            try:
+                result=self.stage.run(invocation)
+                facts.result=getattr(result,'outcome',None)
+                return result
+            except ProviderExecutionError as exc:
+                # Semantic boundary: the adapter returned no StageResult. Anything raised after
+                # it returns (contract checks, artifact writes, transitions) stays charged.
+                exc.before_stage_result=True
+                facts.error=exc
+                raise
+            except BaseException as exc:
+                facts.error=exc
+                raise
+            finally:
+                # Adapter transport waits for provider termination before returning/raising.
+                op=_read(self.store,'operation')
+                if op.get('provider_pid') is None:
+                    _checkpoint(self.store,self.repo,self.root)
+                if self.observed is not None:
+                    self.observed(facts)
 
 
-def _compiled(project,flow,workspace,config,store,repo,root):
+def _compiled(project,flow,workspace,config,store,repo,root,observed=None):
     provider=ProviderStageExecutorResolver(project.bundle.profiles,config)
     return compile_workflow(project.bundle,flow,workspace_resolver(project.bundle,flow,workspace,
-        lambda binding:_CheckpointExecutor(provider(binding),store,repo,root)))
+        lambda binding:_CheckpointExecutor(provider(binding),store,repo,root,observed)))
 
 
 _PROVIDER_REASONS=('provider_failure','provider_timeout')
@@ -393,21 +408,29 @@ def _provider_failure(cause,binding,started):
 def _drive(project,flow,request,root,config,store,repo,history=None,recover_to=None,void=frozenset(),human_input=None,human_resume_to=None,start=None):
     workspace=WorkWorkspace.open(root,project.bundle.artifacts);workspace.initialize_request(request)
     compiled=tracer=None
+    from .diagnostics import writer as _diagnostics
+    diagnostics=_diagnostics(root,store)
     try:
         def observe(event,pid):
             old=_read(store,'operation')
             old.update(provider_pid=pid if event=='started' else None, process_confirmed_dead=event=='terminated')
             _put(store,'operation',old)
         config=replace(config,process_observer=observe)
-        compiled=_compiled(project,flow,workspace,config,store,repo,root)
+        compiled=_compiled(project,flow,workspace,config,store,repo,root,diagnostics.captured if diagnostics else None)
         from .trace import tracer as _tracer
         tracer=_tracer(root,store,compiled,project,void)
-        if tracer is not None and history:
-            tracer.backfill(history,_operations(store))  # Only events the durable history proves.
+        if history and (tracer is not None or diagnostics is not None):
+            ops=_operations(store)
+            if diagnostics is not None:
+                diagnostics.bind(compiled);diagnostics.backfill(history,ops)  # Only what durable records prove.
+            if tracer is not None:
+                tracer.backfill(history,ops)  # Only events the durable history proves.
+        elif diagnostics is not None:
+            diagnostics.bind(compiled)
         runtime_flow=compiled.flow if start is None else replace(compiled.flow,initial=compiled.entry_states[start])
         result=run(WorkUnit(request),runtime_flow,compiled.executors,
                    recorder=HumanInputRecorder(workspace,compiled,
-                       _Recorder(Path(root)/'events.jsonl',store,compiled,root,tracer),
+                       _Recorder(Path(root)/'events.jsonl',store,compiled,root,tracer,diagnostics),
                        before_wait=lambda:_checkpoint(store,repo,root)),resume_from=history,recover_to=recover_to,
                    void_invocations=void,human_input=human_input,human_resume_to=human_resume_to)
     except BaseException as exc:
@@ -435,6 +458,8 @@ def _drive(project,flow,request,root,config,store,repo,history=None,recover_to=N
         interrupted=_operation(store,'interrupted',reason=reason,state=old.get('state'),rung=old.get('rung'),
                    manifest_before=old.get('manifest_before'),diagnostic=str(cause or exc)[:2048],
                    returncode=getattr(cause,'returncode',None),resume_safe=safe,**fields)
+        if diagnostics is not None:
+            diagnostics.interrupted(interrupted)
         if tracer is not None:
             tracer.interrupted(interrupted)
         if reason=='qa_evidence_undeliverable':

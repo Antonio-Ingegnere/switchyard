@@ -1,5 +1,6 @@
 """Provider-specific V2 stage boundaries below durable context transport."""
 from dataclasses import asdict, dataclass, field, replace
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -19,7 +20,7 @@ from .work_contract import (microspec_guidance, handoff_guidance, HANDOFF_BODY_F
                             HANDOFF_MAX_ITEMS, HANDOFF_MAX_TEXT, handoff_check, handoff_text, _kind)
 from .workflow_bundle import ExecutionProfile, CommandSpec
 from .workflow_compiler import ExecutionBinding
-from .provider_process import ProviderExecutionError, execute
+from .provider_process import ProviderExecutionError, execute, note_invocation
 from .claude_models import CLAUDE_POLICY_ENVIRONMENT, ClaudeEffortError, claude_effort_controls
 
 
@@ -616,6 +617,55 @@ def _claude_schema_exhaustion(stdout):
     return claude_schema_errors([e for e in errors[:16] if type(e) is str] if type(errors) is list else [])
 
 
+def _claude_channel(stdout):
+    """Documented Claude result-envelope fields for diagnostics (#1); same fields as the failure reason.
+
+    Never structured_output, success prose, usage, cost or session identifiers; messages stay subject to
+    the diagnostics sanitization gate before persistence.
+    """
+    try:
+        envelope = json.loads(stdout.decode('utf-8', errors='replace'))
+    except (ValueError, RecursionError):
+        return dict(decodable=False)
+    if type(envelope) is not dict or envelope.get('type') != 'result':
+        return dict(decodable=True, result_envelope=False)
+    out = dict(decodable=True, result_envelope=True)
+    for key in ('subtype', 'terminal_reason', 'api_error_code'):
+        if type(envelope.get(key)) is str and envelope[key]:
+            out[key] = _clean(envelope[key], 128)
+    if type(envelope.get('is_error')) is bool:
+        out['is_error'] = envelope['is_error']
+    for key in ('api_error_status', 'num_turns'):
+        if type(envelope.get(key)) is int and type(envelope[key]) is not bool:
+            out[key] = envelope[key]
+    messages = []
+    errors = envelope.get('errors')
+    for item in errors[:16] if type(errors) is list else ():
+        item = item.get('message') if type(item) is dict else item
+        if type(item) is str and _clean(item, 512) and _clean(item, 512) not in messages:
+            messages.append(_clean(item, 512))
+    if envelope.get('is_error') is True and type(envelope.get('result')) is str and _clean(envelope['result'], 512):
+        messages.append(_clean(envelope['result'], 512))
+    if messages:
+        out['errors'] = messages
+    denials = envelope.get('permission_denials')
+    names = [] if type(denials) is not list else [
+        _clean(d['tool_name'], 64) for d in denials[:16]
+        if type(d) is dict and type(d.get('tool_name')) is str and d['tool_name']]
+    if names:
+        out['permission_denials'] = list(dict.fromkeys(names))
+    return out
+
+
+def _note_contract(schema, transport, repair):
+    """Structured-output contract identity for diagnostics; the schema itself is code-owned, never stored."""
+    def update(facts):
+        facts.structured = dict(schema=dict(name='StageResult', transport=transport,
+                                            sha256=hashlib.sha256(_json(schema).encode('utf-8')).hexdigest()),
+                                repair=repair, errors=None)
+    note_invocation(update)
+
+
 def _exit_failure(output, reason=None, raw_stdout=None):
     """Precedence: structured reason, stderr, raw stdout fallback, generic status."""
     status = f'provider exited with status {output.returncode}'
@@ -647,8 +697,12 @@ class ClaudeStageExecutor:
         for key in CLAUDE_POLICY_ENVIRONMENT:
             env.pop(key,None)
         env['MAX_STRUCTURED_OUTPUT_RETRIES'] = str(STRUCTURED_OUTPUT_ATTEMPTS)
+        schema = result_schema(invocation.output_contract,'claude')
+        # Repair turns happen inside this one process; the CLI reports them only when exhausted.
+        _note_contract(schema, 'claude', dict(mechanism='provider_native_structured_output',
+                                              max_attempts=STRUCTURED_OUTPUT_ATTEMPTS, attempted=None, succeeded=None))
         argv = ['--print','--no-session-persistence','--output-format','json',
-                '--json-schema',_json(result_schema(invocation.output_contract,'claude')),'--model',self.resolved_model,
+                '--json-schema',_json(schema),'--model',self.resolved_model,
                 '--safe-mode','--restricted','--strict-mcp-config','--mcp-config','{"mcpServers":{}}',
                 '--permission-mode','acceptEdits','--permission-prompts','none',
                 '--tools',_claude_tools(self.binding.capabilities),'--disallowedTools','mcp__*',
@@ -660,11 +714,16 @@ class ClaudeStageExecutor:
         env.update(effort_env)
         output = execute(self.executable,argv,self.config, input_bytes=render_invocation(invocation).encode('utf-8'),
                          result_stdout=True,environment=env)
+        note_invocation(lambda facts: setattr(facts, 'channel', _claude_channel(output.stdout)))
         if output.returncode != 0:
             # Same documented envelope, decoded only for failure diagnostics, never a StageResult.
             reason, decodable = _claude_failure_reason(output.stdout)
             exhausted = _claude_schema_exhaustion(output.stdout)
             if exhausted:
+                def repair_failed(facts):
+                    facts.structured['repair'].update(attempted=True, succeeded=False)
+                    facts.structured['errors'] = exhausted
+                note_invocation(repair_failed)
                 # Last section: the recovery output tail keeps the end of the diagnostic.
                 reason = '\n'.join(filter(None, (reason, stage_result_error_text(exhausted))))
             raise _exit_failure(output, reason, None if decodable else output.stdout)
@@ -694,7 +753,9 @@ class CodexStageExecutor:
                 path = Path(folder)/f'{index:02d}-{part.evidence_id}{_IMAGE_SUFFIX[part.mime_type]}'
                 path.write_bytes(part.data); path.chmod(0o400)
                 attached.append(str(path))
-            schema.write_text(_json(result_schema(invocation.output_contract)),encoding='utf-8')
+            contract = result_schema(invocation.output_contract)
+            _note_contract(contract, 'canonical', dict(mechanism='none', max_attempts=1, attempted=False, succeeded=None))
+            schema.write_text(_json(contract),encoding='utf-8')
             argv = ['--ask-for-approval','never','exec','--ephemeral','--ignore-user-config',
                     '--ignore-rules','--sandbox',
                     'workspace-write' if self.binding.capabilities is None or 'repo_write' in self.binding.capabilities else 'read-only',
