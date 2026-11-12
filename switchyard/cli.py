@@ -58,6 +58,13 @@ def _parser():
     pr_create.add_argument('--title', help='pull request title (default: "Switchyard delivery <work-id>")')
     pr_create.add_argument('--gh-executable', help='GitHub CLI used for the provider API (default: gh)')
     pr_create.add_argument('--json', action='store_true', help='print the structured pull request record')
+    trace = actions.add_parser('trace', allow_abbrev=False)
+    trace.add_argument('work_root')
+    trace.add_argument('--run', help='only this run id')
+    trace.add_argument('--state', help='only this (logical or runtime) state')
+    trace.add_argument('--invocation', help='only this invocation id')
+    trace.add_argument('--type', dest='event_type', help='only this event type')
+    trace.add_argument('--json', action='store_true', help='print the trace events as a JSON array')
     pr_status = actions.add_parser('pr-status', allow_abbrev=False)
     pr_status.add_argument('work_root')
     pr_status.add_argument('--gh-executable', help='GitHub CLI used for the provider API (default: gh)')
@@ -193,6 +200,58 @@ def _integrated_text(r):
                       'Assessment: '+r['consumed_assessment_id']])
 
 
+def _trace_detail(e):
+    p = e['payload']
+    if e['event_type'] == 'invocation_finished':
+        return '%s  %s' % (p.get('outcome'), '%.1fs' % (p['duration_ms']/1000) if p.get('duration_ms') is not None else '-')
+    if e['event_type'] == 'invocation_started':
+        b = p.get('budget') or {}
+        scopes = ' '.join('%s %d->%d/%d' % (s['scope'].rsplit(':', 2)[-2] if s['scope'].endswith(':state') else 'rung',
+                                            s['used_before'], s['used_after'], s['limit']) for s in b.get('invocation_scopes', []))
+        run = b.get('run_invocations')
+        return 'launch %s attempt %s%s%s' % (p.get('invocation_in_visit'), p.get('semantic_attempt') or '-', '  run %d->%d/%d' % (run['used_before'], run['used_after'], run['limit']) if run else '',
+                                   '  '+scopes if scopes else '')
+    if e['event_type'] == 'transition_decided':
+        return '-> %s (%s)' % (p.get('to_state'), p.get('outcome') or p.get('trigger'))
+    if e['event_type'] == 'run_interrupted':
+        return '%s %s' % (p.get('reason') or 'unknown', p.get('outcome_category') or '')
+    if e['event_type'] == 'budget_exceeded':
+        return '%s %s/%s -> %s' % (p.get('metric'), p.get('observed'), p.get('limit'), p.get('route_to'))
+    if e['event_type'] == 'run_resumed':
+        return '%s%s' % (p.get('resume_kind'), ' -> '+p['target'] if p.get('target') else '')
+    if e['event_type'] == 'run_started':
+        r, g = (p.get('provenance') or {}).get('runtime', {}), (p.get('provenance') or {}).get('git', {})
+        return 'switchyard %s config %s base %s %s' % (r.get('switchyard_version'), (r.get('config_sha256') or '')[:12],
+                                                      (g.get('delivery_base_sha') or '')[:12], g.get('delivery_branch') or '')
+    if e['event_type'] == 'run_finished':
+        return p.get('terminal') or ''
+    return ''
+
+
+def _cell(value, limit):
+    """One printable table cell (trace text is already bounded and redacted)."""
+    text = ''.join(ch if ch.isprintable() else '?' for ch in str(value))
+    return text if len(text) <= limit else text[:limit-3]+'...'
+
+
+def _trace_text(events):
+    if not events:
+        return 'no trace events available'
+    runs = {}
+    rows = [('SEQ', 'RUN', 'STATE', 'EVENT', 'AGENT', 'PROVIDER/MODEL', 'DETAIL')]
+    for e in events:
+        run = runs.setdefault(e['run_id'], 'r%d' % (len(runs)+1))
+        agent = e['agent'] if e['event_type'] in ('routing_decided', 'invocation_started', 'invocation_finished', 'run_interrupted') else ''
+        model = '%s/%s' % (e['provider'], e['model'] or '-') if agent else ''
+        rows.append((str(e['sequence']) + ('*' if e['observed_by'] != 'runtime' else ''), run, _cell(e['state'] or '-', 32),
+                     e['event_type'], agent or '', model, _cell(_trace_detail(e), 160)))
+    widths = [max(len(r[i]) for r in rows) for i in range(6)]
+    lines = ['  '.join(r[i].ljust(widths[i]) for i in range(6)) + '  ' + r[6] for r in rows]
+    if any(e['observed_by'] != 'runtime' for e in events):
+        lines.append('* reconstructed by recovery backfill from durable records')
+    return '\n'.join(line.rstrip() for line in lines)
+
+
 def _pr_text(o, created_by=None):
     lines = ['Pull request %s #%d%s%s' % (o['state'], o['number'], ' (draft)' if o['draft'] else '',
                                          ' (%s)' % created_by if created_by else ''),
@@ -235,6 +294,11 @@ def _work_command(args):
                 'Remote: %s (%s)' % (record['remote'], _safe_display(record['remote_identity'], 512)),
                 'Ref: %s %s -> %s' % (record['remote_ref'], record['remote_before_sha'], record['remote_after_sha']),
                 'Integrated commit: '+record['local_integrated_commit_sha']]))
+            return 0
+        if args.action == 'trace':
+            from .trace import trace_events
+            events = trace_events(args.work_root, args.run, args.state, args.invocation, args.event_type)
+            print(json.dumps(events, ensure_ascii=True, indent=2, sort_keys=True) if args.json else _trace_text(events))
             return 0
         if args.action in ('pr-create', 'pr-status'):
             from . import pull_request

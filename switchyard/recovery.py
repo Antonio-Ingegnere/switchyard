@@ -327,8 +327,8 @@ def _semantic(text):
 
 
 class _Recorder(JsonlRecorder):
-    def __init__(self,path,store,compiled,root):
-        super().__init__(path);self.store=store;self.compiled=compiled;self.root=root;self.path=path
+    def __init__(self,path,store,compiled,root,tracer=None):
+        super().__init__(path);self.store=store;self.compiled=compiled;self.root=root;self.path=path;self.tracer=tracer
     def record(self,event):
         super().record(event)
         with Path(self.path).open('ab') as f:os.fsync(f.fileno())
@@ -336,6 +336,8 @@ class _Recorder(JsonlRecorder):
             binding=self.compiled.plan[event.state].binding
             _operation(self.store,'running',state=binding.logical_state,rung=binding.rung_index,
                        manifest_before=_manifest(self.root))
+        if self.tracer is not None:
+            self.tracer.record(event)  # After the authoritative writes; failure-isolated (#1 trace).
 
 
 class _CheckpointExecutor:
@@ -390,7 +392,7 @@ def _provider_failure(cause,binding,started):
 
 def _drive(project,flow,request,root,config,store,repo,history=None,recover_to=None,void=frozenset(),human_input=None,human_resume_to=None,start=None):
     workspace=WorkWorkspace.open(root,project.bundle.artifacts);workspace.initialize_request(request)
-    compiled=None
+    compiled=tracer=None
     try:
         def observe(event,pid):
             old=_read(store,'operation')
@@ -398,10 +400,14 @@ def _drive(project,flow,request,root,config,store,repo,history=None,recover_to=N
             _put(store,'operation',old)
         config=replace(config,process_observer=observe)
         compiled=_compiled(project,flow,workspace,config,store,repo,root)
+        from .trace import tracer as _tracer
+        tracer=_tracer(root,store,compiled,project,void)
+        if tracer is not None and history:
+            tracer.backfill(history,_operations(store))  # Only events the durable history proves.
         runtime_flow=compiled.flow if start is None else replace(compiled.flow,initial=compiled.entry_states[start])
         result=run(WorkUnit(request),runtime_flow,compiled.executors,
                    recorder=HumanInputRecorder(workspace,compiled,
-                       _Recorder(Path(root)/'events.jsonl',store,compiled,root),
+                       _Recorder(Path(root)/'events.jsonl',store,compiled,root,tracer),
                        before_wait=lambda:_checkpoint(store,repo,root)),resume_from=history,recover_to=recover_to,
                    void_invocations=void,human_input=human_input,human_resume_to=human_resume_to)
     except BaseException as exc:
@@ -426,9 +432,11 @@ def _drive(project,flow,request,root,config,store,repo,history=None,recover_to=N
         if infra:
             binding=compiled.plan[last[0].state].binding if compiled is not None else None
             fields['provider_failure']=_provider_failure(cause,binding,old.get('timestamp'))
-        _operation(store,'interrupted',reason=reason,state=old.get('state'),rung=old.get('rung'),
+        interrupted=_operation(store,'interrupted',reason=reason,state=old.get('state'),rung=old.get('rung'),
                    manifest_before=old.get('manifest_before'),diagnostic=str(cause or exc)[:2048],
                    returncode=getattr(cause,'returncode',None),resume_safe=safe,**fields)
+        if tracer is not None:
+            tracer.interrupted(interrupted)
         if reason=='qa_evidence_undeliverable':
             raise EvidenceDeliveryError(str(cause)) from exc  # Callers see the explicit diagnostic.
         raise
@@ -767,8 +775,16 @@ def recovery_status(work_root):
                 recovery_source=recovery_source,**lifecycle,**_isolation_status(base,op),**_suspend_status(op),**_adoption_status(base),
                 **accounting,**human_history,**qa_status,**({'resume_blocked':blocked} if blocked else {}),
                 **({'provider_failure':op['provider_failure']} if phase=='interrupted' and 'provider_failure' in op else {}),
-                **_integration_status(work_root,phase),
+                **_integration_status(work_root,phase),**_trace_status(work_root),
                 rollback_allowed=phase in ('interrupted','delivery_done','rollback_running','reopened') and not op.get('checkpoint_uncertain',False) and terminal!='ACCEPTED')
+
+
+def _trace_status(work_root):
+    """Tiny local trace summary (#1); never the trace itself, never a failure of status."""
+    from .trace import trace_summary
+    try:summary=trace_summary(work_root)
+    except (ValueError,OSError):summary=None
+    return {'observability':summary} if summary else {}
 
 
 def _integration_status(work_root,phase):
