@@ -83,6 +83,13 @@ def _parser():
     logs.add_argument('--invocation', help='only this invocation (full id, or I<n>), followed by its diagnostic')
     logs.add_argument('--last', type=_count, help='only the last N matching events')
     logs.add_argument('--json', action='store_true', help='print the timeline entries as a JSON array')
+    usage = actions.add_parser('usage', allow_abbrev=False)
+    usage.add_argument('work_root')
+    for flag, text in (('--run', 'run id'), ('--state', '(logical or runtime) state'), ('--agent', 'agent'),
+                       ('--provider', 'provider'), ('--model', 'configured, resolved or reported model'),
+                       ('--invocation', 'invocation (full id, or I<n>)')):
+        usage.add_argument(flag, help='only this '+text)
+    usage.add_argument('--json', action='store_true', help='print records, totals, groups and coverage as JSON')
     bundle = actions.add_parser('debug-bundle', allow_abbrev=False)
     bundle.add_argument('work_root')
     bundle.add_argument('--output', required=True, help='new ZIP file outside the work (never overwritten)')
@@ -388,6 +395,62 @@ def _diagnostic_detail(r):
     return '\n'.join(lines)
 
 
+def _count_cell(value):
+    return '—' if value is None else '{:,}'.format(value)
+
+
+def _usage_text(records, recorded, summary):
+    """Known provider-reported counts only; unknown is '—'/'unavailable', never zero; no cost figures."""
+    if not records:
+        return 'No invocations recorded.' if recorded else 'Usage unavailable: not recorded by this runtime version'
+    from .usage import attributed_model
+    runs = {r['run_id'] for r in records}
+    rows = [('STATE', 'PROVIDER/MODEL', 'INV', 'INPUT', 'OUTPUT', 'CACHE READ', 'CACHE WRITE', 'USAGE')]
+    for r in records:
+        model = attributed_model(r) if r['source'] == 'provider_reported' else r['configured_model']
+        label = r['provider'] if r['provider'] == 'command' or not model else '%s/%s' % (r['provider'] or '-', model)
+        t = r['tokens']
+        rows.append((_cell(r['state'] or '-', 24), _cell(label, 40), _short(r['invocation_id']) if len(runs) == 1 else r['invocation_id'],
+                     _count_cell(t['input']), _count_cell(t['output']), _count_cell(t['cache_read']), _count_cell(t['cache_write']),
+                     r['source'] if r['source'] != 'unavailable' else 'unavailable (%s)' % r['reason']))
+    widths = [max(len(row[i]) for row in rows) for i in range(7)]
+    align = [str.ljust]*3 + [str.rjust]*4
+    lines = ['WORK  %s' % (next((r['work_id'] for r in records if r['work_id']), None) or '-'), '']
+    lines += ['  '.join(align[i](row[i], widths[i]) for i in range(7)) + '  ' + row[7] for row in rows]
+    totals = summary['totals']
+    def total(item):
+        return 'unavailable' if item['reported_sum'] is None else '{:,}  ({} invocation(s) reporting)'.format(
+            item['reported_sum'], item['invocations_reporting'])
+    lines += ['', 'Reported totals (known provider-reported values only):']
+    scopes = totals['coverage_scope']
+    narrow = sum(n for scope, n in scopes.items() if scope != 'invocation_wide_reconciled')
+    if narrow:
+        lines.append('  scope: top-level agent loop as reported for %d of %d reporting invocation(s); may exclude subagent,'
+                     % (narrow, totals['usage_reported']))
+        lines.append('         sidechain and auxiliary model calls; not complete invocation-wide consumption')
+    elif totals['usage_reported']:
+        lines.append('  scope: invocation-wide (top-level usage reconciled with the provider\'s per-model breakdown)')
+    for key, label in (('input', 'Input'), ('output', 'Output'), ('cache_read', 'Cache read'), ('cache_write', 'Cache write')):
+        lines.append('  %-30s %s' % (label+':', total(totals['tokens'][key])))
+    lines.append('  %-30s %s' % ('Input incl. cache (derived):', total(totals['input_including_cache'])))
+    if totals['mixed_input_semantics']:
+        lines.append('  note: providers differ in whether input includes cached tokens; compare the derived line')
+    tree = totals['agent_tree_by_model']
+    if narrow and any(item['reported_sum'] is not None for item in tree.values()):
+        lines += ['', 'Per-model breakdown, whole agent tree incl. subagents (separate; not added to the totals above):']
+        for key, label in (('input', 'Input'), ('output', 'Output'), ('cache_read', 'Cache read'), ('cache_write', 'Cache write')):
+            lines.append('  %-30s %s' % (label+':', total(tree[key])))
+    lines += ['', 'Coverage:', '  Provider invocations: %d' % totals['provider_invocations'],
+              '  Usage reported:       %d%s' % (totals['usage_reported'], ' (%d partial)' % totals['usage_partial'] if totals['usage_partial'] else ''),
+              '  Usage unavailable:    %d' % totals['usage_unavailable']]
+    if totals['not_applicable']:
+        lines.append('  Not applicable:       %d (command verifiers)' % totals['not_applicable'])
+    if totals['usage_unavailable']:
+        lines.append('  Totals cover %d of %d provider invocations.' % (totals['usage_reported'], totals['provider_invocations']))
+    lines += ['', 'Estimated cost: not calculated', 'Billed cost:    unavailable']
+    return '\n'.join(line.rstrip() for line in lines)
+
+
 def _pr_text(o, created_by=None):
     lines = ['Pull request %s #%d%s%s' % (o['state'], o['number'], ' (draft)' if o['draft'] else '',
                                          ' (%s)' % created_by if created_by else ''),
@@ -449,6 +512,17 @@ def _work_command(args):
                 from .diagnostics import read_diagnostics
                 records = [r for r in read_diagnostics(args.work_root, args.invocation) if r.get('recorded')]
                 print('\n' + ('\n\n'.join(_diagnostic_detail(r) for r in records) if records else 'Diagnostic unavailable'))
+            return 0
+        if args.action == 'usage':
+            from .usage import aggregate, read_usage
+            records, recorded = read_usage(args.work_root, args.run, args.state, args.agent, args.provider, args.model, args.invocation)
+            summary = aggregate(records)
+            if args.json:
+                print(json.dumps(dict(work_id=next((r['work_id'] for r in records if r['work_id']), None), usage_recorded=recorded,
+                                      records=records, **summary, estimated_cost=None, billed_cost=None),
+                                 ensure_ascii=True, indent=2, sort_keys=True))
+            else:
+                print(_usage_text(records, recorded, summary))
             return 0
         if args.action == 'debug-bundle':
             from .bundle import create_bundle

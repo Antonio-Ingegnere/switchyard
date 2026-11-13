@@ -16,6 +16,38 @@
   record schemas such as the trace and diagnostic `schema_version`. Each changes only when its own format changes,
   never because the package version changed.
 
+## 2.6.0
+
+### Added: provider token usage (ECONOMICS-001, #2)
+
+`switchyard work usage WORK [--json] [--run] [--state] [--agent] [--provider] [--model] [--invocation]` reports the
+provider-reported token usage of every invocation.
+
+- **Coverage.** Output shows per-invocation counts, totals of known reported values only, groups by run, state,
+  agent, provider, model and invocation, and coverage: reported, partial, unavailable, or not applicable to
+  verifiers.
+- **No invented numbers.** Unknown counts are `—` or `unavailable`, never zero. No costs are estimated or shown.
+- **Claude.** Usage is read once from the final cumulative result envelope: input, output, cache read and cache
+  write. Structured-output repair turns are not counted twice. `modelUsage` keeps the reported model apart from the
+  configured one, and a multi-model breakdown is never split by guessing.
+- **Claude coverage scope.** Top-level `usage` covers only the top-level agent loop; subagent and auxiliary model
+  calls are excluded.
+  - Each record carries a `coverage_scope`. It reads invocation-wide only when the whole-tree `modelUsage` breakdown
+    reconciles exactly with `usage`.
+  - Totals are labelled with their scope, and the breakdown is reported separately, never added.
+  - A zeroed crash result is not trusted.
+- **Codex.** The adapter's `codex exec` mode reports no usage, so its invocations are recorded as unavailable rather
+  than estimated. A normalizer for the documented JSON usage events exists but is not yet wired.
+- **Cache semantics.** Input semantics differ by provider: Claude input excludes cache tokens, Codex input includes
+  them. Totals are kept per category, with a separately derived "input incl. cache".
+- **Records.** Each invocation gets one immutable record under `<work>/observability/usage/` (usage record schema 1).
+  Retries keep their own records.
+- **Failures and recovery.** Failures are isolated from delivery. Recovery backfill records `unavailable`
+  (`not_captured`) and never reruns a provider.
+- **Legacy works.** They report "not recorded by this runtime version".
+
+No work, trace or diagnostic schema change. The debug bundle does not include usage yet.
+
 ## 2.5.0
 
 ### Added: debug bundle (#1)

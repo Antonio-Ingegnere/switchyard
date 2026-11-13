@@ -42,6 +42,7 @@ class InvocationFacts:
         self.structured = None    # adapter: structured-output contract facts
         self.result = None        # the StageResult outcome, when the adapter returned one
         self.error = None         # the exception raised by the adapter, when it raised
+        self.usage = None         # adapter: normalized provider-reported token usage (ECONOMICS-001)
 
     def note(self, **fields):
         if self.process is not None:

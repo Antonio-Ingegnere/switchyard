@@ -657,6 +657,158 @@ def _claude_channel(stdout):
     return out
 
 
+# --- Provider-reported token usage (ECONOMICS-001) ---------------------------------------------------------------
+# Provider-specific field semantics stay here; switchyard.usage only stores and aggregates the normalized shape:
+# {source, reason, tokens{input, output, cache_read, cache_write}, semantics, turns, reported_model, model_allocation,
+# model_breakdown, invalid_fields}. Counts are nullable: null = not reported, never zero.
+MAX_TOKENS = 10**12
+_MODEL_NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9._:/@\[\]-]{0,127}')
+_CLAUDE_USAGE = (('input', 'input_tokens'), ('output', 'output_tokens'), ('cache_read', 'cache_read_input_tokens'),
+                 ('cache_write', 'cache_creation_input_tokens'))
+_CLAUDE_MODEL_USAGE = (('input', 'inputTokens'), ('output', 'outputTokens'), ('cache_read', 'cacheReadInputTokens'),
+                       ('cache_write', 'cacheCreationInputTokens'))
+_CODEX_USAGE = (('input', 'input_tokens'), ('output', 'output_tokens'), ('cache_read', 'cached_input_tokens'))
+
+
+def _counts(value, fields, prefix):
+    """(tokens, invalid field labels): only non-negative bounded integers; booleans, floats and others are invalid."""
+    tokens, invalid = {}, []
+    for name, key in fields:
+        item = value.get(key) if type(value) is dict else None
+        if item is None:
+            tokens[name] = None
+        elif type(item) is int and 0 <= item <= MAX_TOKENS:
+            tokens[name] = item
+        else:
+            tokens[name] = None
+            invalid.append(prefix+key)
+    return tokens, invalid
+
+
+def _unavailable(reason, invalid=()):
+    return dict(source='unavailable', reason=reason, invalid_fields=sorted(invalid))
+
+
+def claude_usage(stdout):
+    """Normalized usage from the ONE final Claude CLI result envelope (`--output-format json`).
+
+    `usage` is cumulative over all turns of the process (StructuredOutput repair included): taken once, never summed.
+    Anthropic semantics: `input_tokens` EXCLUDES cache reads and cache creation, reported separately.
+
+    Scope (Agent SDK cost-tracking contract): top-level `usage` counts ONLY the top-level agent loop; subagent,
+    sidechain and auxiliary model calls are excluded ("undercounts as soon as nesting occurs"). `modelUsage` covers the
+    whole agent tree, per model. So `usage` is invocation-wide only when the breakdown proves it: every category of the
+    breakdown's sum equals `usage` (`coverage_scope: invocation_wide_reconciled`). Otherwise it stays labelled
+    `top_level_agent_loop` (a larger breakdown is evidence of excluded calls) or `top_level_agent_loop_unverified` (no
+    breakdown). The breakdown and its sum are kept separately and never merged into the aggregate. On
+    `error_max_budget_usd`, `usage` omits the response that crossed the budget; on `error_during_execution` (a session
+    crash) every field may be zeroed, so an all-zero crash result is not trusted. `total_cost_usd` is a client-side
+    estimate and is not recorded.
+    """
+    try:
+        envelope = json.loads(stdout.decode('utf-8', errors='replace'))
+    except (ValueError, RecursionError):
+        return _unavailable('no_result_envelope')
+    if type(envelope) is not dict or envelope.get('type') != 'result':
+        return _unavailable('no_result_envelope')
+    if 'usage' not in envelope:
+        return _unavailable('not_reported')
+    if type(envelope['usage']) is not dict:
+        return _unavailable('invalid_provider_usage', ['usage'])
+    tokens, invalid = _counts(envelope['usage'], _CLAUDE_USAGE, 'usage.')
+    if invalid:
+        return _unavailable('invalid_provider_usage', invalid)
+    if all(v is None for v in tokens.values()):
+        return _unavailable('not_reported')
+    subtype = envelope.get('subtype')
+    if subtype == 'error_during_execution' and all(v in (0, None) for v in tokens.values()):
+        return _unavailable('zeroed_crash_result')  # Documented: a crash result may carry zeroed usage.
+    turns = envelope.get('num_turns') if type(envelope.get('num_turns')) is int and envelope['num_turns'] >= 0 else None
+    breakdown, allocation, reported = [], 'not_reported', None
+    models = envelope.get('modelUsage')
+    if type(models) is dict and models:
+        valid = len(models) <= 16
+        for name, item in sorted(models.items()) if valid else ():
+            counts, bad = _counts(item, _CLAUDE_MODEL_USAGE, 'modelUsage.')
+            if type(name) is not str or not _MODEL_NAME.fullmatch(name) or bad:
+                valid = False
+                break
+            breakdown.append(dict(model=name, **counts))
+        if not valid:
+            breakdown, allocation = [], 'unknown'  # An unusable breakdown is not guessed at.
+        elif len(breakdown) == 1:
+            single = {k: breakdown[0][k] for k in tokens}
+            allocation = 'single_reported_model' if single == tokens else 'inconsistent_breakdown'
+            reported = breakdown[0]['model']
+        else:
+            allocation = 'multi_model_breakdown'  # Kept per model; the aggregate alone feeds totals.
+    elif models is not None:
+        allocation = 'unknown'
+    breakdown_total = ({k: (None if any(m[k] is None for m in breakdown) else sum(m[k] for m in breakdown)) for k in tokens}
+                       if breakdown else None)
+    if breakdown_total is not None and breakdown_total == tokens and subtype != 'error_max_budget_usd':
+        scope = 'invocation_wide_reconciled'  # The whole-tree breakdown equals the top-level loop: nothing excluded.
+    elif breakdown_total is not None or subtype == 'error_max_budget_usd':
+        scope = 'top_level_agent_loop'
+    else:
+        scope = 'top_level_agent_loop_unverified'
+    return dict(source='provider_reported', reason=None, tokens=tokens, turns=turns, reported_model=reported,
+                model_allocation=allocation, model_breakdown=breakdown, model_breakdown_total=breakdown_total,
+                invalid_fields=[],
+                semantics=dict(basis='final_cumulative_result', input_includes_cache=False, coverage_scope=scope,
+                               fields={k: 'usage.'+f for k, f in _CLAUDE_USAGE}, authoritative_total=None))
+
+
+def codex_usage(lines):
+    """Normalized usage from documented Codex JSON event lines (`codex exec --json`): `turn.completed` events carry
+    PER-TURN usage (summed across turns); `token_count` events carry CUMULATIVE `total_token_usage` (latest wins;
+    `last_token_usage` is never added to it). If both exist they must agree. OpenAI semantics: `input_tokens`
+    INCLUDES `cached_input_tokens`; cache writes are not reported.
+
+    Not wired: the current adapter runs `codex exec` without `--json`, so no usage events exist (see
+    CodexStageExecutor); enabling it would change the provider invocation.
+    """
+    turns, cumulative, invalid = [], None, []
+    for number, line in enumerate(lines):
+        try:
+            event = json.loads(line)
+        except (ValueError, RecursionError, TypeError):
+            return _unavailable('invalid_provider_usage', ['event[%d]' % number])
+        if type(event) is not dict:
+            continue
+        msg = event.get('msg') if type(event.get('msg')) is dict else {}
+        if event.get('type') == 'turn.completed' and 'usage' in event:
+            counts, bad = _counts(event['usage'], _CODEX_USAGE, 'turn.completed.usage.')
+            invalid += bad
+            turns.append(counts)
+        elif msg.get('type') == 'token_count' and type(msg.get('info')) is dict:
+            counts, bad = _counts(msg['info'].get('total_token_usage'), _CODEX_USAGE, 'token_count.total_token_usage.')
+            invalid += bad
+            cumulative = counts
+    if invalid:
+        return _unavailable('invalid_provider_usage', sorted(set(invalid)))
+    summed = None
+    if turns:
+        summed = {k: (None if any(t[k] is None for t in turns) else sum(t[k] for t in turns)) for k, _ in _CODEX_USAGE}
+    if cumulative is not None and summed is not None and cumulative != summed:
+        return _unavailable('invalid_provider_usage', ['conflicting_cumulative_and_turn_totals'])
+    tokens = cumulative or summed
+    if tokens is None or all(v is None for v in tokens.values()):
+        return _unavailable('not_reported')
+    return dict(source='provider_reported', reason=None, tokens=dict(tokens, cache_write=None), turns=len(turns) or None,
+                reported_model=None, model_allocation='not_reported', model_breakdown=[], invalid_fields=[],
+                semantics=dict(basis='cumulative_snapshot' if cumulative is not None else 'sum_of_turns', input_includes_cache=True,
+                               coverage_scope='provider_session_unverified',
+                               fields=dict(input='input_tokens', output='output_tokens', cache_read='cached_input_tokens',
+                                           cache_write=None), authoritative_total=None))
+
+
+def _note_usage(usage, resolved_model):
+    def update(facts):
+        facts.usage = dict(usage, resolved_model=resolved_model)
+    note_invocation(update)
+
+
 def _note_contract(schema, transport, repair):
     """Structured-output contract identity for diagnostics; the schema itself is code-owned, never stored."""
     def update(facts):
@@ -712,9 +864,11 @@ class ClaudeStageExecutor:
         effort_argv, effort_env = _claude_effort(self.resolved_model, self.binding.effort)
         argv += effort_argv
         env.update(effort_env)
+        _note_usage(_unavailable('no_result_envelope'), self.resolved_model)  # Until the final envelope proves otherwise.
         output = execute(self.executable,argv,self.config, input_bytes=render_invocation(invocation).encode('utf-8'),
                          result_stdout=True,environment=env)
         note_invocation(lambda facts: setattr(facts, 'channel', _claude_channel(output.stdout)))
+        _note_usage(claude_usage(output.stdout), self.resolved_model)  # Failed exits may still report usage.
         if output.returncode != 0:
             # Same documented envelope, decoded only for failure diagnostics, never a StageResult.
             reason, decodable = _claude_failure_reason(output.stdout)
@@ -770,6 +924,8 @@ class CodexStageExecutor:
                 _require(not any(',' in p for p in attached), 'image path cannot be represented')
                 argv.append('--image='+','.join(attached))  # `=` form: the list cannot absorb the stdin `-`.
             argv.append('-')
+            # `codex exec` without --json emits no usage events; this mode cannot report token usage.
+            _note_usage(_unavailable('not_reported_in_exec_mode'), self.resolved_model)
             output = execute(self.executable,argv,self.config,
                              input_bytes=render_invocation(invocation).encode('utf-8'),result_file=result)
             if output.returncode != 0:

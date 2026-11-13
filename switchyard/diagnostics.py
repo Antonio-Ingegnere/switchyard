@@ -139,9 +139,12 @@ class Diagnostics:
                     refs = manifest_refs(self.root, self.current[1])
                 except Exception:
                     refs = None  # Unknown, not empty.
-                self._write(self._build(event, self.facts, 'runtime', outcome=event.outcome, refs=refs,
-                                        duration_ns=event.duration_ns))
-                self.current = self.facts = None
+                try:
+                    self._write(self._build(event, self.facts, 'runtime', outcome=event.outcome, refs=refs,
+                                            duration_ns=event.duration_ns))
+                finally:
+                    self._usage(event, self.facts, 'runtime')
+                    self.current = self.facts = None
             elif event.kind == 'run_error' and event.invocation_id and self._current(event):
                 self.pending = (event, self.facts)
         except Exception:
@@ -154,7 +157,19 @@ class Diagnostics:
                 return
             (event, facts), self.pending = self.pending, None
             if operation.get('invocation_id') == event.invocation_id:
-                self._write(self._build(event, facts, 'runtime', op=operation))
+                try:
+                    self._write(self._build(event, facts, 'runtime', op=operation))
+                finally:
+                    self._usage(event, facts, 'runtime')
+        except Exception:
+            self.failures += 1
+
+    def _usage(self, event, facts, observed_by):
+        """The invocation's usage record (ECONOMICS-001), isolated from the diagnostic and from execution."""
+        try:
+            from . import usage
+            _, _, where = self._where(event.state)
+            usage.write(self.root, usage.build(self.work_id, event, where, facts, observed_by, where['model']))
         except Exception:
             self.failures += 1
 
@@ -187,6 +202,31 @@ class Diagnostics:
                     record = self._build(event, None, 'recovery_backfill', op=op)
                 self._write(record)
                 existing.add(file_name(event.invocation_id))
+        except Exception:
+            self.failures += 1
+        self._backfill_usage(history, operations)
+
+    def _backfill_usage(self, history, operations):
+        """Missing usage records for invocations with a proven end, as `unavailable`/`not_captured`: no durable
+        record holds provider usage, so nothing is reconstructed and no provider is rerun."""
+        try:
+            from . import usage
+            directory = usage._directory(self.root)
+            existing = set(os.listdir(directory)) if directory.is_dir() else set()
+            started = set()
+            for event in history:
+                if event.kind == 'invocation_started':
+                    started.add(event.invocation_id)
+                    continue
+                if event.kind not in ('invocation_finished', 'run_error') or event.invocation_id not in started:
+                    continue
+                if usage.file_name(event.invocation_id) in existing:
+                    continue
+                if event.kind == 'run_error' and not any(op.get('phase') == 'interrupted' and op.get('invocation_id') == event.invocation_id
+                                                         for op in operations):
+                    continue
+                self._usage(event, None, 'recovery_backfill')
+                existing.add(usage.file_name(event.invocation_id))
         except Exception:
             self.failures += 1
 

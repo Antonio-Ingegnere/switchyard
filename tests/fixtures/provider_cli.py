@@ -61,6 +61,8 @@ if os.environ.get('FAKE_CONTRACT_AWARE') == '1':
                                 for f in artifact['schema_fields']})
         result['produced_artifacts'].append({'name':artifact['name'],'content':content})
 raw=json.dumps(result)
+# Documented result-envelope fields (usage, modelUsage, num_turns, ...) for usage tests; absent by default.
+envelope_extra=json.loads(os.environ.get('FAKE_CLAUDE_ENVELOPE_EXTRA') or '{}')
 if mode=='malformed': raw='not JSON'
 if mode=='oversized': raw='x'*2000000
 if mode=='missing_outcome':
@@ -82,15 +84,15 @@ if provider=='claude' and os.environ.get('FAKE_SCHEMA_INVALID_ATTEMPTS'):
     if os.environ.get('FAKE_REPAIR_LOG'):
         with open(os.environ['FAKE_REPAIR_LOG'],'a') as stream: stream.write(json.dumps({'attempts':attempt,'feedback':feedback})+'\n')
     if extra:
-        print(json.dumps({'type':'result','subtype':'error_max_structured_output_retries','is_error':True,
+        print(json.dumps({**envelope_extra,'type':'result','subtype':'error_max_structured_output_retries','is_error':True,
                           'terminal_reason':'structured_output_retry_exhausted',
                           'errors':[f'Failed to provide valid structured output after {cap} attempts — '
                                     f'last StructuredOutput error: {feedback[-1]}']}))
         sys.exit(1)
-    print(json.dumps({'type':'result','subtype':'success','is_error':False,'structured_output':candidate}))
+    print(json.dumps({**envelope_extra,'type':'result','subtype':'success','is_error':False,'structured_output':candidate}))
 elif provider=='claude':
     if mode in ('malformed','oversized'): print(raw)
-    else: print(json.dumps({'type':'result','subtype':'success','is_error':False,
+    else: print(json.dumps({**envelope_extra,'type':'result','subtype':'success','is_error':False,
                            'structured_output':result,'result':'operational prose must not be parsed'}))
 else:
     print('progress: operational stdout is NOT the result')
