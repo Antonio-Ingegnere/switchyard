@@ -116,8 +116,11 @@ class _Evidence:
 
 
 def execute(executable, argv, config, *, input_bytes=b'', capture=None,
-            result_stdout=False, result_file=None, environment=None):
-    """One process. Full semantic stdout or bounded evidence/log tails, never retries."""
+            result_stdout=False, result_file=None, environment=None, stdout_observer=None):
+    """One process. Full semantic stdout or bounded evidence/log tails, never retries.
+
+    `stdout_observer(chunk)`: observational telemetry fed every stdout chunk as read (never a result channel). It must
+    keep its own bounded state; an exception detaches it and never changes the process outcome or the draining."""
     Command(executable, tuple(argv), config.working_directory, config.timeout_seconds)
     cap = config.max_result_bytes
     evidence = _Evidence(capture.max_bytes) if capture else None
@@ -171,6 +174,11 @@ def execute(executable, argv, config, *, input_bytes=b'', capture=None,
                         if len(full) + len(data) > cap:
                             raise ProviderExecutionError('structured stdout exceeds byte limit')
                         full.extend(data)
+                    if name == 'stdout' and stdout_observer is not None:
+                        try:
+                            stdout_observer(data)
+                        except Exception:
+                            stdout_observer = None  # Telemetry only: detached, the stream keeps draining.
                     if evidence and (combined or capture.stream == name):
                         evidence.feed(data)
                 if not progress:

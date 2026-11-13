@@ -667,7 +667,9 @@ _CLAUDE_USAGE = (('input', 'input_tokens'), ('output', 'output_tokens'), ('cache
                  ('cache_write', 'cache_creation_input_tokens'))
 _CLAUDE_MODEL_USAGE = (('input', 'inputTokens'), ('output', 'outputTokens'), ('cache_read', 'cacheReadInputTokens'),
                        ('cache_write', 'cacheCreationInputTokens'))
-_CODEX_USAGE = (('input', 'input_tokens'), ('output', 'output_tokens'), ('cache_read', 'cached_input_tokens'))
+# Codex: input INCLUDES cached input; reasoning output is a SUBSET of output; cache writes only when reported.
+_CODEX_USAGE = (('input', 'input_tokens'), ('output', 'output_tokens'), ('cache_read', 'cached_input_tokens'),
+                ('cache_write', 'cache_write_input_tokens'), ('reasoning_output', 'reasoning_output_tokens'))
 
 
 def _counts(value, fields, prefix):
@@ -759,48 +761,134 @@ def claude_usage(stdout):
                                fields={k: 'usage.'+f for k, f in _CLAUDE_USAGE}, authoritative_total=None))
 
 
-def codex_usage(lines):
-    """Normalized usage from documented Codex JSON event lines (`codex exec --json`): `turn.completed` events carry
-    PER-TURN usage (summed across turns); `token_count` events carry CUMULATIVE `total_token_usage` (latest wins;
-    `last_token_usage` is never added to it). If both exist they must agree. OpenAI semantics: `input_tokens`
-    INCLUDES `cached_input_tokens`; cache writes are not reported.
+CODEX_MAX_EVENT_LINE = 65536    # Bytes of one JSONL event considered for parsing; longer lines are skipped.
+CODEX_MAX_USAGE_EVENTS = 64     # `turn.completed` snapshots retained (counts only) before usage is untrustworthy.
 
-    Not wired: the current adapter runs `codex exec` without `--json`, so no usage events exist (see
-    CodexStageExecutor); enabling it would change the provider invocation.
-    """
-    turns, cumulative, invalid = [], None, []
-    for number, line in enumerate(lines):
+
+class CodexUsageStream:
+    """Bounded streaming observer of `codex exec --json` stdout (telemetry, never the StageResult channel).
+
+    Contract (codex-rs exec JSONL, verified against 0.166.0): `turn.completed.usage` is the thread's CUMULATIVE
+    token total (`last_total_token_usage.total`), and is all zeros by default when no token-usage update arrived
+    before the turn ended; exec runs ONE turn and shuts down on any terminal turn status. So snapshots are never
+    summed: the latest wins, and earlier ones must not exceed it.
+
+    Kept: only validated counters per `turn.completed`, plus event/failure tallies. Never kept: the events, lines,
+    messages, commands, tool output, file changes or thread ids. Lines are split across arbitrary chunk boundaries
+    with at most CODEX_MAX_EVENT_LINE bytes buffered; a longer line is skipped while the stream keeps draining. Any
+    internal error detaches the observer (`usage_capture_failed`) without affecting the process."""
+
+    def __init__(self):
+        self.line = bytearray()
+        self.skipping = False
+        self.snapshots = []
+        self.invalid = []
+        self.events = self.failed_turns = self.malformed = self.oversized = 0
+        self.broken = self.overflow = False
+
+    def __call__(self, data):
+        if self.broken:
+            return
+        try:
+            self._feed(data)
+        except Exception:
+            self.broken, self.line = True, bytearray()
+
+    def _feed(self, data):
+        start = 0
+        while True:
+            end = data.find(b'\n', start)
+            piece = data[start:] if end < 0 else data[start:end]
+            if not self.skipping:
+                if len(self.line) + len(piece) > CODEX_MAX_EVENT_LINE:
+                    head = bytes(self.line[:64]) + piece[:64]
+                    self.oversized += 1
+                    if b'"turn.completed"' in head[:64]:
+                        self.invalid.append('oversized_turn_completed_event')  # A usage event that cannot be read.
+                    self.line, self.skipping = bytearray(), True
+                else:
+                    self.line += piece
+            if end < 0:
+                return
+            if not self.skipping:
+                self._event(bytes(self.line))
+            self.line, self.skipping, start = bytearray(), False, end + 1
+
+    def finish(self):
+        """Parse an unterminated final line; returns the normalized usage."""
+        if not self.broken and self.line and not self.skipping:
+            try:
+                self._event(bytes(self.line))
+            except Exception:
+                self.broken = True
+        self.line = bytearray()
+        return self.usage()
+
+    def _event(self, line):
+        if not line.strip():
+            return
         try:
             event = json.loads(line)
-        except (ValueError, RecursionError, TypeError):
-            return _unavailable('invalid_provider_usage', ['event[%d]' % number])
+        except (ValueError, RecursionError):
+            self.malformed += 1  # Counted only; the line is never logged or kept.
+            return
         if type(event) is not dict:
-            continue
-        msg = event.get('msg') if type(event.get('msg')) is dict else {}
-        if event.get('type') == 'turn.completed' and 'usage' in event:
+            self.malformed += 1
+            return
+        self.events += 1
+        kind = event.get('type')
+        if kind == 'turn.completed':
+            if len(self.snapshots) >= CODEX_MAX_USAGE_EVENTS:
+                self.overflow = True
+                return
+            if type(event.get('usage')) is not dict:
+                self.invalid.append('turn.completed.usage')
+                return
             counts, bad = _counts(event['usage'], _CODEX_USAGE, 'turn.completed.usage.')
-            invalid += bad
-            turns.append(counts)
-        elif msg.get('type') == 'token_count' and type(msg.get('info')) is dict:
-            counts, bad = _counts(msg['info'].get('total_token_usage'), _CODEX_USAGE, 'token_count.total_token_usage.')
-            invalid += bad
-            cumulative = counts
-    if invalid:
-        return _unavailable('invalid_provider_usage', sorted(set(invalid)))
-    summed = None
-    if turns:
-        summed = {k: (None if any(t[k] is None for t in turns) else sum(t[k] for t in turns)) for k, _ in _CODEX_USAGE}
-    if cumulative is not None and summed is not None and cumulative != summed:
-        return _unavailable('invalid_provider_usage', ['conflicting_cumulative_and_turn_totals'])
-    tokens = cumulative or summed
-    if tokens is None or all(v is None for v in tokens.values()):
-        return _unavailable('not_reported')
-    return dict(source='provider_reported', reason=None, tokens=dict(tokens, cache_write=None), turns=len(turns) or None,
-                reported_model=None, model_allocation='not_reported', model_breakdown=[], invalid_fields=[],
-                semantics=dict(basis='cumulative_snapshot' if cumulative is not None else 'sum_of_turns', input_includes_cache=True,
-                               coverage_scope='provider_session_unverified',
-                               fields=dict(input='input_tokens', output='output_tokens', cache_read='cached_input_tokens',
-                                           cache_write=None), authoritative_total=None))
+            self.invalid += bad
+            self.snapshots.append(counts)
+        elif kind == 'turn.failed':
+            self.failed_turns += 1
+
+    def usage(self):
+        if self.broken:
+            return _unavailable('usage_capture_failed')
+        if self.invalid or self.overflow:
+            return _unavailable('invalid_provider_usage', set(self.invalid) | ({'too_many_usage_events'} if self.overflow else set()))
+        if not self.snapshots:
+            return _unavailable('turn_failed_without_usage' if self.failed_turns else
+                                'not_reported' if self.events else 'no_jsonl_events')
+        latest = self.snapshots[-1]
+        for earlier in self.snapshots[:-1]:
+            if any(earlier[k] is not None and (latest[k] is None or earlier[k] > latest[k]) for k in latest):
+                return _unavailable('invalid_provider_usage', ['conflicting_cumulative_snapshots'])
+        if all(v is None for v in latest.values()):
+            return _unavailable('not_reported')
+        if all(v in (0, None) for v in latest.values()):
+            return _unavailable('unverified_zero_usage')  # The documented no-update default is not proof of zero.
+        tokens = {k: latest[k] for k in ('input', 'output', 'cache_read', 'cache_write')}
+        return dict(source='provider_reported', reason=None, tokens=tokens, turns=len(self.snapshots),
+                    output_detail=dict(reasoning_output=latest['reasoning_output']),
+                    reported_model=None, model_allocation='not_reported', model_breakdown=[], invalid_fields=[],
+                    semantics=dict(basis='cumulative_thread_total', input_includes_cache=True, cache_write_in_input=None,
+                                   output_includes_reasoning=True, coverage_scope='exec_thread_total_unverified',
+                                   fields={k: f for k, f in _CODEX_USAGE}, authoritative_total=None))
+
+
+def codex_usage(lines):
+    """Normalized usage from complete Codex JSONL lines (the CodexUsageStream contract, for whole inputs)."""
+    stream = CodexUsageStream()
+    for line in lines:
+        stream((line if type(line) is bytes else line.encode('utf-8')) + b'\n')
+    return stream.finish()
+
+
+def _finished_usage(stream):
+    """Telemetry never replaces the provider's own result or exception."""
+    try:
+        return stream.finish()
+    except Exception:
+        return _unavailable('usage_capture_failed')
 
 
 def _note_usage(usage, resolved_model):
@@ -910,7 +998,9 @@ class CodexStageExecutor:
             contract = result_schema(invocation.output_contract)
             _note_contract(contract, 'canonical', dict(mechanism='none', max_attempts=1, attempted=False, succeeded=None))
             schema.write_text(_json(contract),encoding='utf-8')
-            argv = ['--ask-for-approval','never','exec','--ephemeral','--ignore-user-config',
+            # --json: JSONL events on stdout, consumed only as bounded usage telemetry; the StageResult still comes
+            # solely from --output-last-message. A CLI without --json rejects the flag and fails as a provider exit.
+            argv = ['--ask-for-approval','never','exec','--json','--ephemeral','--ignore-user-config',
                     '--ignore-rules','--sandbox',
                     'workspace-write' if self.binding.capabilities is None or 'repo_write' in self.binding.capabilities else 'read-only',
                     '--skip-git-repo-check',
@@ -924,10 +1014,15 @@ class CodexStageExecutor:
                 _require(not any(',' in p for p in attached), 'image path cannot be represented')
                 argv.append('--image='+','.join(attached))  # `=` form: the list cannot absorb the stdin `-`.
             argv.append('-')
-            # `codex exec` without --json emits no usage events; this mode cannot report token usage.
-            _note_usage(_unavailable('not_reported_in_exec_mode'), self.resolved_model)
-            output = execute(self.executable,argv,self.config,
-                             input_bytes=render_invocation(invocation).encode('utf-8'),result_file=result)
+            _note_usage(_unavailable('no_jsonl_events'), self.resolved_model)  # Until the stream proves otherwise.
+            observed = CodexUsageStream()
+            try:
+                output = execute(self.executable,argv,self.config,
+                                 input_bytes=render_invocation(invocation).encode('utf-8'),result_file=result,
+                                 stdout_observer=observed)
+            finally:
+                # Also on a timeout, kill or I/O failure: only what the stream reported counts, never a reconstruction.
+                _note_usage(_finished_usage(observed), self.resolved_model)
             if output.returncode != 0:
                 # Codex has no supported failure envelope: stderr is its error channel. The
                 # final-result file is model output, so it is not read after a failed exit.

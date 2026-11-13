@@ -94,7 +94,26 @@ elif provider=='claude':
     if mode in ('malformed','oversized'): print(raw)
     else: print(json.dumps({**envelope_extra,'type':'result','subtype':'success','is_error':False,
                            'structured_output':result,'result':'operational prose must not be parsed'}))
-else:
+elif '--json' not in argv:
     print('progress: operational stdout is NOT the result')
     if mode!='missing_file': Path(argv[argv.index('--output-last-message')+1]).write_text(raw)
+else:
+    # `codex exec --json` (codex-rs exec JSONL): thread/turn/item events, then `turn.completed` with the thread's
+    # cumulative usage, all zeros when no token-usage update arrived (an offline fake consumes no tokens).
+    if os.environ.get('FAKE_CODEX_NO_JSON')=='1':  # A CLI without the mode rejects the flag.
+        print("error: unexpected argument '--json' found",file=sys.stderr); sys.exit(2)
+    if os.environ.get('FAKE_CODEX_JSONL'):
+        os.write(1,Path(os.environ['FAKE_CODEX_JSONL']).read_bytes())
+    else:
+        usage=json.loads(os.environ.get('FAKE_CODEX_USAGE') or 'null') or dict(
+            input_tokens=0,cached_input_tokens=0,cache_write_input_tokens=0,output_tokens=0,reasoning_output_tokens=0)
+        for event in ({'type':'thread.started','thread_id':'0199a213-81c0-7800-8aa1-bbab2a035a53'},{'type':'turn.started'},
+                      {'type':'item.completed','item':{'id':'item_0','type':'agent_message','text':raw}},
+                      {'type':'turn.completed','usage':usage}):
+            print(json.dumps(event),flush=True)
+    if mode!='missing_file' and os.environ.get('FAKE_CODEX_NO_RESULT')!='1':
+        Path(argv[argv.index('--output-last-message')+1]).write_text(raw)
+    if os.environ.get('FAKE_CODEX_SLEEP'): time.sleep(float(os.environ['FAKE_CODEX_SLEEP']))
+    print('operational stderr chatter',file=sys.stderr)
+    sys.exit(int(os.environ.get('FAKE_CODEX_EXIT','0')))
 print('operational stderr chatter',file=sys.stderr)

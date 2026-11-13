@@ -43,10 +43,21 @@ def _input_including_cache(tokens, semantics):
     if tokens['input'] is None or not semantics:
         return None
     if semantics.get('input_includes_cache') is True:
-        return tokens['input']
+        # Codex: cached reads are inside input; a reported nonzero cache write has an unverified relation to input.
+        return tokens['input'] if semantics.get('cache_write_in_input') is True or not tokens['cache_write'] else None
     if semantics.get('input_includes_cache') is False and tokens['cache_read'] is not None and tokens['cache_write'] is not None:
         return tokens['input'] + tokens['cache_read'] + tokens['cache_write']
     return None
+
+
+def _output_detail(reported, source):
+    """Provider-reported SUBSETS of output (Codex reasoning output); never an additional quantity. Additive, optional
+    field (2.6.1): records written by 2.6.0 lack it and read as unknown."""
+    detail = reported.get('output_detail') if source == 'provider_reported' else None
+    if type(detail) is not dict:
+        return None
+    value = detail.get('reasoning_output')
+    return dict(reasoning_output=value if type(value) is int and value >= 0 else None)
 
 
 def build(work_id, event, where, facts, observed_by, configured_model):
@@ -82,7 +93,8 @@ def build(work_id, event, where, facts, observed_by, configured_model):
         model_breakdown_total=reported.get('model_breakdown_total') if source == 'provider_reported' else None,
         coverage_scope=scope, completeness_reasons=reasons, source=source, reason=reported.get('reason'),
         invalid_fields=list(reported.get('invalid_fields') or [])[:32], tokens=tokens, semantics=semantics,
-        derived=dict(input_including_cache=_input_including_cache(tokens, semantics)), turns=reported.get('turns'),
+        derived=dict(input_including_cache=_input_including_cache(tokens, semantics)), output_detail=_output_detail(reported, source),
+        turns=reported.get('turns'),
         duration_ms=process.get('duration_ms'), completeness=completeness, observed_by=observed_by)
     return record
 
@@ -152,7 +164,7 @@ def read_usage(work_root, run=None, state=None, agent=None, provider=None, model
                           reason='verifier_command' if where.get('provider') == 'command' else
                           ('not_recorded' if recorded else 'not_recorded_by_this_runtime_version'),
                           invalid_fields=[], tokens={k: None for k in CATEGORIES}, semantics=None,
-                          derived=dict(input_including_cache=None), turns=None, duration_ms=None, completeness='unavailable',
+                          derived=dict(input_including_cache=None), output_detail=None, turns=None, duration_ms=None, completeness='unavailable',
                           observed_by=None, recorded=False)
         out.append(record)
     out.extend(stored.values())
@@ -195,11 +207,20 @@ def summarize(records):
                     if any(r['model_breakdown_total'][k] is not None for r in trees) else None,
                     invocations_reporting=len([r for r in trees if r['model_breakdown_total'][k] is not None])) for k in CATEGORIES}
     semantics = {r['semantics'].get('input_includes_cache') for r in reported if r.get('semantics')}
+    if len(semantics) > 1 and sums['input']['reported_sum'] is not None:
+        # Claude input excludes cache tokens, Codex input includes cached input: one summed "input" would be
+        # ambiguous. Withheld; compare `input_including_cache` or group by provider instead.
+        sums['input'] = dict(sums['input'], reported_sum=None, withheld='mixed_input_semantics')
+    reasoning = [r['output_detail']['reasoning_output'] for r in reported
+                 if (r.get('output_detail') or {}).get('reasoning_output') is not None]
     return dict(invocations=len(records), provider_invocations=len(provider), not_applicable=len(records)-len(provider),
                 usage_reported=len(reported), usage_partial=len([r for r in reported if r['completeness'] == 'partial']),
                 usage_unavailable=len(provider)-len(reported), tokens=sums,
                 input_including_cache=dict(reported_sum=sum(derived) if derived else None, invocations_reporting=len(derived)),
                 mixed_input_semantics=len(semantics) > 1,
+                # A subset of `tokens.output` (Codex reasoning output); never added to it.
+                output_detail=dict(reasoning_output=dict(reported_sum=sum(reasoning) if reasoning else None,
+                                                         invocations_reporting=len(reasoning))),
                 # How far `tokens` reaches: only `invocation_wide_reconciled` records are proven to cover every model call.
                 coverage_scope=dict(sorted(scopes.items())),
                 invocation_wide=bool(reported) and len(reported) == scopes.get('invocation_wide_reconciled', 0),

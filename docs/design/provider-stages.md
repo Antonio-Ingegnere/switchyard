@@ -115,8 +115,10 @@ Refreshing the table is a reviewed code change, made against new local CLI evide
 Codex uses exact `--model`, `-c model_reasoning_effort="low|medium|high"`, stdin `-`,
 `--output-schema <temporary schema>`, and `--output-last-message <temporary result>`.
 It retains ephemeral execution, ignored user config/rules, workspace-write sandbox and
-approval never. cwd and --cd agree. Only the final-result file is parsed; stdout/stderr
-are operational logs. See [noninteractive output](https://developers.openai.com/codex/noninteractive)
+approval never. cwd and --cd agree. Only the final-result file is parsed as the StageResult.
+Since 2.6.1, `--json` makes stdout a JSONL event stream. It is consumed only as bounded
+token-usage telemetry (see [usage](usage.md)) and is never a result channel. stderr stays
+an operational log. See [noninteractive output](https://developers.openai.com/codex/noninteractive)
 and [reasoning configuration](https://developers.openai.com/codex/config-reference).
 The canonical `codex` selector can be mapped to a locally configured concrete ID without
 editing workflow YAML. Exact model IDs also pass through with no redundant alias entry.

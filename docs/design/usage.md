@@ -22,7 +22,12 @@ execution, retries, budgets or a delivery's outcome. It includes no pricing, cos
 
 - `not_reported`: the provider reported no usage.
 - `no_result_envelope`: killed, timed out, or no final envelope was produced.
-- `not_reported_in_exec_mode`: Codex in its current execution mode.
+- `not_reported_in_exec_mode`: Codex before 2.6.1, which ran `codex exec` without `--json`.
+- Codex since 2.6.1:
+  - `no_jsonl_events`: no events arrived, for example when a CLI rejects `--json`.
+  - `turn_failed_without_usage`.
+  - `unverified_zero_usage`: an all-zero `turn.completed`, the CLI's default when no token update arrived.
+  - `usage_capture_failed`: a parser fault.
 - `not_launched`: the process never started.
 - `invalid_provider_usage`: see `invalid_fields`.
 - `not_captured`: recovery backfill.
@@ -36,15 +41,45 @@ values make the whole usage `unavailable` / `invalid_provider_usage`; nothing is
 
 | | Claude (`--output-format json`) | Codex (documented `exec --json` events) |
 |---|---|---|
-| Source | the ONE final result envelope's `usage` | `turn.completed.usage` (per turn) or `token_count.info.total_token_usage` (cumulative) |
-| Basis | `final_cumulative_result`: all turns of the process, including StructuredOutput repair; taken once, never summed | `sum_of_turns` or `cumulative_snapshot` (latest wins; `last_token_usage` is never added); both present must agree, else invalid |
+| Source | the ONE final result envelope's `usage` | `turn.completed.usage` from the `--json` stream |
+| Basis | `final_cumulative_result`: all turns of the process, including StructuredOutput repair; taken once, never summed | `cumulative_thread_total`: the exec thread's running total; the latest snapshot wins, never summed; an earlier snapshot larger than the latest is invalid |
 | input | `input_tokens`, **excluding** cache tokens | `input_tokens`, **including** `cached_input_tokens` |
 | cache_read | `cache_read_input_tokens` | `cached_input_tokens` |
-| cache_write | `cache_creation_input_tokens` | not reported (`null`) |
-| Scope | top-level `usage` = **top-level agent loop only** (excludes subagent, sidechain and auxiliary model calls) | provider session total; scope not documented (`provider_session_unverified`) |
+| cache_write | `cache_creation_input_tokens` | `cache_write_input_tokens`, only when reported (else `null`) |
+| output | `output_tokens` | `output_tokens`, **including** reasoning; `reasoning_output_tokens` → `output_detail.reasoning_output` (a subset, never added) |
+| Scope | top-level `usage` = **top-level agent loop only** (excludes subagent, sidechain and auxiliary model calls) | exec thread total; coverage of spawned agent threads not documented (`exec_thread_total_unverified`, so `partial`) |
 | Model | `modelUsage` (whole agent tree, per model): one consistent model gives `reported_model`. Several give `multi_model_breakdown`, kept per model and never added to totals. A mismatch gives `inconsistent_breakdown`; an unusable one gives `unknown`. | not reported |
 | Not recorded | `total_cost_usd` (billing contract unverified), session ids, payloads | — |
-| Wired today | yes | **no**: the adapter runs `codex exec` without `--json`, which emits no usage, so records say `not_reported_in_exec_mode`. Enabling it would change the provider invocation. |
+| Wired | 2.6.0 | 2.6.1 (`codex exec --json`) |
+
+### Codex JSONL capture (2.6.1)
+
+The adapter runs `codex exec --json`. All other flags are unchanged: sandbox, approvals, model, effort, capability
+switches, `--output-schema` and `--output-last-message`. The StageResult comes ONLY from the `--output-last-message`
+file, validated exactly as before. stdout is usage telemetry, and an `item.completed` agent message is never read as
+a result.
+
+The contract was verified against codex-cli 0.166.0 (codex-rs `exec`):
+
+- Event types are `thread.started`, `turn.started`, `turn.completed`, `turn.failed`, `item.*` and `error`.
+- `turn.completed.usage` holds `input_tokens`, `cached_input_tokens`, `cache_write_input_tokens`, `output_tokens` and
+  `reasoning_output_tokens`. It is built from the thread's last cumulative token total.
+- When no token-usage update arrived, the CLI fills it with zeros by default.
+- Exec runs one turn and shuts down on any terminal turn status.
+
+`CodexUsageStream`, a `stdout_observer` of the shared process transport, works as follows:
+
+- It splits lines across arbitrary chunk boundaries and buffers at most 64 KiB of one line.
+- A longer line is skipped while the stream keeps draining. An oversized line that starts as a `turn.completed` makes
+  the usage invalid (`oversized_turn_completed_event`).
+- Malformed and unknown events are counted only, never logged.
+- It keeps only the validated counters of up to 64 `turn.completed` snapshots.
+- Any internal error detaches it, which yields `usage_capture_failed`. The process, its draining, the StageResult,
+  retries and recovery are never affected.
+
+The usage is noted even when `execute` raises (timeout, signal, I/O), so only what the stream reported counts.
+Durable records receive counters only: never events, messages, reasoning, commands, tool output, file changes, thread
+ids or prompts.
 
 ### Coverage scope (Claude)
 
@@ -82,9 +117,13 @@ The contract also says an `error_during_execution` crash result "may carry zeroe
 therefore `unavailable` (`zeroed_crash_result`), never reported zeros.
 
 `derived.input_including_cache` is computed per record from its own semantics. For Claude it is input + cache read +
-cache write, and only when all three are known. For Codex it is the reported input. Category totals are never added
+cache write, and only when all three are known. For Codex it is the reported input, which already includes cached
+input; it is `null` when a nonzero cache write is reported, because that write's relation to input is undocumented. Category totals are never added
 across categories, because that would double-count cache tokens. When providers with different input semantics are
-aggregated, `mixed_input_semantics` is set.
+aggregated, `mixed_input_semantics` is set and the combined `input` sum is withheld (`withheld:
+"mixed_input_semantics"`). Use the provider groups or the derived line instead. `cache_read` counts the same
+quantity for both providers and stays summed. `output_detail.reasoning_output` is summed separately and never added
+to output.
 
 ## Record and storage
 
@@ -97,7 +136,8 @@ holds:
 - provider, `configured_model`, `resolved_model`, `reported_model`, `model_allocation` and `model_breakdown`;
 - source, reason and `invalid_fields`;
 - `tokens {input, output, cache_read, cache_write}`, `semantics` (basis, provider fields, cache inclusion),
-  `derived`, `turns` and `duration_ms`;
+  `derived`, `output_detail` (`reasoning_output`, a subset of output; optional, absent before 2.6.1), `turns` and
+  `duration_ms`;
 - `completeness`: `complete` (all four categories known), `partial`, or `unavailable`;
 - `observed_by`.
 
@@ -107,8 +147,8 @@ environment, credentials or text.
 
 ## Lifecycle
 
-- **Capture.** The adapter notes a pessimistic default before launch (`no_result_envelope`, or Codex's mode
-  limitation). Only Claude's final envelope replaces it.
+- **Capture.** The adapter notes a pessimistic default before launch (`no_result_envelope` or `no_jsonl_events`).
+  Only Claude's final envelope or Codex's observed stream replaces it.
 - **Write.** The diagnostics writer's lifecycle writes the record (on invocation finish, on its interruption
   record, and on recovery backfill), independently failure-isolated. A failed write never changes the delivery,
   charges an attempt or triggers a retry.

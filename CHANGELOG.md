@@ -16,6 +16,35 @@
   record schemas such as the trace and diagnostic `schema_version`. Each changes only when its own format changes,
   never because the package version changed.
 
+## 2.6.1
+
+### Added: Codex token usage (ECONOMICS-001B, #2)
+
+`switchyard work usage` now reports Codex usage. No new command or option.
+
+- **Invocation.** Codex runs as `codex exec --json`; every other flag is unchanged. The StageResult still comes only
+  from `--output-last-message`. The JSONL stdout is usage telemetry and is never parsed as a result. A Codex CLI
+  without `--json` rejects the flag and fails through the existing provider-exit handling, with no fallback launch.
+- **Bounded capture.** A streaming parser handles arbitrary chunk boundaries and keeps only the validated counters
+  of each `turn.completed` event. At most 64 KiB of one line is buffered; longer lines are skipped while the stream
+  keeps draining. No event, message, command, tool output, file change or thread id is kept or persisted.
+- **Semantics.** `turn.completed.usage` is the exec thread's cumulative total. Several snapshots are never summed:
+  the latest wins, and an earlier one that exceeds it makes the usage invalid. Input includes cached input. Reasoning
+  output is a subset of output, recorded separately in `output_detail.reasoning_output` and never added. Cache
+  writes are kept only when reported.
+- **No invented zeros.** An all-zero `turn.completed` is the CLI's default when no token update arrived, so it is
+  `unavailable` (`unverified_zero_usage`). These are also `unavailable`, never zero: a failed turn without usage
+  (`turn_failed_without_usage`), a run with no events (`no_jsonl_events`), and a parser fault
+  (`usage_capture_failed`), which never changes the delivery.
+- **Scope.** Codex records are labelled `exec_thread_total_unverified` and are `partial`, because the coverage of
+  spawned agent threads is not documented.
+- **Mixed providers.** When Claude and Codex both report, the combined input total is withheld
+  (`withheld: mixed_input_semantics`) because the two input conventions differ. Input is shown per provider, and the
+  derived "input incl. cache" is still summed.
+
+Usage record schema stays 1. `output_detail` is a new optional field, and records written by 2.6.0 read it as
+unknown. No work, trace or diagnostic schema change.
+
 ## 2.6.0
 
 ### Added: provider token usage (ECONOMICS-001, #2)

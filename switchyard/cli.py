@@ -405,36 +405,54 @@ def _usage_text(records, recorded, summary):
         return 'No invocations recorded.' if recorded else 'Usage unavailable: not recorded by this runtime version'
     from .usage import attributed_model
     runs = {r['run_id'] for r in records}
-    rows = [('STATE', 'PROVIDER/MODEL', 'INV', 'INPUT', 'OUTPUT', 'CACHE READ', 'CACHE WRITE', 'USAGE')]
+    rows = [('STATE', 'PROVIDER/MODEL', 'INV', 'INPUT', 'OUTPUT', 'REASONING*', 'CACHE READ', 'CACHE WRITE', 'USAGE')]
     for r in records:
         model = attributed_model(r) if r['source'] == 'provider_reported' else r['configured_model']
         label = r['provider'] if r['provider'] == 'command' or not model else '%s/%s' % (r['provider'] or '-', model)
         t = r['tokens']
+        reasoning = (r.get('output_detail') or {}).get('reasoning_output')
         rows.append((_cell(r['state'] or '-', 24), _cell(label, 40), _short(r['invocation_id']) if len(runs) == 1 else r['invocation_id'],
-                     _count_cell(t['input']), _count_cell(t['output']), _count_cell(t['cache_read']), _count_cell(t['cache_write']),
-                     r['source'] if r['source'] != 'unavailable' else 'unavailable (%s)' % r['reason']))
-    widths = [max(len(row[i]) for row in rows) for i in range(7)]
-    align = [str.ljust]*3 + [str.rjust]*4
+                     _count_cell(t['input']), _count_cell(t['output']), _count_cell(reasoning), _count_cell(t['cache_read']),
+                     _count_cell(t['cache_write']), r['source'] if r['source'] != 'unavailable' else 'unavailable (%s)' % r['reason']))
+    widths = [max(len(row[i]) for row in rows) for i in range(8)]
+    align = [str.ljust]*3 + [str.rjust]*5
     lines = ['WORK  %s' % (next((r['work_id'] for r in records if r['work_id']), None) or '-'), '']
-    lines += ['  '.join(align[i](row[i], widths[i]) for i in range(7)) + '  ' + row[7] for row in rows]
+    lines += ['  '.join(align[i](row[i], widths[i]) for i in range(8)) + '  ' + row[8] for row in rows]
+    lines.append('* reasoning output is a subset of output (Codex), never added to it')
+    providers = {r['provider'] for r in records if r['source'] == 'provider_reported'}
+    if 'codex' in providers:
+        lines.append('  codex: input includes cached input (cache read)')
+    if 'claude' in providers:
+        lines.append('  claude: input excludes cache read and cache write')
     totals = summary['totals']
     def total(item):
+        if item.get('withheld') == 'mixed_input_semantics':
+            return 'not combined: providers differ in whether input includes cache (see per provider / derived line)'
         return 'unavailable' if item['reported_sum'] is None else '{:,}  ({} invocation(s) reporting)'.format(
             item['reported_sum'], item['invocations_reporting'])
     lines += ['', 'Reported totals (known provider-reported values only):']
     scopes = totals['coverage_scope']
-    narrow = sum(n for scope, n in scopes.items() if scope != 'invocation_wide_reconciled')
+    narrow = sum(n for scope, n in scopes.items() if scope.startswith('top_level_agent_loop'))
+    thread = scopes.get('exec_thread_total_unverified', 0)
     if narrow:
         lines.append('  scope: top-level agent loop as reported for %d of %d reporting invocation(s); may exclude subagent,'
                      % (narrow, totals['usage_reported']))
         lines.append('         sidechain and auxiliary model calls; not complete invocation-wide consumption')
-    elif totals['usage_reported']:
+    if thread:
+        lines.append('  scope: Codex exec thread cumulative total for %d of %d reporting invocation(s); coverage of spawned'
+                     % (thread, totals['usage_reported']))
+        lines.append('         agent threads is not documented; not proven invocation-wide consumption')
+    if not narrow and not thread and totals['usage_reported']:
         lines.append('  scope: invocation-wide (top-level usage reconciled with the provider\'s per-model breakdown)')
     for key, label in (('input', 'Input'), ('output', 'Output'), ('cache_read', 'Cache read'), ('cache_write', 'Cache write')):
         lines.append('  %-30s %s' % (label+':', total(totals['tokens'][key])))
+    lines.append('  %-30s %s' % ('Reasoning output (in output):', total(totals['output_detail']['reasoning_output'])))
     lines.append('  %-30s %s' % ('Input incl. cache (derived):', total(totals['input_including_cache'])))
     if totals['mixed_input_semantics']:
         lines.append('  note: providers differ in whether input includes cached tokens; compare the derived line')
+        for group in summary['groups']['provider']:
+            if group['tokens']['input']['reported_sum'] is not None:
+                lines.append('  %-30s %s' % ('Input (%s):' % group['key'], total(group['tokens']['input'])))
     tree = totals['agent_tree_by_model']
     if narrow and any(item['reported_sum'] is not None for item in tree.values()):
         lines += ['', 'Per-model breakdown, whole agent tree incl. subagents (separate; not added to the totals above):']

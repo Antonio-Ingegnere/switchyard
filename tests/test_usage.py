@@ -13,7 +13,7 @@ from unittest.mock import patch
 from switchyard import usage
 from switchyard.cli import main
 from switchyard.diagnostics import Diagnostics, read_diagnostics
-from switchyard.provider_stages import claude_usage, codex_usage
+from switchyard.provider_stages import claude_usage
 from switchyard.recovery import _operations, _store, qa_fix_v2_work, resume_v2_work
 from switchyard.usage import aggregate, read_usage
 
@@ -73,28 +73,6 @@ class ClaudeNormalizationTests(unittest.TestCase):
         self.assertEqual(usage.attributed_model(dict(model_allocation='not_reported', configured_model='sonnet')), 'sonnet')
 
 
-class CodexNormalizationTests(unittest.TestCase):
-    # 5, 6, 10
-    def test_turn_and_cumulative_events_are_not_interchangeable(self):
-        turn = lambda i, c, o: json.dumps(dict(type='turn.completed', usage=dict(input_tokens=i, cached_input_tokens=c, output_tokens=o)))
-        total = lambda i, c, o: json.dumps(dict(msg=dict(type='token_count', info=dict(
-            total_token_usage=dict(input_tokens=i, cached_input_tokens=c, output_tokens=o),
-            last_token_usage=dict(input_tokens=1, cached_input_tokens=1, output_tokens=1)))))
-        u = codex_usage([turn(100, 40, 10), json.dumps(dict(type='item.completed')), turn(300, 200, 30)])
-        self.assertEqual((u['tokens'], u['semantics']['basis'], u['turns']),
-                         (dict(input=400, cache_read=240, output=40, cache_write=None), 'sum_of_turns', 2))
-        self.assertTrue(u['semantics']['input_includes_cache'])
-        self.assertEqual(usage._input_including_cache(u['tokens'], u['semantics']), 400)  # Cache is inside input: no double count.
-        u = codex_usage([total(100, 40, 10), total(400, 240, 40)])  # Cumulative snapshots: latest wins, never summed.
-        self.assertEqual((u['tokens']['input'], u['semantics']['basis']), (400, 'cumulative_snapshot'))
-        self.assertEqual(codex_usage([turn(100, 40, 10), total(100, 40, 10)])['source'], 'provider_reported')
-        conflict = codex_usage([turn(100, 40, 10), total(999, 40, 10)])
-        self.assertEqual((conflict['source'], conflict['invalid_fields']), ('unavailable', ['conflicting_cumulative_and_turn_totals']))
-        self.assertEqual(codex_usage(['{broken'])['reason'], 'invalid_provider_usage')
-        self.assertEqual(codex_usage([turn(-5, 0, 1)])['invalid_fields'], ['turn.completed.usage.input_tokens'])
-        self.assertEqual(codex_usage([])['reason'], 'not_reported')
-
-
 class UsageBase(DiagnosticsBase):
     def with_usage(self, config=None, **extra):
         config = config or self.config
@@ -124,7 +102,7 @@ class DeliveryUsageTests(UsageBase):
         self.deliver(self.with_usage())
         records = self.records()
         self.assertEqual([(r['state'], r['provider'], r['source'], r['reason']) for r in records],
-                         [('SPECIFY', 'codex', 'unavailable', 'not_reported_in_exec_mode'), ('IMPLEMENT', 'claude', 'provider_reported', None),
+                         [('SPECIFY', 'codex', 'unavailable', 'unverified_zero_usage'), ('IMPLEMENT', 'claude', 'provider_reported', None),
                           ('VERIFY', 'command', 'not_applicable', 'verifier_command')])
         claude = records[1]
         self.assertEqual((claude['tokens'], claude['configured_model'], claude['resolved_model'], claude['reported_model'], claude['turns']),
@@ -142,8 +120,8 @@ class DeliveryUsageTests(UsageBase):
         code, text = self.run_cli()
         lines = text.splitlines()
         self.assertEqual(lines[2].split()[:4], ['STATE', 'PROVIDER/MODEL', 'INV', 'INPUT'])
-        self.assertIn('claude/claude-sonnet-4-6  I2   1,200     340       8,000          500  provider_reported', text)
-        self.assertIn('codex/offline             I1       —       —           —            —  unavailable (not_reported_in_exec_mode)', text)
+        self.assertIn('claude/claude-sonnet-4-6  I2   1,200     340           —       8,000          500  provider_reported', text)
+        self.assertIn('codex/offline             I1       —       —           —           —            —  unavailable (unverified_zero_usage)', text)
         for line in ('  Input:                         1,200  (1 invocation(s) reporting)', '  Provider invocations: 2',
                      '  Usage unavailable:    1', '  Not applicable:       1 (command verifiers)', 'Estimated cost: not calculated',
                      'Billed cost:    unavailable', '  Totals cover 1 of 2 provider invocations.'):
