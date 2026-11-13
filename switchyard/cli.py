@@ -83,6 +83,10 @@ def _parser():
     logs.add_argument('--invocation', help='only this invocation (full id, or I<n>), followed by its diagnostic')
     logs.add_argument('--last', type=_count, help='only the last N matching events')
     logs.add_argument('--json', action='store_true', help='print the timeline entries as a JSON array')
+    bundle = actions.add_parser('debug-bundle', allow_abbrev=False)
+    bundle.add_argument('work_root')
+    bundle.add_argument('--output', required=True, help='new ZIP file outside the work (never overwritten)')
+    bundle.add_argument('--json', action='store_true', help='print the archive path, counts, hashes and completeness')
     watch = actions.add_parser('watch', allow_abbrev=False)
     watch.add_argument('work_root')
     watch.add_argument('--interval', type=float, default=1.0, help='poll interval in seconds (0.2 to 60; default 1)')
@@ -445,6 +449,20 @@ def _work_command(args):
                 from .diagnostics import read_diagnostics
                 records = [r for r in read_diagnostics(args.work_root, args.invocation) if r.get('recorded')]
                 print('\n' + ('\n\n'.join(_diagnostic_detail(r) for r in records) if records else 'Diagnostic unavailable'))
+            return 0
+        if args.action == 'debug-bundle':
+            from .bundle import create_bundle
+            summary = create_bundle(args.work_root, args.output)
+            if args.json:
+                print(json.dumps(summary, ensure_ascii=True, indent=2, sort_keys=True))
+            else:
+                c, k = summary['counts'], summary['completeness']
+                print('\n'.join(['Debug bundle created: %s' % _safe_display(summary['path'], 1024), '',
+                                 'Trace events:        %d' % c['events'], 'Diagnostics:         %d' % c['diagnostics'],
+                                 'Trace completeness:  %s' % k['trace'], 'Diagnostics:         %s' % k['diagnostics'],
+                                 'History:             %s' % k['history'], 'Issues:              %d' % sum(summary['issue_counts'].values()),
+                                 '', 'Source code:         excluded', 'Provider payloads:   excluded',
+                                 'Secrets:             not intentionally included', 'SHA-256:             %s' % summary['sha256']]))
             return 0
         if args.action == 'watch':
             from . import logs

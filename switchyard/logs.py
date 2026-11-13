@@ -15,6 +15,8 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
+import stat
 import time
 
 MIN_INTERVAL, MAX_INTERVAL = 0.2, 60.0
@@ -59,20 +61,51 @@ class TraceCursor:
 
 
 # --- Pure status reader ---------------------------------------------------------------------------------------
-def _latest(store, name):
-    """The latest `name` record of a work store, read from its manifest; None when absent or unverifiable."""
-    manifest = Path(store)/'manifest.jsonl'
-    if not manifest.is_file():
+MAX_STORE_RECORD = 8 << 20
+_STORE_PATH = re.compile(r'(?:[A-Za-z0-9_][A-Za-z0-9_.-]*/)*[A-Za-z0-9_][A-Za-z0-9_.-]*')
+
+
+def read_regular(path, limit):
+    """Bytes of a regular, non-symlinked file of at most `limit` bytes; None otherwise (never follows a link)."""
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0))
+    except OSError:
         return None
+    with os.fdopen(fd, 'rb') as stream:
+        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            return None
+        data = stream.read(limit+1)
+    return data if len(data) <= limit else None
+
+
+def latest_record(store, name):
+    """(manifest record, value) of the latest `name` record of a work store; (None, None) when absent or
+    unverifiable. Only manifest-relative paths inside the store, regular files, no symlinks, bounded size."""
+    data = read_regular(Path(store)/'manifest.jsonl', MAX_STORE_RECORD) if not Path(store).is_symlink() else None
+    if data is None:
+        return None, None
     latest = None
-    for line in manifest.read_text(encoding='utf-8').splitlines():
+    for line in data.decode('utf-8').splitlines():
         record = json.loads(line) if line else {}
         if record.get('kind') == 'artifact' and record.get('name') == name:
             latest = record
-    if latest is None:
-        return None
-    data = (Path(store)/latest['path']).read_bytes()
-    return json.loads(data) if hashlib.sha256(data).hexdigest() == latest['sha256'] else None
+    path = latest.get('path') if latest else None
+    if type(path) is not str or not _STORE_PATH.fullmatch(path) or '..' in path.split('/'):
+        return None, None
+    current = Path(store)
+    for part in path.split('/')[:-1]:
+        current = current/part
+        if current.is_symlink():
+            return None, None
+    data = read_regular(Path(store)/path, MAX_STORE_RECORD)
+    if data is None or hashlib.sha256(data).hexdigest() != latest.get('sha256'):
+        return None, None
+    return latest, json.loads(data)
+
+
+def _latest(store, name):
+    """The latest `name` record of a work store, read from its manifest; None when absent or unverifiable."""
+    return latest_record(store, name)[1]
 
 
 _ACTIVE = ('provisioning', 'running', 'restoring', 'suspending')  # A controller operation is in progress.
