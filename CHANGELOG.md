@@ -16,6 +16,42 @@
   record schemas such as the trace and diagnostic `schema_version`. Each changes only when its own format changes,
   never because the package version changed.
 
+## 2.8.0
+
+### Added: historical cost analytics (ECONOMICS-003, #2)
+
+`switchyard costs summary (--works-root DIR | --work WORK ...) [--from] [--to] [--group-by
+day|week|month|work|state|agent|provider|model|status] [--provider] [--model] [--agent] [--state] [--status] [--last N]
+[--json]` aggregates known estimated spend across works. It reads only the frozen ECONOMICS-004 cost assessments.
+See `docs/design/cost-analytics.md`.
+
+- **Scope.** The caller declares it: the immediate child work roots of `--works-root` (no recursion; symlinks and
+  non-work entries are skipped and counted) and/or explicit `--work` roots. Works are identified by the durable work
+  identity recorded in the baseline, never by directory name.
+- **Integrity.** Every cost record is validated before it counts: bounded size, schema, identity, exact line
+  arithmetic, and its verified pricing snapshot and frozen rates. Damaged, unsupported-schema, mismatched and
+  conflicting records are reported and their amounts excluded. A work claimed twice, or an invocation present in
+  several works, is never resolved by choosing one copy.
+- **Unit of accounting.** One canonical invocation, counted at most once. Retries and failed invocations count;
+  recovery-written assessments are not counted twice; adopted products add nothing.
+- **Time.** Each invocation is dated by its own end event in `events.jsonl` (UTC). Grouping is by day, ISO week
+  (Monday start, ISO week-year) or month. `--from`/`--to` are inclusive dates over a half-open UTC interval. An
+  undated invocation counts all-time, in no period, and leaves a dated report incomplete.
+- **Dimensions.** One per request. Model attribution follows the frozen charge lines, so helper-model spend stays
+  with its own model, and an invocation naming no model goes to `unallocated`. Works are ranked by known estimated
+  spend with `--last`.
+- **Lifecycle.** The current recorded delivery status (a live, read-only classification) is reported separately from
+  each invocation's recorded outcome (succeeded, failed — split into infrastructure and semantic — or unknown).
+- **Coverage.** Complete only when every provider invocation in scope is completely priced and no issue or limit
+  applies. Otherwise the text shows a "Known estimated subtotal" with "Complete spend coverage: no"; unknown is never
+  zero.
+- **Money.** Exact `Decimal` sums of unrounded amounts, decimal strings in JSON (report schema 1, independent of
+  record schemas), display rounded half-even to 4 places. Group subtotals reconcile with the subtotal.
+- **Read-only and bounded.** No lock, recovery, backfill, catalog load, repricing, provider, Git or network, and no
+  persistent index. Works, invocations, log size, record size and retained issues are bounded; reaching a bound is
+  reported.
+- No work, trace, usage, pricing or cost record schema changed.
+
 ## 2.7.0
 
 ### Added: pricing registry and cost attribution (ECONOMICS-004, #2)

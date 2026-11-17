@@ -154,3 +154,6 @@ A line is `complete` only when everything is priced at an invocation-wide scope 
 The text output labels a partial sum "known subtotal; not a proven total".
 
 The read path is read-only: no catalog load, network, Git, backfill or writes.
+
+Historical analytics across works (`switchyard costs summary`) read these same frozen assessments: see
+[cost analytics](cost-analytics.md) (2.8.0).

@@ -29,6 +29,13 @@ def _count(value):
     return number
 
 
+def _positive(value):
+    number = _count(value)
+    if number < 1:
+        raise argparse.ArgumentTypeError('must be a positive integer')
+    return number
+
+
 def _parser():
     parser = argparse.ArgumentParser(prog='switchyard', allow_abbrev=False)
     commands = parser.add_subparsers(dest='command', required=True)
@@ -130,6 +137,28 @@ def _parser():
             operation.add_argument('--config')
             operation.add_argument('--claude-executable')
             operation.add_argument('--codex-executable')
+    costs_command = commands.add_parser('costs', allow_abbrev=False, help='historical cost analytics across works (read-only)')
+    cost_actions = costs_command.add_subparsers(dest='action', required=True)
+    summary = cost_actions.add_parser(
+        'summary', allow_abbrev=False,
+        help='known estimated list-price spend of provider-reported usage across works, from frozen cost assessments',
+        description='Reads only the frozen cost assessments of the declared works; never reprices, recovers or writes. '
+                    'Dates are UTC calendar dates of each invocation\'s end event; --from and --to are both inclusive.')
+    summary.add_argument('--works-root', metavar='DIR', help='directory whose immediate child directories are work roots '
+                         '(not recursive; symlinks and non-work entries are skipped)')
+    summary.add_argument('--work', action='append', default=[], dest='works', metavar='WORK',
+                         help='an explicit work root (repeatable; combinable with --works-root)')
+    summary.add_argument('--from', dest='date_from', metavar='YYYY-MM-DD', help='first UTC date included (inclusive)')
+    summary.add_argument('--to', dest='date_to', metavar='YYYY-MM-DD', help='last UTC date included (inclusive)')
+    summary.add_argument('--group-by', default='state', choices=('day', 'week', 'month', 'work', 'state', 'agent', 'provider',
+                                                                 'model', 'status'),
+                         help='one grouping dimension (default: state); week = ISO week (Monday start, ISO week-year)')
+    for flag, text in (('--provider', 'provider'), ('--model', 'model (charge lines attributed to it)'), ('--agent', 'agent'),
+                       ('--state', '(logical or runtime) state'), ('--status', 'current recorded work status, e.g. ACCEPTED')):
+        summary.add_argument(flag, help='only this '+text)
+    summary.add_argument('--last', type=_positive, help='time groupings: the N most recent periods; other groupings: the top N '
+                         'by known estimated spend')
+    summary.add_argument('--json', action='store_true', help='print the report as JSON (schema 1; amounts as decimal strings)')
     config = commands.add_parser('config', allow_abbrev=False)
     config.add_argument('action', choices=('validate', 'show'))
     config.add_argument('config_file', nargs='?', default='.switchyard/config.yaml')
@@ -150,6 +179,8 @@ def main(argv=None) -> int:
     args = _parser().parse_args(argv)
     if args.command == 'work':
         return _work_command(args)
+    if args.command == 'costs':
+        return _costs_command(args)
     if args.command == 'config':
         from .simple_config import load_simple_config
         try:
@@ -520,6 +551,99 @@ def _costs_text(records, recorded, summary):
         lines.append('Reasons: ' + ', '.join('%s %d' % item for item in t['reasons'].items()))
     lines += ['Currency: USD list prices, frozen per invocation (display rounded half-even to 4 places)',
               'Billed cost:                   unavailable']
+    return '\n'.join(line.rstrip() for line in lines)
+
+
+def _costs_command(args):
+    from .analytics import ScopeError, report
+    if args.works_root is None and not args.works:
+        print('switchyard: declare the works to read: --works-root DIR and/or --work WORK', file=sys.stderr)
+        return 2
+    try:
+        result = report(args.works_root, args.works, args.date_from, args.date_to, args.group_by, args.provider, args.model,
+                        args.agent, args.state, args.status, args.last)
+    except (ScopeError, OSError) as exc:
+        print('switchyard: '+_safe_display(str(exc), 512), file=sys.stderr)
+        return 2
+    print(json.dumps(result, ensure_ascii=True, indent=2, sort_keys=True) if args.json else _cost_summary_text(result))
+    return 0
+
+
+_GROUP_TITLES = dict(day='By day (UTC)', week='By ISO week (UTC, Monday start)', month='By month (UTC)', work='By work',
+                     state='By state', agent='By agent', provider='By provider', model='By model (charge lines)',
+                     status='By current work status')
+
+
+def _cost_summary_text(r):
+    """Known amounts only; unknown is '—', never zero; an incomplete scope never shows a total."""
+    from .economics import display
+    c, p = r['coverage'], r['period']
+    period = 'all time (UTC)' if p['all_time'] else '%s .. %s inclusive (UTC; by invocation end)' % (p['from'] or 'beginning', p['to'] or 'now')
+    complete = c['complete']
+    lines = ['SWITCHYARD COST SUMMARY', 'Period: '+period]
+    filters = ', '.join('%s=%s' % (k, _safe_display(v, 128)) for k, v in sorted(r['filters'].items()) if v is not None)
+    if filters:
+        lines.append('Filters: '+filters)
+    lines += ['', '%-26s%s%s' % ('Known estimated spend:' if complete else 'Known estimated subtotal:', display(r['known_estimated_subtotal']),
+                               '' if r['known_estimated_subtotal'] is None else '  (exact %s %s)' % (r['known_estimated_subtotal'], r['currency'])),
+              'Complete spend coverage:  %s' % ('yes' if complete else 'no'),
+              'Billed spend:             unavailable', '',
+              'Works observed:          %d%s' % (c['works_observed'], ' (%d with issues)' % c['works_with_issues'] if c['works_with_issues'] else ''),
+              'Provider invocations:    %d' % c['provider_invocations'],
+              '  priced:                %d (complete %d, partial %d)' % (c['priced'], c['completely_priced'], c['partial']),
+              '  unpriced/unknown:      %d' % (c['provider_invocations'] - c['priced'])]
+    for key, label in (('price_unavailable', 'price unavailable'), ('usage_unavailable', 'usage unavailable'),
+                       ('pricing_not_captured', 'pricing snapshot missing'), ('not_recorded', 'cost not recorded'),
+                       ('invalid', 'malformed or mismatched'), ('conflicting', 'conflicting identity'),
+                       ('provider_unknown', 'provider unknown')):
+        if c[key]:
+            lines.append('    %-20s%d' % (label+':', c[key]))
+    if c['not_applicable']:
+        lines.append('Command verifiers:       %d (no provider-token charge)' % c['not_applicable'])
+    if c['date_unknown']:
+        lines.append('Date unknown:            %d provider invocation(s)%s' % (
+            c['date_unknown'], ' (in the all-time subtotal, in no period)' if p['all_time'] else ' (excluded from this period)'))
+    groups = r['groups']
+    if r['ranking']:
+        title = 'Top %d %ss by known estimated spend (not billed or fully observed cost)' % (len(groups), r['group_by'])
+    else:
+        title = _GROUP_TITLES[r['group_by']] + ('' if r['last'] is None else ' (last %d)' % r['last'])
+    lines += ['', title+':']
+    if not groups:
+        lines.append('  (none)')
+    rows = [('KEY', 'KNOWN', 'INV', 'PRICED', 'COVERAGE') + (('STATUS',) if r['group_by'] == 'work' else ())]
+    for g in groups:
+        rows.append((_cell(g['key'], 48), display(g['known_estimated_subtotal']) + ('' if g['complete_coverage'] else '*'),
+                     str(g['provider_invocations']), str(g['priced']), 'complete' if g['complete_coverage'] else 'partial')
+                    + ((_cell(g['status'] or '-', 24),) if r['group_by'] == 'work' else ()))
+    if groups:
+        widths = [max(len(row[i]) for row in rows) for i in range(len(rows[0]))]
+        align = [str.ljust, str.rjust, str.rjust, str.rjust, str.ljust, str.ljust]
+        lines += ['  ' + '  '.join(align[i](row[i], widths[i]) for i in range(len(row))) for row in rows]
+    rec = r['reconciliation']
+    if rec['groups_omitted']:
+        lines.append('  (%d more group(s) not shown: %s known; all groups: %s)' % (
+            rec['groups_omitted'], display(rec['omitted_groups_known_sum']), display(rec['groups_known_sum'])))
+    for title, items, key in (('By current delivery status (live; may change later)', r['delivery_outcomes'], 'outcome'),
+                              ('By invocation outcome', r['invocation_outcomes'], 'outcome')):
+        if items:
+            lines += ['', title+':']
+            for item in items:
+                extra = ' (works %d)' % item['works'] if 'works' in item else ''
+                if item[key] == 'failed':
+                    extra = ' (infrastructure %d, semantic %d)' % (item['infrastructure_failures'], item['semantic_failures'])
+                lines.append('  %-20s %s%s  %d invocation(s)%s' % (item[key], display(item['known_estimated_subtotal']),
+                                                                   '' if item['complete_coverage'] else '*', item['provider_invocations'], extra))
+    if r['issues_total']:
+        lines += ['', 'Issues (%d%s): amounts they affect are excluded' % (r['issues_total'], ', truncated' if r['issues_truncated'] else '')]
+        for i in r['issues'][:20]:
+            lines.append('  %s: %s%s' % (_cell(i['work'] or i['work_id'] or '-', 48), i['code'],
+                                         ' (%s)' % _cell(i['invocation_id'], 80) if i['invocation_id'] else ''))
+    lines += ['', 'Coverage: %s' % ('COMPLETE' if complete else 'PARTIAL')]
+    if not complete:
+        lines.append('Known subtotal is not proven total spend.')
+    lines += ['* known subtotal of a partially covered group; unknown provider spending is not zero.',
+              'Currency: USD list prices frozen per invocation (display rounded half-even to 4 places).']
     return '\n'.join(line.rstrip() for line in lines)
 
 
