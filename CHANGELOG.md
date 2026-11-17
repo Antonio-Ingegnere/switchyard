@@ -16,6 +16,30 @@
   record schemas such as the trace and diagnostic `schema_version`. Each changes only when its own format changes,
   never because the package version changed.
 
+## 2.9.0
+
+### Added: continuity savings (ECONOMICS-006, #2)
+
+`switchyard work savings WORK [--json] [--source-details] [--invocations]` and `switchyard.savings.report()` explain
+the economics of an adopted or transplanted work from existing immutable records. See
+`docs/design/continuity-savings.md`.
+
+- **Three separate amounts.** Historical source expenditure (the original work's frozen cost), actual new
+  expenditure (the derived work's own frozen cost), and estimated avoided regeneration, a `historical_execution_proxy`.
+  The proxy is a counterfactual comparison, never billed or proven savings, and it is not additive across derived
+  works.
+- **Provenance.** Reuse facts come from the derived work's own adoption record and stay available without the source.
+  Each source hop is verified before its economics are read: baseline digest, work identity, artifact manifest
+  identity and bytes, no symlinks. Transitive chains (W1 → W2 → W3) are followed only through verified hops with
+  matching implementation digests, so the original producer is found.
+- **Attribution.** A source invocation counts toward the proxy only when its live trace `artifact_refs` name the exact
+  reused artifact. Failed attempts, earlier QA rounds and superseded products are reported as associated but
+  unattributed. Invocations are deduplicated per (producing work, invocation).
+- **Coverage.** Existing terms, with evidence flags that keep proven reuse apart from missing or partial economics.
+  A missing source gives `source_economics_unavailable`, never a zero. A non-derived work is `not_applicable`.
+- **Read-only.** No writes, locks, recovery, backfill, catalog load, repricing, provider, Git or network. Bounded
+  hops, works, invocations and record sizes. Report schema 1 is independent; no record schema changed.
+
 ## 2.8.0
 
 ### Added: historical cost analytics (ECONOMICS-003, #2)

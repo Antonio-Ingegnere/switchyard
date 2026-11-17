@@ -105,6 +105,12 @@ def _parser():
                        ('--invocation', 'invocation (full id, or I<n>)')):
         costs.add_argument(flag, help='only this '+text)
     costs.add_argument('--json', action='store_true', help='print assessments, totals, groups and coverage as JSON (amounts as decimal strings)')
+    savings = actions.add_parser('savings', allow_abbrev=False,
+                                 help='continuity economics of an adopted or transplanted work, from frozen records (read-only)')
+    savings.add_argument('work_root')
+    savings.add_argument('--source-details', action='store_true', help='show each verified derivation hop and producing work')
+    savings.add_argument('--invocations', action='store_true', help='list the source invocations behind each reused product')
+    savings.add_argument('--json', action='store_true', help='print the report as JSON (schema 1; amounts as decimal strings)')
     bundle = actions.add_parser('debug-bundle', allow_abbrev=False)
     bundle.add_argument('work_root')
     bundle.add_argument('--output', required=True, help='new ZIP file outside the work (never overwritten)')
@@ -647,6 +653,74 @@ def _cost_summary_text(r):
     return '\n'.join(line.rstrip() for line in lines)
 
 
+def _savings_text(r, details=False, invocations=False):
+    """Three separate amounts (historical source, actual new, counterfactual proxy); unknown is '—', never zero."""
+    from .economics import display
+    def money(label, m):
+        return ['  %-21s%s' % ('Known cost:', display(m['known_estimated_cost'])), '  %-21s%s' % ('Coverage:', m['coverage'])] \
+            if m else ['  %-21s%s' % (label, 'unavailable')]
+    title = 'WORK %s' % _cell(r['work_id'] or r['directory'], 80)
+    if not r['derived']:
+        lines = [title, '', 'No continuity derivation recorded.',
+                 'Avoided regeneration: not applicable (this work did not reuse a previous product).', '', 'New work:']
+        return '\n'.join(lines + money('', r['actual_new_work']) + ['', 'Billed savings:        not claimed'])
+    d, u, h, a = r['derivation'], r['reuse'], r['historical_source'], r['avoided_regeneration']
+    lines = [title + ' — %s from %s' % ('transplanted' if d['intent'] == 'transplant' else 'adopted', _cell(d['source_work_id'] or '-', 80)), '',
+             'Derivation:', '  %-21s%s' % ('Intent:', d['intent']), '  %-21s%s' % ('Source:', _cell(d['source_work_id'] or '-', 80)),
+             '  %-21s%s' % ('Origin:', ', '.join(_cell(p, 80) for p in h['producers']) or 'unknown'),
+             '  %-21s%s' % ('Base changed:', 'yes (%s -> %s)' % (d['source_base_sha'][:12], d['target_base_sha'][:12])
+                            if d['base_changed'] else 'no')]
+    if not d['complete']:
+        lines.append('  %-21s%s' % ('Derivation:', 'incomplete (%s)' % (d['phase'] or 'unknown')))
+    lines += ['', 'Reuse:']
+    for x in u['decisions']:
+        p = x['provenance'] or {}
+        note = ''
+        if x['action'] == 'REUSED':
+            note = {'artifact_refs': 'produced in %s' % _cell(p.get('producer_work_id') or '-', 64),
+                    'not_applicable': 'durable input; no model execution'}.get(p.get('attribution'), p.get('reason') or 'unattributed')
+        lines.append('  %-20s%-12s%s' % (_cell(x['stage'], 20), x['action'], note))
+        if invocations and p.get('attributable'):
+            lines += ['    attributable: %s' % _cell(i, 96) for i in p['attributable']]
+        if invocations and p.get('associated'):
+            lines += ['    associated, unattributed: %s' % _cell(i, 96) for i in p['associated']]
+    lines.append('  stages reused %d, rerun %d, invalidated %d' % (u['reused_stages'], u['rerun_stages'], u['invalidated_stages']))
+    lines.append('  %-21s%s' % ('Reuse provenance:', 'available' + (', source not fully verified' if 'reuse_provenance_incomplete'
+                                                                     in r['evidence']['flags'] else '')))
+    if details:
+        lines += ['', 'Source provenance:']
+        for x in u['decisions']:
+            for hop in (x['provenance'] or {}).get('hops') or []:
+                lines.append('  %-20s%s %s%s' % (_cell(x['stage'], 20), _cell(hop['work_id'] or hop['directory'] or '-', 64),
+                                                'verified' if hop['verified'] else 'NOT VERIFIED',
+                                                '' if hop['verified'] else ' (%s)' % hop['reason']))
+    lines += ['', 'Historical source expenditure (original work; not spent by this work):']
+    lines += ['  %-21s%s  (%s)' % ('Attributable:', display(h['attributable_to_reused_products']['known_estimated_cost']),
+                                   h['attributable_to_reused_products']['coverage']),
+              '  %-21s%s  (%s)' % ('Stage total:', display(h['stage_associated']['known_estimated_cost']), h['stage_associated']['coverage'])]
+    if h['associated_but_unattributed']:
+        lines.append('  %-21s%s  (%d invocation(s): earlier attempts or superseded products)' % (
+            'Unattributed:', display(h['associated_but_unattributed']['known_estimated_cost']), h['unattributed_invocations']))
+    lines += ['', 'New work expenditure (this work):'] + money('', r['actual_new_work'])
+    for s in r['actual_new_work']['by_state']:
+        lines.append('    %-19s%s  (%s)' % (_cell(s['state'], 19), display(s['known_estimated_cost']), s['coverage']))
+    lines += ['', 'Estimated avoided regeneration:',
+              '  %-21s%s' % ('Historical proxy:', display(a['known_estimated_cost'])),
+              '  %-21s%s' % ('Coverage:', a['coverage']),
+              '  %-21s%s' % ('Basis:', 'historical source execution (historical_execution_proxy)')]
+    if a['reasons']:
+        lines.append('  %-21s%s' % ('Reason:', ', '.join(a['reasons'])))
+    if d['base_changed']:
+        lines.append('  %-21s%s' % ('Note:', 'transplanted deterministically to a new base; regeneration there may differ'))
+    lines += ['  %-21s%s' % ('Actual savings:', 'not established'), '  %-21s%s' % ('Billed savings:', 'not claimed'),
+              '', 'Evidence: ' + ', '.join(r['evidence']['flags'])]
+    if r['issues']:
+        lines.append('Issues: ' + ', '.join('%s %s' % (_cell(i['stage'] or '-', 24), i['code']) for i in r['issues'][:10]))
+    lines.append('A counterfactual comparison with regeneration, not proof of money saved; not additive across works.')
+    return '\n'.join(line.rstrip() for line in lines)
+
+
+
 def _pr_text(o, created_by=None):
     lines = ['Pull request %s #%d%s%s' % (o['state'], o['number'], ' (draft)' if o['draft'] else '',
                                          ' (%s)' % created_by if created_by else ''),
@@ -729,6 +803,16 @@ def _work_command(args):
                                       records=records, **summary), ensure_ascii=True, indent=2, sort_keys=True))
             else:
                 print(_costs_text(records, recorded, summary))
+            return 0
+        if args.action == 'savings':
+            from .savings import SavingsError, report
+            try:
+                result = report(args.work_root)
+            except SavingsError as exc:
+                print('switchyard: '+_safe_display(str(exc), 512), file=sys.stderr)
+                return 2
+            print(json.dumps(result, ensure_ascii=True, indent=2, sort_keys=True) if args.json else
+                  _savings_text(result, args.source_details, args.invocations))
             return 0
         if args.action == 'debug-bundle':
             from .bundle import create_bundle
