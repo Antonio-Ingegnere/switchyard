@@ -16,6 +16,51 @@
   record schemas such as the trace and diagnostic `schema_version`. Each changes only when its own format changes,
   never because the package version changed.
 
+## 2.7.0
+
+### Added: pricing registry and cost attribution (ECONOMICS-004, #2)
+
+`switchyard work costs WORK [--json] [--run] [--state] [--agent] [--provider] [--model] [--invocation]` reports the
+estimated list-price cost of each invocation's provider-reported usage. It never reports a billed or invoiced amount
+(`billed_cost` is unavailable).
+
+- **Registry.** A checked-in, versioned catalog (`switchyard/pricing_catalog.json`, revision `2026-11-13.1`) holds
+  decimal-string rates in USD per million tokens. Every entry has a source URL, a verification date, an
+  applicability window and a basis.
+  - Built-in rates were verified on 2026-11-13 against the official Anthropic and OpenAI pricing pages.
+  - An optional explicit user catalog (`SWITCHYARD_PRICING_CATALOG`) replaces built-in entries per model.
+  - Unknown models, aliases and per-request context-tiered models (Claude Haiku 5.5, gpt-5.4, gpt-5.5, GPT-6) are
+    never priced.
+  - There is no remote pricing service.
+- **Frozen snapshots.** Each ended invocation gets an immutable pricing snapshot (`economics/pricing/`) holding the
+  exact rates, provenance, registry hashes and selection basis, plus the frozen chargeable quantities (including
+  Claude's 5m/1h cache-write split), content-addressed by `snapshot_id`. It also gets an
+  immutable cost assessment (`economics/costs/`) that references the snapshot. A later catalog change never alters an
+  existing assessment.
+- **Recovery.** Recovery assesses the snapshot's frozen quantities at its frozen rates, the same inputs as the
+  uninterrupted assessment, so a crash between the two publications never changes the cost. It never reads the
+  current catalog. Without a
+  contemporaneous snapshot, the cost is `pricing_not_captured`, never today's price. Works created before 2.7.0 read
+  as `historical_pricing_not_captured`.
+- **Claude.** Input, cache read, 5m and 1h cache writes, and output are priced separately.
+  - Cache writes are priced only with the reported `cache_creation` TTL split, otherwise left unpriced.
+  - A reconciled single model is priced from the top level.
+  - Any other breakdown is priced per model across the whole agent tree, at each model's own rate. It is never
+    added to top-level usage.
+  - Top-level usage without a breakdown stays `partial`.
+- **Codex.** Uncached input is input minus cached input, and only when the counters are consistent. Reasoning is
+  priced once, inside output.
+- **Money.** Exact `Decimal` arithmetic with inexact operations trapped. Amounts are unrounded decimal strings in
+  records and JSON; display rounds half-even to 4 places.
+- **Coverage.** Each record is `complete`, `partial`, `unavailable` or `not_applicable`, with reasons and assumptions.
+  Totals are a known subtotal, with counts of priced, partial, price-unavailable, usage-unavailable and
+  scope-incomplete invocations. `invocation_wide_proven` is true only when everything is complete.
+- **Isolation.** Writes are failure-isolated from delivery. Reads are read-only (no catalog load, network or
+  backfill). Usage records are unchanged.
+
+Pricing snapshot and cost assessment records start at schema 1. Work, trace, diagnostic and usage schemas are
+unchanged.
+
 ## 2.6.1
 
 ### Added: Codex token usage (ECONOMICS-001B, #2)

@@ -1,0 +1,40 @@
+{
+  "catalog": "switchyard-pricing",
+  "schema_version": 1,
+  "revision": "2026-11-13.1",
+  "currency": "USD",
+  "unit": "per_million_tokens",
+  "notes": "Standard-tier list prices copied from the official provider pricing pages on the verification date. Rates are decimal strings. 'per_request_context_tiered' entries are known models whose price depends on each request's prompt length, which aggregate usage cannot prove; they are never priced. Editing this file is a reviewed code change with a new revision.",
+  "entries": [
+    {"provider": "claude", "model": "claude-fable-5-2", "pricing": "flat", "rates": {"input": "8", "cache_write_5m": "10", "cache_write_1h": "16", "cache_read": "0.20", "output": "40"}},
+    {"provider": "claude", "model": "claude-fable-5-1", "pricing": "flat", "rates": {"input": "10", "cache_write_5m": "12.50", "cache_write_1h": "20", "cache_read": "0.25", "output": "50"}},
+    {"provider": "claude", "model": "claude-opus-5-5", "pricing": "flat", "rates": {"input": "4", "cache_write_5m": "5", "cache_write_1h": "8", "cache_read": "0.20", "output": "20"}},
+    {"provider": "claude", "model": "claude-sonnet-5-5", "pricing": "flat", "rates": {"input": "2", "cache_write_5m": "2.50", "cache_write_1h": "4", "cache_read": "0.10", "output": "10"}},
+    {"provider": "claude", "model": "claude-haiku-5-5", "pricing": "per_request_context_tiered"},
+    {"provider": "codex", "model": "gpt-5", "pricing": "flat", "rates": {"input": "1.25", "cache_read": "0.125", "output": "10.00"}, "cache_write": "not_billed"},
+    {"provider": "codex", "model": "gpt-5.1", "pricing": "flat", "rates": {"input": "1.25", "cache_read": "0.125", "output": "10.00"}, "cache_write": "not_billed"},
+    {"provider": "codex", "model": "gpt-5.2", "pricing": "flat", "rates": {"input": "1.75", "cache_read": "0.175", "output": "14.00"}, "cache_write": "not_billed"},
+    {"provider": "codex", "model": "gpt-5.3-codex", "pricing": "flat", "rates": {"input": "1.75", "cache_read": "0.175", "output": "14.00"}, "cache_write": "not_billed"},
+    {"provider": "codex", "model": "gpt-5-mini", "pricing": "flat", "rates": {"input": "0.25", "cache_read": "0.025", "output": "2.00"}, "cache_write": "not_billed"},
+    {"provider": "codex", "model": "gpt-5-nano", "pricing": "flat", "rates": {"input": "0.05", "cache_read": "0.005", "output": "0.40"}, "cache_write": "not_billed"},
+    {"provider": "codex", "model": "gpt-5.4-mini", "pricing": "flat", "rates": {"input": "0.75", "cache_read": "0.075", "output": "4.50"}, "cache_write": "not_billed"},
+    {"provider": "codex", "model": "gpt-5.4-nano", "pricing": "flat", "rates": {"input": "0.20", "cache_read": "0.02", "output": "1.25"}, "cache_write": "not_billed"},
+    {"provider": "codex", "model": "gpt-5.4", "pricing": "per_request_context_tiered"},
+    {"provider": "codex", "model": "gpt-5.5", "pricing": "per_request_context_tiered"},
+    {"provider": "codex", "model": "gpt-6-sol", "pricing": "per_request_context_tiered"},
+    {"provider": "codex", "model": "gpt-6.1-sol", "pricing": "per_request_context_tiered"}
+  ],
+  "defaults": {
+    "effective_from": "2026-11-13",
+    "effective_until": null,
+    "verified": "2026-11-13",
+    "sources": {
+      "claude": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "codex": "https://developers.openai.com/api/docs/pricing"
+    },
+    "basis": {
+      "claude": "anthropic_api_global_standard",
+      "codex": "openai_api_standard_tier"
+    }
+  }
+}

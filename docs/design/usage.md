@@ -175,5 +175,5 @@ Reads never write, backfill or recover. A work without a usage store, from a run
 
 ## Out of scope
 
-Pricing, cost estimates, billing reconciliation, token budgets and spend limits, routing by price, and debug-bundle
-export of usage.
+Billing reconciliation, token budgets and spend limits, routing by price, and debug-bundle export of usage. Estimated
+list-price costs are a separate layer: see [economics](economics.md) (2.7.0).

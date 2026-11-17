@@ -169,7 +169,24 @@ class Diagnostics:
         try:
             from . import usage
             _, _, where = self._where(event.state)
-            usage.write(self.root, usage.build(self.work_id, event, where, facts, observed_by, where['model']))
+            record = usage.build(self.work_id, event, where, facts, observed_by, where['model'])
+        except Exception:
+            self.failures += 1
+            return
+        try:
+            usage.write(self.root, record)
+        except Exception:
+            self.failures += 1
+        self._costs(event, record, (getattr(facts, 'usage', None) or {}).get('pricing_detail'), observed_by)
+
+    def _costs(self, event, record, pricing_detail, observed_by):
+        """Frozen pricing snapshot and cost assessment (ECONOMICS-004), isolated from usage and from execution."""
+        try:
+            from . import economics
+            if observed_by == 'recovery_backfill':
+                economics.backfill(self.root, self.work_id, record)
+            else:
+                economics.publish(self.root, self.work_id, event, record, pricing_detail, observed_by)
         except Exception:
             self.failures += 1
 
@@ -227,6 +244,33 @@ class Diagnostics:
                     continue
                 self._usage(event, None, 'recovery_backfill')
                 existing.add(usage.file_name(event.invocation_id))
+        except Exception:
+            self.failures += 1
+        self._backfill_costs(history, operations)
+
+    def _backfill_costs(self, history, operations):
+        """Missing assessments for ended invocations that have a durable usage record: computed only from that record
+        and the invocation's own frozen pricing snapshot (`pricing_not_captured` without one). Never today's prices."""
+        try:
+            from . import economics, usage
+            directory = economics._directory(self.root, 'costs')
+            existing = set(os.listdir(directory)) if directory.is_dir() else set()
+            started = set()
+            for event in history:
+                if event.kind == 'invocation_started':
+                    started.add(event.invocation_id)
+                    continue
+                if event.kind not in ('invocation_finished', 'run_error') or event.invocation_id not in started:
+                    continue
+                if economics.file_name(event.invocation_id) in existing:
+                    continue
+                try:
+                    record = json.loads((usage._directory(self.root)/usage.file_name(event.invocation_id)).read_text(encoding='utf-8'))
+                except (OSError, ValueError):
+                    continue
+                if type(record) is dict and record.get('invocation_id') == event.invocation_id:
+                    self._costs(event, record, None, 'recovery_backfill')
+                    existing.add(economics.file_name(event.invocation_id))
         except Exception:
             self.failures += 1
 

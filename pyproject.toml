@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "switchyard-runtime"
-version = "2.6.1"
+version = "2.7.0"
 description = "Deterministic bounded delivery and human QA control plane"
 requires-python = ">=3.10"
 dependencies = ["PyYAML>=6.0.3,<7"]
@@ -20,3 +20,4 @@ include = ["switchyard*", "runtime*", "examples*"]
 
 [tool.setuptools.package-data]
 "examples" = ["**/*.yaml", "**/*.json", "**/*.md"]
+"switchyard" = ["pricing_catalog.json"]

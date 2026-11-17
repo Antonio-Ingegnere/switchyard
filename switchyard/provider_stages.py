@@ -691,6 +691,24 @@ def _unavailable(reason, invalid=()):
     return dict(source='unavailable', reason=reason, invalid_fields=sorted(invalid))
 
 
+_MODIFIER = re.compile(r'[a-z0-9_]{1,32}')
+
+
+def _claude_pricing_detail(usage, cache_write):
+    """Price-relevant facts of the top-level `usage` (ECONOMICS-004), held in memory for the cost assessment only and
+    never copied into the usage record. The documented `cache_creation` TTL split counts only when it sums exactly to
+    `cache_creation_input_tokens`; the tier/speed/geo modifiers only as short code-like labels."""
+    split = usage.get('cache_creation')
+    five, hour = (split.get('ephemeral_5m_input_tokens'), split.get('ephemeral_1h_input_tokens')) if type(split) is dict else (None, None)
+    valid = all(type(v) is int and 0 <= v <= MAX_TOKENS for v in (five, hour)) and cache_write is not None and five + hour == cache_write
+    detail = dict(cache_write_5m=five if valid else None, cache_write_1h=hour if valid else None,
+                  cache_write_split='reported' if valid else ('inconsistent' if split is not None else 'not_reported'))
+    for key in ('service_tier', 'speed', 'inference_geo'):
+        value = usage.get(key)
+        detail[key] = value if type(value) is str and _MODIFIER.fullmatch(value) else (None if value is None else 'invalid')
+    return detail
+
+
 def claude_usage(stdout):
     """Normalized usage from the ONE final Claude CLI result envelope (`--output-format json`).
 
@@ -756,7 +774,7 @@ def claude_usage(stdout):
         scope = 'top_level_agent_loop_unverified'
     return dict(source='provider_reported', reason=None, tokens=tokens, turns=turns, reported_model=reported,
                 model_allocation=allocation, model_breakdown=breakdown, model_breakdown_total=breakdown_total,
-                invalid_fields=[],
+                invalid_fields=[], pricing_detail=_claude_pricing_detail(envelope['usage'], tokens['cache_write']),
                 semantics=dict(basis='final_cumulative_result', input_includes_cache=False, coverage_scope=scope,
                                fields={k: 'usage.'+f for k, f in _CLAUDE_USAGE}, authoritative_total=None))
 

@@ -90,6 +90,14 @@ def _parser():
                        ('--invocation', 'invocation (full id, or I<n>)')):
         usage.add_argument(flag, help='only this '+text)
     usage.add_argument('--json', action='store_true', help='print records, totals, groups and coverage as JSON')
+    costs = actions.add_parser('costs', allow_abbrev=False,
+                               help='estimated list-price cost of provider-reported usage, from frozen pricing snapshots')
+    costs.add_argument('work_root')
+    for flag, text in (('--run', 'run id'), ('--state', '(logical or runtime) state'), ('--agent', 'agent'),
+                       ('--provider', 'provider'), ('--model', 'configured or priced model'),
+                       ('--invocation', 'invocation (full id, or I<n>)')):
+        costs.add_argument(flag, help='only this '+text)
+    costs.add_argument('--json', action='store_true', help='print assessments, totals, groups and coverage as JSON (amounts as decimal strings)')
     bundle = actions.add_parser('debug-bundle', allow_abbrev=False)
     bundle.add_argument('work_root')
     bundle.add_argument('--output', required=True, help='new ZIP file outside the work (never overwritten)')
@@ -469,6 +477,52 @@ def _usage_text(records, recorded, summary):
     return '\n'.join(line.rstrip() for line in lines)
 
 
+def _costs_text(records, recorded, summary):
+    """Estimated list-price cost of reported usage only; every limitation stays visible, nothing is a billed total."""
+    if not records:
+        return 'No invocations recorded.' if recorded else 'Costs unavailable: historical pricing was not captured'
+    from .economics import display
+    runs = {r['run_id'] for r in records}
+    rows = [('STATE', 'PROVIDER/MODEL', 'INV', 'INPUT', 'OUTPUT', 'EST. COST', 'STATUS', 'SNAPSHOT')]
+    for r in records:
+        models = list(dict.fromkeys([l['model'] for l in r['lines']] + [u['model'] for u in r['unpriced'] if u['model']]))
+        model = models[0] if len(models) == 1 else ('%d models' % len(models) if models else r['configured_model'])
+        label = r['provider'] if r['provider'] == 'command' or not model else '%s/%s' % (r['provider'] or '-', model)
+        tokens = {}
+        for item in r['lines'] + r['unpriced']:
+            key = 'output' if item['category'] == 'output' else 'input'
+            if item['tokens'] is not None:
+                tokens[key] = tokens.get(key, 0) + item['tokens']
+        status = r['status'] if r['status'] in ('complete', 'not_applicable') else '%s (%s)' % (r['status'], ', '.join(r['reasons'][:2]))
+        rows.append((_cell(r['state'] or '-', 24), _cell(label, 40), _short(r['invocation_id']) if len(runs) == 1 else r['invocation_id'],
+                     _count_cell(tokens.get('input')), _count_cell(tokens.get('output')), display(r['estimated_amount']),
+                     status, (r['pricing_snapshot_id'] or '-')[:12] + ('' if r['snapshot_integrity'] in (None, 'verified') else ' (ALTERED)')))
+    widths = [max(len(row[i]) for row in rows) for i in range(6)]
+    align = [str.ljust]*3 + [str.rjust]*3
+    lines = ['WORK  %s' % (next((r['work_id'] for r in records if r['work_id']), None) or '-'), '']
+    lines += ['  '.join(align[i](row[i], widths[i]) for i in range(6)) + '  ' + row[6] + '  ' + row[7] for row in rows]
+    lines.append('INPUT/OUTPUT: billed quantities (Claude input excludes cache; Codex uncached input + cached input)')
+    t = summary['totals']
+    lines += ['', 'Estimated reported-usage cost: %s%s' % (display(t['estimated_reported_usage_cost']),
+                                                         '' if t['invocation_wide_proven'] else '  (known subtotal; not a proven total)'),
+              'Invocation-wide coverage:      %s' % ('proven' if t['invocation_wide_proven'] else 'partial'),
+              'Provider invocations:          %d' % t['provider_invocations'],
+              '  with reported usage:         %d' % t['with_usage'],
+              '  priced (some amount known):  %d' % t['priced'],
+              '  complete / partial:          %d / %d' % (t['complete'], t['partial']),
+              '  unpriced or unavailable:     %d' % t['unavailable'],
+              '  price unavailable:           %d' % t['price_unavailable'],
+              '  usage unavailable:           %d' % t['usage_unavailable'],
+              '  usage scope incomplete:      %d' % t['scope_incomplete']]
+    if t['not_applicable']:
+        lines.append('Not applicable:                %d (command verifiers)' % t['not_applicable'])
+    if t['reasons']:
+        lines.append('Reasons: ' + ', '.join('%s %d' % item for item in t['reasons'].items()))
+    lines += ['Currency: USD list prices, frozen per invocation (display rounded half-even to 4 places)',
+              'Billed cost:                   unavailable']
+    return '\n'.join(line.rstrip() for line in lines)
+
+
 def _pr_text(o, created_by=None):
     lines = ['Pull request %s #%d%s%s' % (o['state'], o['number'], ' (draft)' if o['draft'] else '',
                                          ' (%s)' % created_by if created_by else ''),
@@ -541,6 +595,16 @@ def _work_command(args):
                                  ensure_ascii=True, indent=2, sort_keys=True))
             else:
                 print(_usage_text(records, recorded, summary))
+            return 0
+        if args.action == 'costs':
+            from .economics import aggregate, read_costs
+            records, recorded = read_costs(args.work_root, args.run, args.state, args.agent, args.provider, args.model, args.invocation)
+            summary = aggregate(records)
+            if args.json:
+                print(json.dumps(dict(work_id=next((r['work_id'] for r in records if r['work_id']), None), costs_recorded=recorded,
+                                      records=records, **summary), ensure_ascii=True, indent=2, sort_keys=True))
+            else:
+                print(_costs_text(records, recorded, summary))
             return 0
         if args.action == 'debug-bundle':
             from .bundle import create_bundle
