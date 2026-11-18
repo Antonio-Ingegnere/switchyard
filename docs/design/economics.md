@@ -160,3 +160,7 @@ Historical analytics across works (`switchyard costs summary`) read these same f
 
 The economics of reuse in adopted and transplanted works (`switchyard work savings`) are described in
 [continuity savings](continuity-savings.md) (2.9.0).
+
+The composition and approximate size of the prompts Switchyard supplies (`switchyard work prompt-estimate`) are
+described in [prompt composition](prompt-composition.md) (2.10.0). They are byte measurements and heuristic token
+estimates, never usage, cost or billing.

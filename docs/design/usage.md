@@ -16,7 +16,7 @@ execution, retries, budgets or a delivery's outcome. It includes no pricing, cos
 | `provider_reported` | Counts the provider reported for this invocation, normalized below. A failed invocation may still report usage. |
 | `unavailable` | No trustworthy usage. The `reason` says why. |
 | `not_applicable` | A command verifier, which consumes no model tokens. |
-| `estimated` | Reserved for ECONOMICS-002. Never written. |
+| `estimated` | Reserved. Never written: ECONOMICS-002 prompt estimates are separate records ([prompt composition](prompt-composition.md)) and never become usage. |
 
 `unavailable` reasons:
 

@@ -164,8 +164,18 @@ class Diagnostics:
         except Exception:
             self.failures += 1
 
+    def _prompt(self, event, facts, observed_by):
+        """The invocation's prompt-composition record (ECONOMICS-002), isolated from every other record and execution."""
+        try:
+            from . import prompt_estimate
+            _, _, where = self._where(event.state)
+            prompt_estimate.write(self.root, prompt_estimate.build(self.work_id, event, where, facts, observed_by))
+        except Exception:
+            self.failures += 1
+
     def _usage(self, event, facts, observed_by):
         """The invocation's usage record (ECONOMICS-001), isolated from the diagnostic and from execution."""
+        self._prompt(event, facts, observed_by)
         try:
             from . import usage
             _, _, where = self._where(event.state)
@@ -222,6 +232,31 @@ class Diagnostics:
         except Exception:
             self.failures += 1
         self._backfill_usage(history, operations)
+        self._backfill_prompts(history, operations)
+
+    def _backfill_prompts(self, history, operations):
+        """Missing composition records for invocations with a proven end, as `capture_unavailable`/`not_captured`: the
+        measurement lived only in the controller, so nothing is re-rendered from today's artifacts."""
+        try:
+            from . import prompt_estimate
+            directory = prompt_estimate._directory(self.root)
+            existing = set(os.listdir(directory)) if directory.is_dir() else set()
+            started = set()
+            for event in history:
+                if event.kind == 'invocation_started':
+                    started.add(event.invocation_id)
+                    continue
+                if event.kind not in ('invocation_finished', 'run_error') or event.invocation_id not in started:
+                    continue
+                if prompt_estimate.file_name(event.invocation_id) in existing:
+                    continue
+                if event.kind == 'run_error' and not any(op.get('phase') == 'interrupted' and op.get('invocation_id') == event.invocation_id
+                                                         for op in operations):
+                    continue
+                self._prompt(event, None, 'recovery_backfill')
+                existing.add(prompt_estimate.file_name(event.invocation_id))
+        except Exception:
+            self.failures += 1
 
     def _backfill_usage(self, history, operations):
         """Missing usage records for invocations with a proven end, as `unavailable`/`not_captured`: no durable

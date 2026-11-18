@@ -111,6 +111,15 @@ def _parser():
     savings.add_argument('--source-details', action='store_true', help='show each verified derivation hop and producing work')
     savings.add_argument('--invocations', action='store_true', help='list the source invocations behind each reused product')
     savings.add_argument('--json', action='store_true', help='print the report as JSON (schema 1; amounts as decimal strings)')
+    estimate = actions.add_parser('prompt-estimate', allow_abbrev=False,
+                                  help='composition and approximate size of the prompts Switchyard supplied (read-only)')
+    estimate.add_argument('work_root')
+    for flag, text in (('--run', 'run id'), ('--state', '(logical or runtime) state'), ('--agent', 'agent'),
+                       ('--provider', 'provider'), ('--model', 'configured or resolved model'),
+                       ('--invocation', 'invocation (full id, or I<n>)')):
+        estimate.add_argument(flag, help='only this '+text)
+    estimate.add_argument('--summary', action='store_true', help='only the summary across the selected invocations')
+    estimate.add_argument('--json', action='store_true', help='print the report as JSON (schema 1; counts are integers or null)')
     bundle = actions.add_parser('debug-bundle', allow_abbrev=False)
     bundle.add_argument('work_root')
     bundle.add_argument('--output', required=True, help='new ZIP file outside the work (never overwritten)')
@@ -514,6 +523,91 @@ def _usage_text(records, recorded, summary):
     return '\n'.join(line.rstrip() for line in lines)
 
 
+_PROMPT_LABELS = dict(runtime_instructions='Runtime instructions', execution_binding='Execution binding', request='Request',
+                      microspec='MicroSpec', durable_artifacts_other='Other durable artifacts',
+                      human_clarification='Human clarification', qa_feedback='QA feedback', qa_evidence_text='QA evidence text',
+                      qa_evidence_markers='QA evidence markers', resolved_sources='Resolved sources',
+                      previous_handoff='Previous handoff', verifier_diagnostics='Verifier diagnostics',
+                      execution_capabilities='Execution capabilities', output_contract='Output contract',
+                      serialization_overhead='Serialization overhead')
+
+
+def _share(part, whole):
+    return '%.1f%%' % (100.0*part/whole) if whole else '—'
+
+
+def _component_rows(components, total, extra=None):
+    header = ('Component', 'UTF-8 bytes', 'Approx. tokens', 'Share') + ((extra[0],) if extra else ())
+    rows = [header] + [(_PROMPT_LABELS.get(c['category'], c['category']), _count_cell(c['utf8_bytes']),
+                        _count_cell(c['estimated_tokens']), _share(c['utf8_bytes'], total)) + ((str(c[extra[1]]),) if extra else ())
+                       for c in components]
+    widths = [max(len(row[i]) for row in rows) for i in range(len(header))]
+    return ['  '+'  '.join([row[0].ljust(widths[0])]+[row[i].rjust(widths[i]) for i in range(1, len(row))]) for row in rows]
+
+
+def _prompt_estimate_text(result, summary_only=False):
+    """Exact bytes first; token figures are labelled approximate; nothing unknown is shown as zero; no cost."""
+    records, s = result['invocations'], result['summary']
+    if not records:
+        return 'No invocations recorded.'
+    runs = {r['run_id'] for r in records}
+    lines = ['WORK  %s' % _safe_display(result['work_id'] or '-', 128)]
+    for r in [] if summary_only else records:
+        who = _short(r['invocation_id']) if len(runs) == 1 else r['invocation_id']
+        model = r['resolved_model'] or r['configured_model']
+        lines += ['', 'Invocation: %s  %s / %s' % (who, _cell(r['state'] or '-', 24),
+                                                  r['provider'] if r['provider'] == 'command' or not model else '%s %s' % (r['provider'], _cell(model, 48)))]
+        if r['capture_status'] == 'not_applicable':
+            lines.append('  Prompt composition: not applicable (%s)' % r['reason'])
+            continue
+        if r['exact'] is None:
+            lines.append('  Prompt composition: unavailable (%s)' % r['reason'])
+            continue
+        lines.append('  Capture: %s%s' % (r['capture_status'], ' (observed by %s)' % r['observed_by'] if r['observed_by'] else ''))
+        if r['components']:
+            lines += [''] + _component_rows(r['components'], r['exact']['utf8_bytes'])
+        else:
+            lines.append('  Components: unavailable (%s)' % r['reason'])
+        lines += ['', '  Prompt bytes:          %s' % _count_cell(r['exact']['utf8_bytes']),
+                  '  Characters:            %s' % _count_cell(r['exact']['characters']),
+                  '  Approximate tokens:    %s' % (_count_cell(r['estimate']['tokens']) if r['estimate'] else 'unavailable')]
+        change = r.get('change_from_previous_same_state')
+        if change is not None:
+            lines.append('  Change from previous %s invocation: %s bytes' % (_cell(r['state'] or '-', 24), '{:+,}'.format(change['utf8_bytes_delta'])))
+        t = r['transport'] or {}
+        if t.get('native_output_schema_bytes') is not None:
+            lines.append('  Native output schema:  %s bytes (%s; not part of the prompt)' % (
+                _count_cell(t['native_output_schema_bytes']), t['native_output_schema_channel'].replace('_', ' ')))
+        if t.get('image_attachment_count'):
+            lines.append('  Image attachments:     %d (%s bytes of files; never converted to text tokens)' % (
+                t['image_attachment_count'], _count_cell(t['image_attachment_total_bytes'])))
+    lines += ['', 'Summary across %d invocation(s) (repeated submissions; not unique information):' % s['invocations'],
+              '  Measured:              %d of %d provider invocation(s)' % (s['measured'], s['provider_invocations']),
+              '  Prompt bytes:          %s' % ('unavailable' if s['utf8_bytes'] is None else _count_cell(s['utf8_bytes'])),
+              '  Approximate tokens:    %s' % ('unavailable' if s['estimated_tokens'] is None else '%s  (%d invocation(s))' % (
+                  _count_cell(s['estimated_tokens']), s['estimated_tokens_invocations']))]
+    if s['by_category']:
+        lines += [''] + _component_rows(s['by_category'], sum(c['utf8_bytes'] for c in s['by_category']), ('Invocations', 'invocations'))
+        lines += ['', '  Largest components:    %s' % ', '.join(_PROMPT_LABELS[c] for c in s['largest_components'][:3])]
+    unavailable = s['capture_status']['capture_unavailable']
+    if unavailable:
+        reasons = sorted({r['reason'] for r in records if r['capture_status'] == 'capture_unavailable'})
+        lines.append('  Unavailable:           %d (%s)' % (unavailable, ', '.join(reasons)))
+    if s['capture_status']['not_applicable']:
+        lines.append('  Not applicable:        %d (command verifiers)' % s['capture_status']['not_applicable'])
+    if s['image_attachments']['count']:
+        lines.append('  Image attachments:     %d (%s bytes of files; not in the prompt totals)' % (
+            s['image_attachments']['count'], _count_cell(s['image_attachments']['total_bytes'])))
+    e = result['estimation']
+    lines += ['', 'Scope:                   explicit initial prompt supplied by Switchyard on stdin',
+              'Estimation:              %s (%d characters per token), not provider-tokenizer accurate' % (e['method'], e['characters_per_token']),
+              'Actual provider usage:   separately reported (switchyard work usage)',
+              'Repository tool context: not observable',
+              'Not observed:            provider instructions and caching, tool output, subagent/agent-thread context, repair turns',
+              'Estimated cost:          not calculated']
+    return '\n'.join(line.rstrip() for line in lines)
+
+
 def _costs_text(records, recorded, summary):
     """Estimated list-price cost of reported usage only; every limitation stays visible, nothing is a billed total."""
     if not records:
@@ -813,6 +907,17 @@ def _work_command(args):
                 return 2
             print(json.dumps(result, ensure_ascii=True, indent=2, sort_keys=True) if args.json else
                   _savings_text(result, args.source_details, args.invocations))
+            return 0
+        if args.action == 'prompt-estimate':
+            from .prompt_estimate import report
+            try:
+                result = report(args.work_root, run=args.run, state=args.state, agent=args.agent, provider=args.provider,
+                                model=args.model, invocation=args.invocation)
+            except ValueError as exc:
+                print('switchyard: '+_safe_display(str(exc), 512), file=sys.stderr)
+                return 2
+            print(json.dumps(result, ensure_ascii=True, indent=2, sort_keys=True) if args.json else
+                  _prompt_estimate_text(result, args.summary))
             return 0
         if args.action == 'debug-bundle':
             from .bundle import create_bundle

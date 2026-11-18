@@ -16,6 +16,34 @@
   record schemas such as the trace and diagnostic `schema_version`. Each changes only when its own format changes,
   never because the package version changed.
 
+## 2.10.0
+
+### Added: prompt composition estimation (ECONOMICS-002, #2)
+
+`switchyard work prompt-estimate WORK [--json] [--summary] [--run|--state|--agent|--provider|--model|--invocation]` and
+`switchyard.prompt_estimate.report()` show what each provider invocation's Switchyard-supplied initial prompt is made
+of. See `docs/design/prompt-composition.md`.
+
+- **One render, measured.** `provider_stages.render_prompt()` returns the exact stdin bytes and their composition from
+  the same render. `render_invocation()` output is byte-identical to 2.9.0. A measurement failure never changes the
+  prompt.
+- **Exact bytes first.** UTF-8 bytes and characters per code-defined category: request, MicroSpec, other artifacts,
+  QA feedback and evidence, handoff, sources, diagnostics, output contract, runtime instructions, serialization
+  overhead. Every byte is counted once. Classification uses artifact metadata only, never content.
+- **Heuristic tokens.** `heuristic_chars_per_token_v1` gives `ceil(chars/4)`, split exactly across components. It is
+  not provider-tokenizer accurate and is never usage, cost or billing.
+- **Transport metadata kept separate.** The native output-schema size and the Codex image attachment count and bytes
+  are recorded beside the prompt and never added to it.
+- **Unobserved context listed.** Provider-internal context, repository tool context, tool output, subagent and
+  agent-thread context, repair turns and caching are listed as unobserved.
+- **Immutable record.** `observability/prompt-estimates/<invocation>.json` (schema 1, ≤ 16 KiB) holds only numbers,
+  categories and identifiers. Capture statuses: `submitted_or_launched`, `prepared_but_not_launched`,
+  `capture_unavailable`, `not_applicable`. After a crash, a `not_captured` marker is backfilled and nothing is
+  re-rendered. Publication is failure-isolated.
+- **Read-only report (schema 1).** Totals are repeated submissions, not unique information. Byte changes are shown
+  between successive invocations of a state. Legacy works show `historical_prompt_composition_not_captured`.
+- No work, usage, economics, trace or diagnostic schema changed, and the debug bundle is unchanged.
+
 ## 2.9.0
 
 ### Added: continuity savings (ECONOMICS-006, #2)

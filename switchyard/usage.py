@@ -5,8 +5,8 @@ diagnostics writer's lifecycle (after the authoritative records, failure-isolate
 
 Sources: `provider_reported` (the adapter's normalized provider usage, see provider_stages.claude_usage /
 codex_usage), `unavailable` (no trustworthy usage: not reported, not launched, killed, invalid, or not captured), and
-`not_applicable` (command verifiers consume no model tokens). `estimated` is reserved for ECONOMICS-002 and never
-written. Counts are nullable integers: null means unknown and is never turned into zero. Provider token categories
+`not_applicable` (command verifiers consume no model tokens). `estimated` is reserved and never written (ECONOMICS-002
+prompt estimates are separate records, switchyard.prompt_estimate). Counts are nullable integers: null means unknown and is never turned into zero. Provider token categories
 are not additive across providers (Claude input excludes cache tokens; Codex input includes cache reads), so totals
 are kept per category and the derived "input including cache" is computed per record from its own semantics.
 
@@ -20,7 +20,7 @@ from pathlib import Path
 from .trace import _publish  # Bound at import: the usage store's publication fails independently of the trace's.
 
 SCHEMA_VERSION = 1
-SOURCES = ('provider_reported', 'estimated', 'unavailable', 'not_applicable')  # 'estimated': reserved (ECONOMICS-002).
+SOURCES = ('provider_reported', 'estimated', 'unavailable', 'not_applicable')  # 'estimated': reserved, never written.
 CATEGORIES = ('input', 'output', 'cache_read', 'cache_write')
 MAX_RECORD = 16384
 DIMENSIONS = ('run', 'state', 'agent', 'provider', 'model', 'invocation')
