@@ -16,6 +16,23 @@
   record schemas such as the trace and diagnostic `schema_version`. Each changes only when its own format changes,
   never because the package version changed.
 
+## 2.10.1
+
+### Fixed: regression baseline stabilization (PROVIDER-RELIABILITY-000, #10)
+
+Test-only corrections; no production code, timeout policy, budget or schema changed.
+
+- **Codex repair baseline.** `test_codex_repair`'s fake Codex CLI ran as `python -c … -- <prompt>`. On hosts with an
+  endpoint security agent, an interpreter whose argv holds `--` followed by an argument of 887 bytes or more is
+  SIGKILLed before it runs, so the 4096-NUL subtest (a 24,902-byte prompt) read as `error`. The fake is now a POSIX
+  shell executable that records its exact argv, and the tests compare it byte for byte with the expected flags and
+  prompt, including in the repair flow. An abnormal fake exit is reported as such.
+- **Recovery timeouts.** The first exec of a freshly written fake provider could be delayed by host scanning (0.2 s
+  idle, up to 1.9 s under exec-heavy load), inside the 1 s and 2 s provider timeouts under test. SPECIFY then timed
+  out, or IMPLEMENT was killed before its partial work and the resumed run was misrouted to VERIFY. `RecoveryTests`
+  now executes each final fake once before the timed run, and the state-budget test asserts that the interrupted
+  provider reached its partial work.
+
 ## 2.10.0
 
 ### Added: prompt composition estimation (ECONOMICS-002, #2)

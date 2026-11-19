@@ -60,6 +60,7 @@ class RecoveryTests(unittest.TestCase):
         source.write_text('finished')
 '''
         script=script.replace('outcome=plan.get',mutation+'outcome=plan.get')
+        script=script.replace('argv=sys.argv[1:]',"if os.environ.get('RECOVERY_WARM_UP')=='1': raise SystemExit(0)\nargv=sys.argv[1:]",1)
         for name in ('claude','codex'):
             exe=self.root/name;exe.write_text('#!'+sys.executable+'\n'+script);exe.chmod(0o755)
         self.config=ProviderRuntimeConfig(str(self.target),str(self.root/'claude'),str(self.root/'codex'),
@@ -68,7 +69,15 @@ class RecoveryTests(unittest.TestCase):
     def git(self,*args):return subprocess.check_output(['git',*args],cwd=self.target,stderr=subprocess.DEVNULL).decode().strip()
     def save_config(self):
         text=json.dumps(self.data);self.configfile.write_text(text);return text
-    def start(self):return execute_recoverable_v2_work(self.text,'feature','Human task',self.work,self.config,isolation=False)
+    def start(self):
+        # A freshly written executable's first exec can be delayed by host security scanning (measured up to 1.9 s
+        # under exec-heavy load), inside the provider timeout under test. One prior exec of each final fake keeps that
+        # unrelated cost out of the timed window; it exits before reading input or writing the call log. Inline, as
+        # other fixtures borrow this method.
+        for name in ('claude','codex'):
+            subprocess.run([str(self.root/name)],env={**os.environ,'RECOVERY_WARM_UP':'1'},stdin=subprocess.DEVNULL,
+                           stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,check=True,timeout=60)
+        return execute_recoverable_v2_work(self.text,'feature','Human task',self.work,self.config,isolation=False)
     def interrupt(self):
         with self.assertRaises(ExecutionError):self.start()
         self.assertEqual(recovery_status(self.work)['terminal'],'INTERRUPTED')
@@ -228,6 +237,7 @@ class RecoveryTests(unittest.TestCase):
         self.data['flows']['feature']['states']['VERIFY']['on']['pass']='IMPLEMENT'
         del self.data['flows']['feature']['states']['READY_FOR_MANUAL_QA']  # This loop no longer reaches QA.
         self.text=self.save_config();self.interrupt()
+        self.assertEqual(self.file.read_text(),'partial')  # The timeout stopped IMPLEMENT after its partial work.
         self.assertEqual(self.resume().result.terminal_state,'NEEDS_HUMAN')
         exceeded=[e for e in read_events(self.work/'events.jsonl') if e.kind=='budget_exceeded']
         self.assertEqual([(e.metric.startswith('invocation_scope:'),e.observed,e.limit) for e in exceeded],[(True,1,1)])
